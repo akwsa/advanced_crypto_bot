@@ -505,14 +505,22 @@ class AdvancedCryptoBot:
         elapsed = time.time() - start_time
         logger.info(f"⏱️ Thread cleanup took {elapsed:.1f}s")
         
-        # Step 5: Save final state
+        # Step 5: Stop heavy executor used by hot-path DB writes
+        try:
+            if hasattr(self, '_heavy_executor'):
+                self._heavy_executor.shutdown(wait=False, cancel_futures=True)
+                logger.info("🧵 Heavy DB executor stopped")
+        except Exception as e:
+            logger.warning(f"⚠️ Error stopping heavy DB executor: {e}")
+
+        # Step 6: Save final state
         try:
             if hasattr(self, 'db'):
                 logger.info("💾 Database connection will be closed automatically")
         except Exception as e:
             logger.warning(f"⚠️ Error during final save: {e}")
-        
-        # Step 6: Final message
+
+        # Step 7: Final message
         total_elapsed = time.time() - start_time
         logger.info(f"✅ Bot shutdown complete ({total_elapsed:.1f}s)")
         logger.info("👋 Goodbye!")
@@ -1838,6 +1846,17 @@ _Default: pippinidr, bridr, stoidr, drxidr_
         task.add_done_callback(self.background_tasks.discard)
         return task
 
+    async def _save_price_history_background(self, pair, ohlcv):
+        """Persist price history in the heavy executor so price ticks stay responsive."""
+        try:
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(
+                self._heavy_executor,
+                lambda: self.db.save_price(pair, ohlcv),
+            )
+        except Exception as e:
+            logger.error(f"❌ Failed to save price history for {pair}: {e}")
+
     async def _send_initial_signal_background(self, pair, update, context):
         """
         🚀 BACKGROUND TASK: Send initial signal (tidak blocking command response)
@@ -2206,14 +2225,13 @@ _Default: pippinidr, bridr, stoidr, drxidr_
         await self._send_message(update, context, f"🔄 Fetching price for {pair_escaped}...")
 
         try:
-            # ALWAYS fetch fresh price from API first
-            from api.indodax_api import IndodaxAPI
-            indodax = IndodaxAPI()
-            ticker = indodax.get_ticker(pair)
+            # ALWAYS fetch fresh price from API first without blocking the event loop
+            ticker = await self.indodax.get_ticker_async(pair)
             
             if ticker:
                 change_pct = ticker.get('change_percent', 0)
                 change_sign = '+' if change_pct >= 0 else ''
+                redis_status = "🔴 Dict" if not redis_price_cache.is_redis_available() else "🟢 Redis"
 
                 text = f"""
 💰 **{pair_escaped} - Current Price**
@@ -2225,8 +2243,8 @@ _Default: pippinidr, bridr, stoidr, drxidr_
 🔴 Ask: `{Utils.format_price(ticker['ask'])}` IDR
 
 ⏰ Updated: {datetime.now().strftime('%H:%M:%S')}
+💾 Cache: {redis_status}
                 """
-                await self._send_message(update, context, text, parse_mode='Markdown')
                 
                 # Update cache
                 self.price_data[pair] = {
@@ -2241,10 +2259,6 @@ _Default: pippinidr, bridr, stoidr, drxidr_
                     redis_price_cache.set_price(pair, ticker['last'])
                 except Exception as e:
                     logger.debug(f"Redis cache write failed: {e}")
-
-                # Show Redis status
-                redis_status = "🔴 Dict" if not redis_price_cache.is_redis_available() else "🟢 Redis"
-                text += f"\n💾 Cache: {redis_status}"
 
                 await self._send_message(update, context, text, parse_mode='Markdown')
             else:
@@ -8308,19 +8322,20 @@ Contoh: <code>/signal BTCIDR</code>
         """Process price update from WebSocket (common logic)"""
         try:
             current_price = price_data['last']
-            
-            # Update historical data for ML
-            self._update_historical_data(pair, price_data)
-
-            # Save to database
-            self.db.save_price(pair, {
+            ohlcv = {
                 'timestamp': price_data['timestamp'],
                 'open': current_price,
                 'high': current_price,
                 'low': current_price,
                 'close': current_price,
                 'volume': price_data.get('volume', 0)
-            })
+            }
+            
+            # Update historical data for ML
+            self._update_historical_data(pair, price_data)
+
+            # Save to database in background so hot price ticks do not block the event loop
+            self._create_background_task(self._save_price_history_background(pair, ohlcv))
 
             # Check SL/TP levels for notifications
             self._create_background_task(self.price_monitor.check_price_levels(pair, current_price))
