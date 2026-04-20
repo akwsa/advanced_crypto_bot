@@ -162,8 +162,8 @@ class AdvancedCryptoBot:
         logger.info("✅ Redis State Manager initialized")
 
         # Separate executor for heavy DB operations (avoid conflict with Telegram's event loop)
-        self._heavy_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="HeavyDB")
-        logger.info("✅ Heavy DB executor initialized")
+        self._heavy_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="HeavyDB")
+        logger.info("✅ Heavy DB executor initialized (upgraded to 4 workers)")
 
         # Telegram setup with increased timeouts for unreliable networks
         self.app = Application.builder().token(Config.TELEGRAM_BOT_TOKEN) \
@@ -536,7 +536,7 @@ class AdvancedCryptoBot:
             import logging
             thread_logger = logging.getLogger('crypto_bot')
             
-            sync_interval = 60  # Sync every 60 seconds
+            sync_interval = 120  # Sync every 120 seconds (upgraded from 60)
             
             while True:
                 time.sleep(sync_interval)
@@ -636,7 +636,7 @@ class AdvancedCryptoBot:
         # Task 1: Market scanner (every 15 minutes - reduced from 5 min to avoid duplicates)
         scheduler.add_task(
             name="market_scan",
-            interval_seconds=900,  # 15 minutes (was 5 min)
+            interval_seconds=600,  # 10 minutes (upgraded from 15 min)
             func=self._scheduled_market_scan,
             description="Scan watched pairs for strong signals"
         )
@@ -844,7 +844,7 @@ class AdvancedCryptoBot:
 
                 for pair in Config.WATCH_PAIRS:
                     # Load more data for better training (was limit=1000)
-                    df = self.db.get_price_history(pair, limit=5000)
+                    df = self.db.get_price_history(pair, limit=2000)
                     if not df.empty and len(df) >= 100:
                         data_frames.append(df)
                         pairs_with_data.append(f"• {pair}: {len(df)} candles")
@@ -1005,7 +1005,7 @@ class AdvancedCryptoBot:
                 pairs_with_data = []
 
                 for pair in Config.WATCH_PAIRS:
-                    df = self.db.get_price_history(pair, limit=5000)
+                    df = self.db.get_price_history(pair, limit=2000)
                     if not df.empty and len(df) >= 100:
                         data_frames.append(df)
                         pairs_with_data.append(f"• {pair}: {len(df)} candles")
@@ -2689,20 +2689,32 @@ _Default: pippinidr, bridr, stoidr, drxidr_
         # Run signal generation in background thread using executor
         import asyncio
         import concurrent.futures
+        from concurrent.futures import ThreadPoolExecutor, as_completed
         
-        def _generate_signals_in_background():
-            """Generate signals in background thread"""
+        def _generate_single_signal(pair):
+            """Generate signal for single pair (runs in thread)"""
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             try:
-                buy_signals = []
-                sell_signals = []
-                hold_signals = []
+                signal = loop.run_until_complete(self._generate_signal_for_pair(pair))
+                return pair, signal
+            finally:
+                loop.close()
+        
+        def _generate_signals_in_background():
+            """Generate signals in background thread with parallel processing"""
+            buy_signals = []
+            sell_signals = []
+            hold_signals = []
+            
+            # Use ThreadPoolExecutor for parallel signal generation (max 4 workers)
+            with ThreadPoolExecutor(max_workers=4) as executor:
+                futures = {executor.submit(_generate_single_signal, pair): pair for pair in watched_pairs}
                 
-                for pair in watched_pairs:
+                for future in as_completed(futures):
+                    pair = futures[future]
                     try:
-                        # Run async signal generation in new loop
-                        signal = loop.run_until_complete(self._generate_signal_for_pair(pair))
+                        pair_result, signal = future.result()
                         
                         if signal:
                             rec = signal['recommendation']
@@ -2719,10 +2731,8 @@ _Default: pippinidr, bridr, stoidr, drxidr_
                                 hold_signals.append((pair, price, rec, confidence, 'HOLD'))
                     except Exception as e:
                         logger.debug(f"Signal error for {pair}: {e}")
-                
-                return buy_signals, sell_signals, hold_signals
-            finally:
-                loop.close()
+            
+            return buy_signals, sell_signals, hold_signals
         
         # Run in executor to avoid blocking
         loop = asyncio.get_event_loop()
@@ -2787,26 +2797,33 @@ _Default: pippinidr, bridr, stoidr, drxidr_
         
         await self._send_message(update, context, f"🔄 Scanning {len(watched_pairs)} pairs for BUY signals...\n\n⏳ Please wait...")
         
-        # Run in background
         import asyncio
-        def _scan_buy():
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        
+        def _generate_single_signal(pair):
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             try:
-                buy_results = []
-                for pair in watched_pairs:
+                signal = loop.run_until_complete(self._generate_signal_for_pair(pair))
+                return pair, signal
+            finally:
+                loop.close()
+        
+        def _scan_buy_parallel():
+            buy_results = []
+            with ThreadPoolExecutor(max_workers=4) as executor:
+                futures = {executor.submit(_generate_single_signal, pair): pair for pair in watched_pairs}
+                for future in as_completed(futures):
                     try:
-                        signal = loop.run_until_complete(self._generate_signal_for_pair(pair))
+                        pair_result, signal = future.result()
                         if signal and signal.get('recommendation') in ['BUY', 'STRONG_BUY']:
                             buy_results.append(signal)
                     except:
                         pass
-                return buy_results
-            finally:
-                loop.close()
+            return buy_results
         
         loop = asyncio.get_event_loop()
-        buy_signals = await loop.run_in_executor(None, _scan_buy)
+        buy_signals = await loop.run_in_executor(None, _scan_buy_parallel)
         
         if not buy_signals:
             await self._send_message(update, context, f"⚪ No BUY signals found in {len(watched_pairs)} pairs.")
@@ -2839,24 +2856,32 @@ _Default: pippinidr, bridr, stoidr, drxidr_
         await self._send_message(update, context, f"🔄 Scanning {len(watched_pairs)} pairs for SELL signals...\n\n⏳ Please wait...")
         
         import asyncio
-        def _scan_sell():
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        
+        def _generate_single_signal(pair):
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             try:
-                sell_results = []
-                for pair in watched_pairs:
+                signal = loop.run_until_complete(self._generate_signal_for_pair(pair))
+                return pair, signal
+            finally:
+                loop.close()
+        
+        def _scan_sell_parallel():
+            sell_results = []
+            with ThreadPoolExecutor(max_workers=4) as executor:
+                futures = {executor.submit(_generate_single_signal, pair): pair for pair in watched_pairs}
+                for future in as_completed(futures):
                     try:
-                        signal = loop.run_until_complete(self._generate_signal_for_pair(pair))
+                        pair_result, signal = future.result()
                         if signal and signal.get('recommendation') in ['SELL', 'STRONG_SELL']:
                             sell_results.append(signal)
                     except:
                         pass
-                return sell_results
-            finally:
-                loop.close()
+            return sell_results
         
         loop = asyncio.get_event_loop()
-        sell_signals = await loop.run_in_executor(None, _scan_sell)
+        sell_signals = await loop.run_in_executor(None, _scan_sell_parallel)
         
         if not sell_signals:
             await self._send_message(update, context, f"⚪ No SELL signals found in {len(watched_pairs)} pairs.")
@@ -2889,24 +2914,32 @@ _Default: pippinidr, bridr, stoidr, drxidr_
         await self._send_message(update, context, f"🔄 Scanning {len(watched_pairs)} pairs for HOLD signals...\n\n⏳ Please wait...")
         
         import asyncio
-        def _scan_hold():
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        
+        def _generate_single_signal(pair):
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             try:
-                hold_results = []
-                for pair in watched_pairs:
+                signal = loop.run_until_complete(self._generate_signal_for_pair(pair))
+                return pair, signal
+            finally:
+                loop.close()
+        
+        def _scan_hold_parallel():
+            hold_results = []
+            with ThreadPoolExecutor(max_workers=4) as executor:
+                futures = {executor.submit(_generate_single_signal, pair): pair for pair in watched_pairs}
+                for future in as_completed(futures):
                     try:
-                        signal = loop.run_until_complete(self._generate_signal_for_pair(pair))
+                        pair_result, signal = future.result()
                         if signal and signal.get('recommendation') == 'HOLD':
                             hold_results.append(signal)
                     except:
                         pass
-                return hold_results
-            finally:
-                loop.close()
+            return hold_results
         
         loop = asyncio.get_event_loop()
-        hold_signals = await loop.run_in_executor(None, _scan_hold)
+        hold_signals = await loop.run_in_executor(None, _scan_hold_parallel)
         
         if not hold_signals:
             await self._send_message(update, context, f"⚪ No HOLD signals found in {len(watched_pairs)} pairs.")
@@ -2939,15 +2972,25 @@ _Default: pippinidr, bridr, stoidr, drxidr_
         await self._send_message(update, context, f"🔄 Scanning {len(watched_pairs)} pairs for BUY/SELL signals...\n\n⏳ Please wait...")
         
         import asyncio
-        def _scan_buysell():
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        
+        def _generate_single_signal(pair):
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             try:
-                buy_results = []
-                sell_results = []
-                for pair in watched_pairs:
+                signal = loop.run_until_complete(self._generate_signal_for_pair(pair))
+                return pair, signal
+            finally:
+                loop.close()
+        
+        def _scan_buysell_parallel():
+            buy_results = []
+            sell_results = []
+            with ThreadPoolExecutor(max_workers=4) as executor:
+                futures = {executor.submit(_generate_single_signal, pair): pair for pair in watched_pairs}
+                for future in as_completed(futures):
                     try:
-                        signal = loop.run_until_complete(self._generate_signal_for_pair(pair))
+                        pair_result, signal = future.result()
                         if signal:
                             rec = signal.get('recommendation')
                             if rec in ['BUY', 'STRONG_BUY']:
@@ -2956,12 +2999,10 @@ _Default: pippinidr, bridr, stoidr, drxidr_
                                 sell_results.append(signal)
                     except:
                         pass
-                return buy_results, sell_results
-            finally:
-                loop.close()
+            return buy_results, sell_results
         
         loop = asyncio.get_event_loop()
-        buy_signals, sell_signals = await loop.run_in_executor(None, _scan_buysell)
+        buy_signals, sell_signals = await loop.run_in_executor(None, _scan_buysell_parallel)
         
         if not buy_signals and not sell_signals:
             result = f"⚪ No BUY/SELL signals found in {len(watched_pairs)} pairs. All are HOLD."
@@ -6366,7 +6407,7 @@ It uses its own analysis (RSI, MACD, Volume, MA, Bollinger).
                 pair = pair.strip()
                 if not pair:
                     continue
-                df = self.db.get_price_history(pair, limit=5000)
+                df = self.db.get_price_history(pair, limit=2000)
                 if df is not None and not df.empty:
                     data_frames.append(df)
                     pairs_with_data.append(f"• {pair}: {len(df)} candles")
@@ -6754,7 +6795,7 @@ It uses its own analysis (RSI, MACD, Volume, MA, Bollinger).
             start_date = end_date - timedelta(days=days)
             
             # Get price data
-            df = self.db.get_price_history(pair, limit=5000)
+            df = self.db.get_price_history(pair, limit=2000)
             
             if df is None or len(df) < 100:
                 await msg.edit_text(
@@ -6903,7 +6944,7 @@ It uses its own analysis (RSI, MACD, Volume, MA, Bollinger).
 
         try:
             # Get historical data
-            df = self.db.get_price_history(pair, limit=5000)
+            df = self.db.get_price_history(pair, limit=2000)
             
             if df is None or len(df) < 100:
                 await msg.edit_text(
