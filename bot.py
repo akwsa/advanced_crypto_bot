@@ -222,6 +222,7 @@ class AdvancedCryptoBot:
         self.background_tasks = set()
         self._signal_result_cache = {}
         self._signal_inflight_tasks = {}
+        self._signal_generation_semaphore = threading.BoundedSemaphore(value=4)
 
         # Trailing stop tracking: {trade_id: {'highest_price': float, 'trailing_stop': float}}
         self.trailing_stops: Dict[int, Dict] = {}
@@ -2814,12 +2815,13 @@ _Default: pippinidr, bridr, stoidr, drxidr_
             with ThreadPoolExecutor(max_workers=4) as executor:
                 futures = {executor.submit(_generate_single_signal, pair): pair for pair in watched_pairs}
                 for future in as_completed(futures):
+                    pair = futures[future]
                     try:
                         pair_result, signal = future.result()
                         if signal and signal.get('recommendation') in ['BUY', 'STRONG_BUY']:
                             buy_results.append(signal)
-                    except:
-                        pass
+                    except Exception as e:
+                        logger.debug(f"/signal_buy scan error for {pair}: {e}")
             return buy_results
         
         loop = asyncio.get_event_loop()
@@ -2872,12 +2874,13 @@ _Default: pippinidr, bridr, stoidr, drxidr_
             with ThreadPoolExecutor(max_workers=4) as executor:
                 futures = {executor.submit(_generate_single_signal, pair): pair for pair in watched_pairs}
                 for future in as_completed(futures):
+                    pair = futures[future]
                     try:
                         pair_result, signal = future.result()
                         if signal and signal.get('recommendation') in ['SELL', 'STRONG_SELL']:
                             sell_results.append(signal)
-                    except:
-                        pass
+                    except Exception as e:
+                        logger.debug(f"/signal_sell scan error for {pair}: {e}")
             return sell_results
         
         loop = asyncio.get_event_loop()
@@ -2930,12 +2933,13 @@ _Default: pippinidr, bridr, stoidr, drxidr_
             with ThreadPoolExecutor(max_workers=4) as executor:
                 futures = {executor.submit(_generate_single_signal, pair): pair for pair in watched_pairs}
                 for future in as_completed(futures):
+                    pair = futures[future]
                     try:
                         pair_result, signal = future.result()
                         if signal and signal.get('recommendation') == 'HOLD':
                             hold_results.append(signal)
-                    except:
-                        pass
+                    except Exception as e:
+                        logger.debug(f"/signal_hold scan error for {pair}: {e}")
             return hold_results
         
         loop = asyncio.get_event_loop()
@@ -2989,6 +2993,7 @@ _Default: pippinidr, bridr, stoidr, drxidr_
             with ThreadPoolExecutor(max_workers=4) as executor:
                 futures = {executor.submit(_generate_single_signal, pair): pair for pair in watched_pairs}
                 for future in as_completed(futures):
+                    pair = futures[future]
                     try:
                         pair_result, signal = future.result()
                         if signal:
@@ -2997,8 +3002,8 @@ _Default: pippinidr, bridr, stoidr, drxidr_
                                 buy_results.append(signal)
                             elif rec in ['SELL', 'STRONG_SELL']:
                                 sell_results.append(signal)
-                    except:
-                        pass
+                    except Exception as e:
+                        logger.debug(f"/signal_buysell scan error for {pair}: {e}")
             return buy_results, sell_results
         
         loop = asyncio.get_event_loop()
@@ -6722,6 +6727,20 @@ It uses its own analysis (RSI, MACD, Volume, MA, Bollinger).
                 parse_mode='Markdown'
             )
 
+    def _estimate_candle_limit_for_days(
+        self,
+        days: int,
+        interval_minutes: int = 15,
+        warmup_candles: int = 200,
+        hard_cap: int = 50000,
+    ) -> int:
+        """Estimate candle limit to avoid silently truncating long backtest periods."""
+        safe_days = max(1, int(days))
+        safe_interval = max(1, int(interval_minutes))
+        candles_per_day = (24 * 60) // safe_interval
+        required = (safe_days * candles_per_day) + max(0, int(warmup_candles))
+        return min(max(required, 500), hard_cap)
+
     async def backtest_v3_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """
         PRO Backtest using ML Model V3
@@ -6793,9 +6812,10 @@ It uses its own analysis (RSI, MACD, Volume, MA, Bollinger).
             from datetime import datetime, timedelta
             end_date = datetime.now()
             start_date = end_date - timedelta(days=days)
+            candle_limit = self._estimate_candle_limit_for_days(days)
             
             # Get price data
-            df = self.db.get_price_history(pair, limit=2000)
+            df = self.db.get_price_history(pair, limit=candle_limit)
             
             if df is None or len(df) < 100:
                 await msg.edit_text(
@@ -7175,6 +7195,9 @@ Max recommended: 30%
             if not self.ml_model_v3:
                 await msg.edit_text("❌ ML V3 not available", parse_mode='Markdown')
                 return
+            from datetime import datetime, timedelta
+            start_date = datetime.now() - timedelta(days=days)
+            candle_limit = self._estimate_candle_limit_for_days(days)
 
 # Get pairs from database
             pairs_to_check = set()
@@ -7202,7 +7225,9 @@ Max recommended: 30%
             for pair in list(pairs_to_check)[:10]:  # Max 10 pairs
                 if not pair.endswith('idr'):
                     continue
-                df = self.db.get_price_history(pair, limit=2000)
+                df = self.db.get_price_history(pair, limit=candle_limit)
+                if df is not None and 'timestamp' in df.columns:
+                    df = df[df['timestamp'] >= start_date]
                 if df is None or len(df) < 100:
                     continue
                 
@@ -7878,7 +7903,21 @@ Contoh: <code>/signal BTCIDR</code>
             return False
 
     async def _generate_signal_for_pair(self, pair):
-        return await generate_signal_for_pair(self, pair)
+        # Guard concurrent signal generation across /signals commands and background scans.
+        start_wait = time.time()
+        acquired = False
+        while not acquired:
+            acquired = self._signal_generation_semaphore.acquire(blocking=False)
+            if acquired:
+                break
+            if time.time() - start_wait >= 60:
+                logger.warning(f"⏱️ Signal generation semaphore timeout for {pair}")
+                return None
+            await asyncio.sleep(0.05)
+        try:
+            return await generate_signal_for_pair(self, pair)
+        finally:
+            self._signal_generation_semaphore.release()
     
     def _format_signal_message(self, signal):
         return format_signal_message(signal)
