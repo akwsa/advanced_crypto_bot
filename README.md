@@ -2,6 +2,11 @@
 
 Advanced crypto trading bot for Indodax with Telegram control, technical analysis, machine-learning-assisted signals, auto-trading workflows, and layered risk checks.
 
+[![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/)
+[![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20WSL%20%7C%20Docker-0A7EA4)](./docker-compose.yml)
+[![Version](https://img.shields.io/github/v/tag/akwsa/advanced_crypto_bot?label=version)](https://github.com/akwsa/advanced_crypto_bot/tags)
+[![Checks](https://img.shields.io/github/actions/workflow/status/akwsa/advanced_crypto_bot/python-check.yml?branch=main&label=checks)](https://github.com/akwsa/advanced_crypto_bot/actions/workflows/python-check.yml)
+
 ## Highlights
 
 - Telegram bot interface for monitoring, signal lookup, watchlists, and trading commands
@@ -77,12 +82,19 @@ python3 bot.py
 - `PANDUAN_SIGNAL.md`: signal usage guide
 - `DEPLOY_BIZNET.md`: deployment notes
 - `Documents/README.md`: index of deeper technical and historical docs
+- `RELEASE_NOTES_v0.1.0.md`: initial release summary for GitHub releases
 
 ## Notes
 
 - This repository includes both runtime logic and a large amount of project documentation for fixes, investigations, and deployment history.
 - Local runtime artifacts such as databases, logs, and environment secrets are ignored from Git.
 - Real trading is high risk. Dry-run mode should be used first before enabling live execution.
+
+## GitHub Workflow
+
+- `main` is the default branch for active development
+- `.github/workflows/python-check.yml` runs a lightweight syntax check on pushes and pull requests
+- `.github/ISSUE_TEMPLATE/` contains starter templates for bugs and feature requests
 
 ## Repository Status
 
