@@ -9,6 +9,55 @@ from analysis.technical_analysis import TechnicalAnalysis
 
 logger = logging.getLogger("crypto_bot")
 
+ACTIONABLE_SIGNALS = {"BUY", "STRONG_BUY", "SELL", "STRONG_SELL"}
+BUY_SIGNALS = {"BUY", "STRONG_BUY"}
+SELL_SIGNALS = {"SELL", "STRONG_SELL"}
+
+
+def _pct_distance(reference_price, level):
+    """Return percentage distance from price to a level."""
+    if reference_price <= 0 or level <= 0:
+        return None
+    return abs(level - reference_price) / reference_price * 100
+
+
+def _compute_directional_sr_metrics(recommendation, price, support_1, resistance_1):
+    """Compute support/resistance metrics using the active trade direction."""
+    distance_to_support_pct = _pct_distance(price, support_1)
+    distance_to_resistance_pct = _pct_distance(price, resistance_1)
+    stop_distance_pct = None
+    risk_reward_ratio = 0.0
+
+    if recommendation in BUY_SIGNALS and support_1 > 0 and resistance_1 > 0:
+        risk = price - support_1
+        reward = resistance_1 - price
+        stop_distance_pct = distance_to_support_pct
+        if risk > 0 and reward > 0:
+            risk_reward_ratio = reward / risk
+    elif recommendation in SELL_SIGNALS and support_1 > 0 and resistance_1 > 0:
+        risk = resistance_1 - price
+        reward = price - support_1
+        stop_distance_pct = distance_to_resistance_pct
+        if risk > 0 and reward > 0:
+            risk_reward_ratio = reward / risk
+
+    return {
+        "distance_to_support_pct": distance_to_support_pct,
+        "distance_to_resistance_pct": distance_to_resistance_pct,
+        "stop_distance_pct": stop_distance_pct,
+        "risk_reward_ratio": risk_reward_ratio,
+    }
+
+
+def _apply_directional_confidence_adjustment(recommendation, confidence, raw_adjustment):
+    """Apply enhancement confidence in the same direction as the active signal."""
+    if raw_adjustment == 0 or recommendation not in ACTIONABLE_SIGNALS:
+        return confidence, 0.0
+
+    applied_adjustment = raw_adjustment if recommendation in BUY_SIGNALS else -raw_adjustment
+    adjusted_confidence = max(0.0, min(1.0, confidence + applied_adjustment))
+    return adjusted_confidence, applied_adjustment
+
 
 async def generate_signal_for_pair(bot, pair):
     """Generate comprehensive trading signal using bot dependencies."""
@@ -249,17 +298,30 @@ async def generate_signal_for_pair(bot, pair):
         signal.update(sr_levels)
         support_1 = sr_levels.get("support_1", 0)
         resistance_1 = sr_levels.get("resistance_1", 0)
-        risk_reward = sr_levels.get("risk_reward_ratio", 0)
-        if support_1 > 0 and real_time_price > 0:
-            distance_to_support_pct = abs(real_time_price - support_1) / real_time_price * 100
-        if resistance_1 > 0 and real_time_price > 0:
-            distance_to_resistance_pct = abs(resistance_1 - real_time_price) / real_time_price * 100
+        raw_risk_reward = sr_levels.get("risk_reward_ratio", 0)
+        directional_sr = _compute_directional_sr_metrics(
+            signal["recommendation"],
+            real_time_price,
+            support_1,
+            resistance_1,
+        )
+        distance_to_support_pct = directional_sr["distance_to_support_pct"]
+        distance_to_resistance_pct = directional_sr["distance_to_resistance_pct"]
+        signal["sr_raw_risk_reward_ratio"] = raw_risk_reward
+        signal["sr_stop_distance_pct"] = directional_sr["stop_distance_pct"]
+        signal["distance_to_support_pct"] = distance_to_support_pct or 0
+        signal["distance_to_resistance_pct"] = distance_to_resistance_pct or 0
+        if signal["recommendation"] in ACTIONABLE_SIGNALS:
+            risk_reward = directional_sr["risk_reward_ratio"]
+            signal["risk_reward_ratio"] = risk_reward
+        else:
+            risk_reward = raw_risk_reward
 
         logger.info(
             f"📊 [S/R] {pair}: S1={sr_levels.get('support_1', 0):,.0f} | "
             f"R1={sr_levels.get('resistance_1', 0):,.0f} | "
             f"Zone={sr_levels.get('price_zone', 'UNKNOWN')} | "
-            f"R/R={sr_levels.get('risk_reward_ratio', 0):.2f}"
+            f"R/R={risk_reward:.2f}"
         )
         logger.info(
             "🔎 [PIPELINE BASE] %s | final_pre_sr=%s | s1=%s | r1=%s | dist_s1=%s | dist_r1=%s | rr=%.2f",
@@ -292,44 +354,46 @@ async def generate_signal_for_pair(bot, pair):
             near_support_pct = float(os.getenv("SR_NEAR_SUPPORT_PCT", "2.0"))
             near_resistance_pct = float(os.getenv("SR_NEAR_RESISTANCE_PCT", "2.0"))
 
-            if recommendation in ["SELL", "STRONG_SELL"] and support_1 > 0:
-                sl_distance_pct = abs(real_time_price - support_1) / real_time_price * 100
-            elif recommendation in ["BUY", "STRONG_BUY"] and resistance_1 > 0:
-                sl_distance_pct = abs(resistance_1 - real_time_price) / real_time_price * 100
-            else:
-                sl_distance_pct = 999
+            if recommendation in ACTIONABLE_SIGNALS:
+                sl_distance_pct = signal.get("sr_stop_distance_pct")
+                if sl_distance_pct is None:
+                    sl_distance_pct = 999
 
-            reject_signal = False
-            reject_reason = ""
-            if recommendation in ["BUY", "STRONG_BUY"] and resistance_1 > 0:
-                if real_time_price >= resistance_1 * (1 - near_resistance_pct / 100):
-                    ml_conf = signal.get("ml_confidence", 0)
-                    if ml_conf > 0.70:
-                        logger.info(f"⚠️ [S/R VALIDATION] {pair}: BUY near resistance but high ML confidence ({ml_conf:.0%}) - allowing")
-                    else:
-                        reject_signal = True
-                        reject_reason = f"BUY signal rejected: Price at/near resistance (R1: {resistance_1:,.0f})"
-            elif recommendation in ["SELL", "STRONG_SELL"] and support_1 > 0:
-                if real_time_price <= support_1 * (1 + near_support_pct / 100):
-                    ml_conf = signal.get("ml_confidence", 0)
-                    if ml_conf > 0.70:
-                        logger.info(f"⚠️ [S/R VALIDATION] {pair}: SELL near support but high ML confidence ({ml_conf:.0%}) - allowing")
-                    else:
-                        reject_signal = True
-                        reject_reason = f"SELL signal rejected: Price at/near support (S1: {support_1:,.0f})"
+                reject_signal = False
+                reject_reason = ""
+                if recommendation in BUY_SIGNALS and resistance_1 > 0:
+                    if real_time_price >= resistance_1 * (1 - near_resistance_pct / 100):
+                        ml_conf = signal.get("ml_confidence", 0)
+                        if ml_conf > 0.70:
+                            logger.info(
+                                f"⚠️ [S/R VALIDATION] {pair}: BUY near resistance but high ML confidence ({ml_conf:.0%}) - allowing"
+                            )
+                        else:
+                            reject_signal = True
+                            reject_reason = f"BUY signal rejected: Price at/near resistance (R1: {resistance_1:,.0f})"
+                elif recommendation in SELL_SIGNALS and support_1 > 0:
+                    if real_time_price <= support_1 * (1 + near_support_pct / 100):
+                        ml_conf = signal.get("ml_confidence", 0)
+                        if ml_conf > 0.70:
+                            logger.info(
+                                f"⚠️ [S/R VALIDATION] {pair}: SELL near support but high ML confidence ({ml_conf:.0%}) - allowing"
+                            )
+                        else:
+                            reject_signal = True
+                            reject_reason = f"SELL signal rejected: Price at/near support (S1: {support_1:,.0f})"
 
-            if not reject_signal and risk_reward > 0 and risk_reward < rr_threshold:
-                reject_signal = True
-                reject_reason = f"Signal rejected: Risk/Reward ratio too low ({risk_reward:.2f} < {rr_threshold:.2f})"
-            if not reject_signal and sl_distance_pct < sl_min_pct:
-                reject_signal = True
-                reject_reason = f"Signal rejected: Stop Loss distance too small ({sl_distance_pct:.2f}% < {sl_min_pct:.1f}%)"
+                if not reject_signal and risk_reward > 0 and risk_reward < rr_threshold:
+                    reject_signal = True
+                    reject_reason = f"Signal rejected: Risk/Reward ratio too low ({risk_reward:.2f} < {rr_threshold:.2f})"
+                if not reject_signal and sl_distance_pct < sl_min_pct:
+                    reject_signal = True
+                    reject_reason = f"Signal rejected: Stop Loss distance too small ({sl_distance_pct:.2f}% < {sl_min_pct:.1f}%)"
 
-            if reject_signal:
-                logger.warning(f"🛡️ [S/R VALIDATION] {pair}: {recommendation} → HOLD | {reject_reason}")
-                signal["recommendation"] = "HOLD"
-                signal["reason"] = reject_reason
-                signal["sr_filtered"] = True
+                if reject_signal:
+                    logger.warning(f"🛡️ [S/R VALIDATION] {pair}: {recommendation} → HOLD | {reject_reason}")
+                    signal["recommendation"] = "HOLD"
+                    signal["reason"] = reject_reason
+                    signal["sr_filtered"] = True
     except Exception as e:
         logger.warning(f"⚠️ [S/R VALIDATION] Failed for {pair}: {e}")
 
@@ -376,13 +440,18 @@ async def generate_signal_for_pair(bot, pair):
             "volume": enhancement_result.get("volume", {}),
         }
 
-        confidence_adjustment = enhancement_result.get("final_confidence_adjustment", 0)
-        if confidence_adjustment != 0:
-            old_confidence = signal.get("ml_confidence", 0.5)
-            signal["ml_confidence"] = max(0.0, min(1.0, old_confidence + confidence_adjustment))
+        raw_confidence_adjustment = enhancement_result.get("final_confidence_adjustment", 0)
+        old_confidence = signal.get("ml_confidence", 0.5)
+        adjusted_confidence, applied_adjustment = _apply_directional_confidence_adjustment(
+            signal.get("recommendation", "HOLD"),
+            old_confidence,
+            raw_confidence_adjustment,
+        )
+        if applied_adjustment != 0:
+            signal["ml_confidence"] = adjusted_confidence
             logger.info(
                 f"📈 [ENHANCEMENT] {pair}: Confidence adjusted {old_confidence:.1%} → {signal['ml_confidence']:.1%} "
-                f"(adjustment: {confidence_adjustment:+.2f}, features: {enhancement_result.get('enabled_features', [])})"
+                f"(adjustment: {applied_adjustment:+.2f}, features: {enhancement_result.get('enabled_features', [])})"
             )
 
         if enhancement_result.get("should_override"):
