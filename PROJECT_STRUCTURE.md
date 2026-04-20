@@ -1,167 +1,113 @@
-# 📁 Advanced Crypto Trading Bot - Project Structure
+# Advanced Crypto Bot Project Structure
 
-## 🏗️ Directory Organization
+This document maps the repository as it exists today and is intended to be a quick orientation guide for contributors and operators.
 
-```
-advanced-crypto-bot/
-├── bot.py                          # Main entry point
-├── PROJECT_STRUCTURE.md            # This file
+## Repository Layout
+
+```text
+advanced_crypto_bot/
+├── README.md                     # GitHub-facing overview
+├── bot.py                        # Main application entry point
+├── PROJECT_STRUCTURE.md          # This file
+├── COMMAND_REFERENCE.md          # Command-oriented quick reference
+├── PANDUAN_SIGNAL.md             # Signal usage guide
+├── docker-compose.yml            # Container orchestration
+├── Dockerfile                    # Primary image build
+├── deploy_vps.sh                 # VPS deployment helper
+├── crypto-bot.service            # systemd service example
 │
-├── core/                           # Core system modules
-│   ├── __init__.py
-│   ├── config.py                   # Configuration & settings
-│   ├── database.py                 # SQLite database wrapper
-│   ├── logger.py                   # Logging system
-│   └── utils.py                    # Utility functions
+├── core/                         # Shared configuration, DB, utils, logging, enhancement engine
+├── api/                          # Exchange API integrations
+├── analysis/                     # Technical analysis and ML models
+├── autotrade/                    # Trading engine, risk, portfolio, monitoring
+├── autohunter/                   # Smart hunter integration and hunting logic
+├── scalper/                      # Scalper module and command handling
+├── signals/                      # Signal quality engine, queueing, persistence
+├── cache/                        # In-memory and Redis-backed cache/state
+├── workers/                      # Background workers and polling loop
+├── monitoring/                   # Monitoring-related assets
 │
-├── api/                            # External API integrations
-│   ├── __init__.py
-│   ├── indodax_api.py              # Indodax REST API wrapper
-│   └── websocket_handler.py        # WebSocket handler (disabled)
-│
-├── analysis/                       # Technical & ML analysis
-│   ├── __init__.py
-│   ├── technical_analysis.py       # TA indicators (RSI, MACD, etc)
-│   ├── ml_model.py                 # ML Model V1 (Random Forest)
-│   ├── ml_model_v2.py            # ML Model V2 (Gradient Boosting)
-│   ├── signal_analyzer.py        # Signal quality analyzer
-│   └── support_resistance.py     # S/R level detection
-│
-├── trading/                        # Trading & risk modules
-│   ├── __init__.py
-│   ├── trading_engine.py           # Signal generation & trading logic
-│   ├── risk_manager.py           # Risk management
-│   ├── portfolio.py              # Portfolio tracking
-│   ├── price_monitor.py          # Price monitoring & alerts
-│   ├── scalper_module.py         # Manual trading module (DRYRUN support)
-│   ├── smart_hunter_integration.py # Smart Hunter integration (DRYRUN support)
-│   ├── smart_profit_hunter.py    # Profit hunting logic (DRYRUN/REAL)\n│   └── ultra_hunter.py           # Ultra conservative hunter (DRYRUN/REAL) (DRYRUN support)
-│   └── ultra_hunter.py           # Ultra conservative hunter (DRYRUN support)
-│
-├── signals/                        # Signal processing
-│   ├── __init__.py
-│   ├── signal_db.py              # Signal database
-│   ├── signal_filter_v2.py       # Signal validation filter
-│   ├── signal_quality_engine.py  # Quality scoring engine
-│   └── signal_queue.py           # Signal queue & scheduler
-│
-├── cache/                          # Caching & state management
-│   ├── __init__.py
-│   ├── price_cache.py            # In-memory price cache
-│   ├── redis_price_cache.py      # Redis price cache
-│   ├── redis_state_manager.py    # Redis state management
-│   └── redis_task_queue.py       # Redis task queue
-│
-├── workers/                        # Background workers
-│   ├── __init__.py
-│   ├── async_worker.py           # Async task worker
-│   ├── price_poller.py           # Price polling worker
-│   └── worker.py                 # Background job worker
-│
-├── Documents/                      # Documentation
-│   ├── README.md                 # Documentation index
-│   ├── MASTER_DOCUMENTATION.md   # Main documentation
-│   └── [100+ .md, .txt files]    # Guides, fixes, analysis
-│
-├── data/                           # Data storage
-│   ├── trading.db                # Main database
-│   ├── signals.db                # Signal database
-│   └── ...
-│
-├── models/                         # ML model files
-│   └── *.pkl                     # Trained models
-│
-├── logs/                           # Log files
-│   └── *.log
-│
-    └── [historical files]
+├── Documents/                    # Historical docs, guides, audits, and fix notes
+├── deprecated.archived/          # Preserved legacy scripts and archived tooling
+├── data/                         # Runtime SQLite and generated data (gitignored)
+├── logs/                         # Runtime logs (gitignored)
+├── models/                       # Trained model artifacts (mostly gitignored)
+└── venv/                         # Local virtual environment (gitignored)
 ```
 
-## 📊 Module Categories
+## Package Roles
 
-### Core (core/)
-System-level modules that other modules depend on:
-- **config.py** - Centralized configuration
-- **database.py** - Database operations with connection pooling
-- **logger.py** - Structured logging
-- **utils.py** - Common utilities
+### `core/`
 
-### API Integration (api/)
-External exchange connectivity:
-- **indodax_api.py** - Indodax REST API with async support
-- **websocket_handler.py** - WebSocket (currently disabled)
+- `config.py`: central runtime configuration and environment-driven settings
+- `database.py`: SQLite database access
+- `logger.py`: application logging setup
+- `utils.py`: shared formatting and helper functions
+- `signal_enhancement_engine.py`: late-stage signal enhancement logic
 
-### Analysis (analysis/)
-Market analysis and ML prediction:
-- **technical_analysis.py** - TA indicators with safe calculations
-- **ml_model.py** & **ml_model_v2.py** - ML prediction models
-- **signal_analyzer.py** - Signal quality analysis
-- **support_resistance.py** - Auto S/R detection
+### `api/`
 
-### Trading (trading/)
-Trading execution and management:
-- **trading_engine.py** - Main trading logic with signal generation
-- **risk_manager.py** - Risk metrics and limits
-- **portfolio.py** - Position tracking
-- **scalper_module.py** - Manual trading interface
+- `indodax_api.py`: primary Indodax REST wrapper
 
-### Signals (signals/)
-Signal processing pipeline:
-- **signal_filter_v2.py** - Signal validation
-- **signal_quality_engine.py** - Confluence scoring
-- **signal_db.py** - Signal persistence
-- **signal_queue.py** - Async signal processing
+### `analysis/`
 
-### Cache (cache/)
-Caching layer for performance:
-- **price_cache.py** - Local price cache
-- **redis_*.py** - Redis-backed caching
+- `technical_analysis.py`: indicator calculations
+- `ml_model.py`, `ml_model_v2.py`, `ml_model_v3.py`: signal prediction models
+- `support_resistance.py`: S/R detection
+- `signal_analyzer.py`, `analyze_signals.py`: analysis helpers for command responses
 
-### Workers (workers/)
-Background task processing:
-- **price_poller.py** - Periodic price fetching
-- **async_worker.py** - Async task execution
-- **worker.py** - Background job processor
+### `autotrade/`
 
-## 🔧 Import Pattern
+- `trading_engine.py`: TA + ML merge into base signal decisions
+- `risk_manager.py`: position and loss-limit controls
+- `portfolio.py`: portfolio exposure tracking
+- `price_monitor.py`: SL/TP and price alert monitoring
 
-After reorganization, imports follow this pattern:
+### `autohunter/`
 
-```python
-# Core modules
-from core.config import Config
-from core.database import Database
-from core.utils import Utils
+- smart-hunter focused logic and integration used by the main bot
 
-# API
-from api.indodax_api import IndodaxAPI
+### `scalper/`
 
-# Analysis
-from analysis.technical_analysis import TechnicalAnalysis
-from analysis.ml_model_v2 import MLTradingModelV2
+- dedicated scalper commands and fast manual workflow helpers
 
-# Trading
-from trading.trading_engine import TradingEngine
-from trading.scalper_module import ScalperModule
+### `signals/`
 
-# Signals
-from signals.signal_quality_engine import SignalQualityEngine
+- `signal_quality_engine.py`: confluence scoring and quality rejection layer
+- `signal_filter_v2.py`: additional signal filtering logic
+- `signal_queue.py`: scheduling and queue support
+- `signal_db.py`: signal persistence
 
-# Cache
-from cache.redis_price_cache import price_cache
+### `cache/`
 
-# Workers
-from workers.price_poller import PricePoller
-```
+- local cache and Redis-backed cache/state managers
 
-## 📝 Notes
+### `workers/`
 
-- All modules have `__init__.py` for proper package structure
-- Old application files preserved in `old_app/` for reference
-- Documentation organized in `Documents/` with 100+ guides
-- Main entry point is `bot.py` in root directory
+- asynchronous background worker support
+- market polling loop used by the bot runtime
 
----
+## Runtime Flow
 
-**Last Updated:** April 2026  
-**Structure Version:** 2.0
+At a high level:
+
+1. `bot.py` boots shared services and Telegram handlers.
+2. `workers/price_poller.py` and runtime callbacks keep market data fresh.
+3. `analysis/` and `autotrade/trading_engine.py` build the base recommendation.
+4. `signals/signal_quality_engine.py`, support/resistance validation, and enhancement filters refine the output.
+5. `autotrade/price_monitor.py` and `autotrade/risk_manager.py` govern alerts and execution safety.
+
+## Documentation Notes
+
+- `Documents/` contains the deeper project history, fix logs, audits, and implementation notes.
+- The root docs should stay concise and GitHub-friendly.
+- Operational output such as databases, logs, and local secrets are intentionally excluded from Git.
+
+## Recommended Starting Points
+
+- Start with `README.md` for setup and overview.
+- Read `bot.py` if you need the full orchestration path.
+- Use `PROJECT_STRUCTURE.md` when mapping modules.
+- Use `Documents/README.md` when you need historical context or detailed guides.
+
+Last updated: April 2026
