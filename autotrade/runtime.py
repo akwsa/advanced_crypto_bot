@@ -207,10 +207,17 @@ async def check_trading_opportunity(bot, pair, signal=None):
         except Exception as e:
             logger.error(f"❌ Error fetching fresh price: {e}")
 
-        tp_data = bot.trading_engine.calculate_stop_loss_take_profit(current_price, "BUY")
+        indicators = signal.get('indicators', {})
+        atr_value = indicators.get('atr')
+        tp_data = bot.trading_engine.calculate_stop_loss_take_profit(current_price, "BUY", atr_value=atr_value)
         stop_loss = tp_data["stop_loss"]
         take_profit_1 = tp_data["take_profit_1"]
         take_profit_2 = tp_data["take_profit_2"]
+        
+        # Log R/R ratio for transparency
+        rr_ratio = tp_data.get('rr_ratio', 0)
+        method = tp_data.get('method', 'unknown')
+        logger.info(f"📊 SL/TP Method: {method}, R/R Ratio: {rr_ratio:.2f}")
 
         sr_data = await get_support_resistance_for_pair(bot, pair)
         if sr_data:

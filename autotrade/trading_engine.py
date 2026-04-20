@@ -307,50 +307,73 @@ class TradingEngine:
             logger.error(f"Error calculating position size for user {user_id}: {e}")
             return None, None
 
-    def calculate_stop_loss_take_profit(self, entry_price, trade_type):
-        """Calculate SL and TP levels with Partial Take Profit support.
+    def calculate_stop_loss_take_profit(self, entry_price, trade_type, atr_value=None):
+        """Calculate SL and TP levels with ATR-based and Partial Take Profit support.
 
         Args:
             entry_price: Entry price for the trade
             trade_type: 'BUY' or 'SELL'
+            atr_value: ATR value (optional). If provided, uses ATR-based SL/TP
 
         Returns:
-            dict with: stop_loss, take_profit_1, take_profit_2
+            dict with: stop_loss, take_profit_1, take_profit_2, rr_ratio, method
         """
-        # Validate inputs
         if not isinstance(entry_price, (int, float)) or entry_price <= 0:
             logger.error(f"Invalid entry_price: {entry_price}")
-            return {'stop_loss': None, 'take_profit_1': None, 'take_profit_2': None}
+            return {'stop_loss': None, 'take_profit_1': None, 'take_profit_2': None, 'rr_ratio': 0, 'method': 'none'}
 
         if trade_type not in ['BUY', 'SELL', 'STRONG_BUY', 'STRONG_SELL']:
             logger.error(f"Invalid trade_type: {trade_type}")
-            return {'stop_loss': None, 'take_profit_1': None, 'take_profit_2': None}
+            return {'stop_loss': None, 'take_profit_1': None, 'take_profit_2': None, 'rr_ratio': 0, 'method': 'none'}
 
         try:
-            # Normalize trade type
             is_buy = trade_type in ['BUY', 'STRONG_BUY']
-
-            if is_buy:
-                # Stop Loss
-                stop_loss = entry_price * (1 - Config.STOP_LOSS_PCT / 100)
-                # Take Profit 1 (partial at lower target)
-                take_profit_1 = entry_price * (1 + Config.PARTIAL_TAKE_PROFIT_1 / 100)
-                # Take Profit 2 (full at higher target)
-                take_profit_2 = entry_price * (1 + Config.PARTIAL_TAKE_PROFIT_2 / 100)
-            else:  # SELL
-                stop_loss = entry_price * (1 + Config.STOP_LOSS_PCT / 100)
-                take_profit_1 = entry_price * (1 - Config.PARTIAL_TAKE_PROFIT_1 / 100)
-                take_profit_2 = entry_price * (1 - Config.PARTIAL_TAKE_PROFIT_2 / 100)
+            
+            # Use ATR-based if available, otherwise fallback to fixed percentage
+            if atr_value and atr_value > 0:
+                atr_multiplier_sl = 2.0  # 2x ATR for stop loss
+                atr_multiplier_tp1 = 3.0  # 3x ATR for TP1
+                atr_multiplier_tp2 = 5.0  # 5x ATR for TP2
+                
+                if is_buy:
+                    stop_loss = entry_price - (atr_value * atr_multiplier_sl)
+                    take_profit_1 = entry_price + (atr_value * atr_multiplier_tp1)
+                    take_profit_2 = entry_price + (atr_value * atr_multiplier_tp2)
+                else:
+                    stop_loss = entry_price + (atr_value * atr_multiplier_sl)
+                    take_profit_1 = entry_price - (atr_value * atr_multiplier_tp1)
+                    take_profit_2 = entry_price - (atr_value * atr_multiplier_tp2)
+                
+                method = 'atr'
+                logger.info(f"📊 [{trade_type}] ATR-based SL/TP: SL={atr_multiplier_sl}xATR, TP1={atr_multiplier_tp1}xATR, TP2={atr_multiplier_tp2}xATR")
+            else:
+                if is_buy:
+                    stop_loss = entry_price * (1 - Config.STOP_LOSS_PCT / 100)
+                    take_profit_1 = entry_price * (1 + Config.PARTIAL_TAKE_PROFIT_1 / 100)
+                    take_profit_2 = entry_price * (1 + Config.PARTIAL_TAKE_PROFIT_2 / 100)
+                else:
+                    stop_loss = entry_price * (1 + Config.STOP_LOSS_PCT / 100)
+                    take_profit_1 = entry_price * (1 - Config.PARTIAL_TAKE_PROFIT_1 / 100)
+                    take_profit_2 = entry_price * (1 - Config.PARTIAL_TAKE_PROFIT_2 / 100)
+                
+                method = 'fixed'
+            
+            # Calculate R/R ratio for validation
+            risk = abs(entry_price - stop_loss)
+            reward_1 = abs(take_profit_1 - entry_price)
+            rr_ratio = reward_1 / risk if risk > 0 else 0
 
             return {
                 'stop_loss': stop_loss,
                 'take_profit_1': take_profit_1,
-                'take_profit_2': take_profit_2
+                'take_profit_2': take_profit_2,
+                'rr_ratio': rr_ratio,
+                'method': method
             }
 
         except Exception as e:
             logger.error(f"Error calculating SL/TP: {e}")
-            return {'stop_loss': None, 'take_profit_1': None, 'take_profit_2': None}
+            return {'stop_loss': None, 'take_profit_1': None, 'take_profit_2': None, 'rr_ratio': 0, 'method': 'none'}
     
     def check_multi_timeframe_trend(self, df):
         """Check trend direction using SMA alignment (simulating higher timeframe).
@@ -531,3 +554,54 @@ class TradingEngine:
             'UNKNOWN': 0.5  # Conservative when unknown
         }
         return multipliers.get(regime, 0.5)
+    
+    def calculate_kelly_position_size(self, balance, entry_price, win_rate, avg_win_pct, avg_loss_pct):
+        """Calculate Kelly Criterion position sizing.
+        
+        Formula: Kelly % = W - (1-W)/R
+        Where W = win rate, R = avg_win/avg_loss
+        
+        Args:
+            balance: Account balance
+            entry_price: Entry price
+            win_rate: Historical win rate (0.0 to 1.0)
+            avg_win_pct: Average win percentage (e.g., 0.05 for 5%)
+            avg_loss_pct: Average loss percentage (e.g., 0.02 for 2%)
+            
+        Returns:
+            tuple: (position_amount, position_value, kelly_pct, fractional_kelly)
+        """
+        if not balance or balance <= 0:
+            return 0, 0, 0, 0
+        if not win_rate or win_rate <= 0 or win_rate >= 1:
+            logger.warning(f"Invalid win_rate: {win_rate}, using default 0.5")
+            win_rate = 0.5
+        if not avg_win_pct or avg_win_pct <= 0:
+            avg_win_pct = 0.05
+        if not avg_loss_pct or avg_loss_pct <= 0:
+            avg_loss_pct = 0.02
+        
+        # Calculate Kelly
+        win_loss_ratio = avg_win_pct / avg_loss_pct if avg_loss_pct > 0 else 1
+        kelly_pct = win_rate - ((1 - win_rate) / win_loss_ratio)
+        
+        # Cap at reasonable levels (full Kelly is too aggressive)
+        kelly_pct = max(0, min(kelly_pct, 0.25))  # Max 25% of balance
+        
+        # Use fractional Kelly (half-Kelly for safety)
+        fractional_kelly = kelly_pct * 0.5
+        
+        # Calculate position value
+        position_value = balance * fractional_kelly
+        position_amount = position_value / entry_price if entry_price > 0 else 0
+        
+        # Apply max position limit
+        max_position = balance * Config.MAX_POSITION_SIZE
+        if position_value > max_position:
+            position_value = max_position
+            position_amount = position_value / entry_price if entry_price > 0 else 0
+        
+        logger.info(f"📊 Kelly: W={win_rate:.1%}, R={win_loss_ratio:.2f}, Kelly={kelly_pct:.1%}, "
+                   f"Fractional={fractional_kelly:.1%}, Position={position_value:,.0f} IDR")
+        
+        return position_amount, position_value, kelly_pct, fractional_kelly
