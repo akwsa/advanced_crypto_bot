@@ -1,0 +1,646 @@
+# 📖 Dokumentasi Algoritma Bot Crypto Trading
+# Advanced Crypto Bot - Indodax Exchange
+# ============================================================
+
+## 🔹 1. STRUKTUR MODUL UTAMA
+
+| Modul | File | Fungsi |
+|-------|------|--------|
+| **Core** | core/config.py | Konfigurasi global (API keys, trading params) |
+| | core/database.py | Database SQLite untuk simpan data |
+| | core/logger.py | Custom logging |
+| | core/utils.py | Utilities helpers |
+| **API** | api/indodax_api.py | Koneksi ke exchange Indodax |
+| **Analysis** | analysis/technical_analysis.py | Hitung indikator teknikal (RSI, MACD, BB, dll) |
+| | analysis/ml_model.py | ML model V1 |
+| | analysis/ml_model_v2.py | ML model V2 (improved) |
+| | analysis/signal_analyzer.py | Signal Quality Analyzer |
+| | analysis/support_resistance.py | Deteksi S/R levels |
+| **Autotrade** | autotrade/trading_engine.py | Generate sinyal trading |
+| | autotrade/risk_manager.py | Manage risk/SL/TP |
+| | autotrade/portfolio.py | Portfolio tracking |
+| | autotrade/price_monitor.py | Monitor harga |
+| **Scalper** | scalper/scalper_module.py | Scalping module |
+| **Smart Hunter** | autohunter/smart_hunter_integration.py | Hunter integration |
+| **Signals** | signals/signal_quality_engine.py | Signal Quality Engine V3 |
+| | signals/signal_queue.py | Phase 4: Signal queue + scheduler |
+| **Cache** | cache/redis_price_cache.py | Redis-backed price cache |
+| | cache/redis_state_manager.py | Redis state manager |
+| **Workers** | workers/async_worker.py | Phase 3: Async workers |
+| | workers/price_poller.py | REST API price poller |
+
+
+## 🔹 2. ALUR KERJA BOT (FLOWCHART)
+
+======================== FLOW UTAMA ========================
+
+START BOT
+  │
+  ├── __init__() - Inisialisasi Komponen
+  │     ├── Database() - Load/save data
+  │     ├── MLTradingModelV2() - Load ML model
+  │     ├── TradingEngine() - Engine trading
+  │     ├── RiskManager() - Manage risk
+  │     ├── Portfolio() - Portfolio tracking
+  │     ├── IndodaxAPI() - Koneksi exchange
+  │     ├── SignalQualityEngine() - Kualitas sinyal
+  │     ├── SupportResistanceDetector() - Deteksi S/R
+  │     ├── ScalperModule() - Scalping module
+  │     ├── Telegram App - Setup handlers
+  │     └── load_watchlist_from_db() - Load user's pairs
+  │
+  └── run() - Jalankan Bot
+        │
+        ├── 1. Start Price Poller Thread (REST API)
+        │      └─► polling harga setiap 15 detik
+        │
+        ├── 2. Preload historical data dari DB
+        │
+        ├── 3. Start Auto Retrain Timer (24 jam)
+        │
+        ├── 4. Setup Scheduler Tasks
+        │      ├─ Market Scan (5 menit)
+        │      ├─ DB Cleanup (6 jam)
+        │      ├─ Signal Stats (1 jam)
+        │      └─ Cache Health (30 menit)
+        │
+        ├── 5. Start Async Worker
+        │
+        ├── 6. Start Health Monitor (memory watch)
+        │
+        ├── 7. Start Redis State Syncer (60 detik)
+        │
+        └── 8. Start Telegram Polling
+               └─► Terima command dari user
+
+
+## 🔹 3. FUNGSI-FUNGSI UTAMA
+
+### A. Komponen Inti (AdvancedCryptoBot)
+
+| Fungsi | Deskripsi |
+|--------|-----------|
+| __init__() | Inisialisasi semua komponen bot |
+| _load_watchlist_from_db() | Load watchlist dari SQLite |
+| _preload_historical_data() | Preload data historis (60+ candles) |
+| run() | Jalankan bot dengan semua thread |
+| _shutdown() | Graceful shutdown |
+| _setup_handlers() | Register semua command Telegram |
+| _start_health_monitor() | Monitor memory & auto-restart |
+| _start_redis_state_syncer() | Sync state ke Redis periodik |
+| _setup_scheduler_tasks() | Register task terjadwal |
+
+### B. Scheduled Tasks
+
+| Fungsi | Interval | Deskripsi |
+|--------|----------|-----------|
+| _scheduled_market_scan() | 5 menit | Scan pasar untuk sinyal kuat |
+| _scheduled_db_cleanup() | 6 jam | Hapus data lama (>30 hari) |
+| _scheduled_signal_stats() | 1 jam | Update statistik sinyal |
+| _scheduled_cache_health_check() | 30 menit | Cek kesehatan Redis |
+
+### C. Telegram Command Handlers (Command Categories)
+
+#### Basic Commands:
+```
+/start       - Welcome message
+/help        - Detailed guide
+/menu        - Quick menu
+/cmd         - Command reference guide
+```
+
+#### Watchlist Commands:
+```
+/watch <PAIR>           - Add pair(s) ke watchlist
+/watch <P1>, <P2>      - Add multiple pairs
+/unwatch <PAIR>         - Remove dari watchlist
+/list                  - Lihat watchlist Anda
+/clear_watchlist       - Clear semua watchlist
+```
+
+#### Price & Signals:
+```
+/price <PAIR>           - Quick price check
+/signal <PAIR>          - Get detailed signal
+/signals               - Signals for all watched pairs
+/notifications         - Set notification preferences
+```
+
+#### Portfolio & Trades:
+```
+/balance               - Check balance & positions
+/trades               - View trade history
+/sync                 - Sync trades dari Indodax
+/performance           - Win rate & P&L stats
+/position <PAIR>       - Deep position analysis
+```
+
+#### Auto-Trading (Admin):
+```
+/autotrade             - Toggle auto-trading
+/autotrade dryrun       - Mode simulasi (aman)
+/autotrade real         - Real trading
+/autotrade off         - Matikan auto-trade
+/autotrade_status      - Check status
+/hunter_status        - Profit hunter status
+/ultrahunter         - Ultra hunter commands
+```
+
+#### Admin & ML:
+```
+/status                - Bot system status
+/metrics              - Prometheus-like metrics
+/retrain              - Retrain ML model
+/scheduler_status      - Scheduler status
+/set_interval         - Set auto-trade interval
+```
+
+#### Price Alerts:
+```
+/monitor <PAIR>        - Set price monitoring
+/set_sl <PAIR> <PRICE> - Set stop loss
+/set_tp <PAIR> <PRICE> - Set take profit
+```
+
+#### Manual S/R:
+```
+/set_sr <PAIR>         - Set manual S/R levels
+/view_sr <PAIR>        - View S/R levels
+/delete_sr <PAIR>      - Delete S/R levels
+```
+
+#### Smart Hunter:
+```
+/smarthunter           - Smart hunter commands
+/smarthunter_status  - Check status
+```
+
+#### Manual Trading:
+```
+/trade BUY <PAIR> <PRICE> <IDR>    - Buy manual
+/trade SELL <PAIR> <PRICE> <COIN>   - Sell manual
+/cancel <ORDER_ID>                 - Cancel order
+```
+
+#### Market Scanner:
+```
+/scan                 - Market scanner
+/topvolume            - Top volume pairs
+```
+
+#### Scalper Module Commands:
+```
+/s_menu              - Menu utama scalper
+/s_posisi            - Lihat posisi aktif
+/s_analisa <PAIR>   - Analisa teknikal
+/s_buy <PAIR>      - Buy manual (scalper)
+/s_sell <PAIR>     - Sell manual (scalper)
+/s_sltp <PAIR>    - Set TP/SL
+/s_cancel <PAIR>    - Cancel TP/SL
+/s_info <PAIR>     - Info posisi
+/s_pair list       - Lihat pair aktif
+/s_pair add <PAIR> - Tambah pair
+/s_pair remove    - Hapus pair
+/s_reset         - Reset semua posisi
+/s_portfolio     - View portfolio
+/s_closeall     - Close semua posisi
+/s_riwayat     - Riwayat trades
+/s_sync        - Sync dari Indodax
+```
+
+
+## 🔹 4. ALUR SIGNAL GENERATION (Detail)
+
+======================== SIGNAL FLOW ========================
+
+1. REQUEST SIGNAL
+   (/signal <PAIR> command atau auto market scan)
+   │
+   ├──► GET PRICE DATA
+   │     ├─ dari redis_price_cache (utama)
+   │     └─ fallback: Indodax API get_ticker()
+   │
+   ├──► GET HISTORICAL DATA
+   │     └─ dari database: db.get_price_history(pair, limit=100)
+   │
+   ├──► TECHNICAL ANALYSIS (TechnicalAnalysis)
+   │     │
+   │     ├── RSI (Relative Strength Index)
+   │     │    └── Indikator overbought/oversold (0-100)
+   │     │
+   │     ├── MACD (Moving Average Convergence Divergence)
+   │     │    └── Indikator trend (BULLISH/BEARISH/NEUTRAL)
+   │     │
+   │     ├── Bollinger Bands
+   │     │    └── Price bands (upper, middle, lower)
+   │     │
+   │     ├── Moving Averages (SMA/EMA)
+   │     │    └── SMA: 10, 20, 50, 100, 200
+   │     │    └── EMA: 12, 26, 50
+   │     │
+   │     ├── ATR (Average True Range)
+   │     │    └── Volatility measure
+   │     │
+   │     ├── Stochastic
+   │     │    └── %K, %D
+   │     │
+   │     ├── ADX (Average Directional Index)
+   │     │    └── Trend strength measurement
+   │     │
+   │     └── OBV (On-Balance Volume)
+   │          └── Volume momentum
+   │
+   │   ===> OUTPUT: Dict {
+   │            'strength': -1.0 s/d +1.0,
+   │            'rsi': 0-100,
+   │            'macd_signal': 'BULLISH/BEARISH/NEUTRAL',
+   │            'recommendation': 'BUY/SELL/HOLD',
+   │            'bb_position': 'UPPER/MIDDLE/LOWER',
+   │            'price': float,
+   │            'change_24h': float,
+   │            dll
+   │         }
+   │
+   ├──► MACHINE LEARNING PREDICTION (MLTradingModelV2)
+   │     │
+   │     ├── Input: 60 candle history
+   │     ├── Features: 20+ technical indicators
+   │     ├── Model: Random Forest + Gradient Boosting ensemble
+   │     │
+   │     ===> OUTPUT: Dict {
+   │            'prediction': class (0/1/2),
+   │            'confidence': 0.0-1.0,
+   │            'signal_class': 'STRONG_BUY/BUY/HOLD/SELL/STRONG_SELL',
+   │            'probabilities': [p0, p1, p2]
+   │         }
+   │
+   ├──► SIGNAL QUALITY ENGINE (SignalQualityEngine V3)
+   │     │
+   │     ├── Confluence scoring
+   │     │    └──TA + ML agreement check
+   │     │
+   │     ├── Cooldown check
+   │     │    └── Recently traded? Skip if < 1 jam
+   │     │
+   │     └── Volume confirmation
+   │          └── Volume spike detection
+   │
+   │     ===> OUTPUT: quality_score + is_valid_signal
+   │
+   └──► TRADING ENGINE (TradingEngine.generate_signal)
+        │
+        ├── Combine: 60% TA + 40% ML
+        │     combined_strength = (ta_strength * 0.6) + (ml_strength * 0.4)
+        │
+        └── Apply Thresholds:
+             - BUY:  strength >= 0.15
+             - SELL: strength <= -0.15
+             - HOLD: others
+
+        ===> FINAL OUTPUT: {
+                'signal': 'BUY'/'SELL'/'HOLD',
+                'confidence': 0.0-1.0,
+                'strength': -1.0 s/d +1.0,
+                'reason': 'RSI oversold + MACD bullish',
+                'stop_loss': price * 0.98,
+                'take_profit': price * 1.05,
+                'ta_signals': {...},
+                'ml_prediction': {...},
+                'quality_score': float
+             }
+
+
+## 🔹 5. AUTO-TRADING FLOW
+
+======================== AUTO-TRADING ========================
+
+SCHEDULER (Setiap 5 menit)
+  │
+  ├── Loop through WATCH_PAIRS
+  │     │
+  │     ├── Get latest price
+  │     │    └── dari redis_price_cache / API
+  │     │
+  │     ├── Generate signal
+  │     │    └── (ikuti signal generation flow di atas)
+  │     │
+  │     ├── Check confidence threshold
+  │     │    └── Config.CONFIDENCE_THRESHOLD = 0.55
+  │     │
+  │     └── If signal BUY/SELL AND confidence >= threshold
+  │         │
+  │         ├── CHECK RISK RULES (RiskManager)
+  │         │    │
+  │         │    ├── Max position size: 25% balance
+  │         │    ├── Max trades/day: 10
+  │         │    ├── Daily loss limit: 5%
+  │         │    ├── Risk-reward ratio: min 2:1
+  │         │    │
+  │         │    ===> PASS/FAIL
+  │         │
+  │         └── If PASS
+  │              │
+  │              ├── EXECUTE TRADE
+  │              │    │
+  │              │    ├── DRY RUN mode
+  │              │    │    └── Simulasi: catat ke database
+  │              │    │
+  │              │    └── REAL mode
+  │              │         └── API call: buy/sell
+  │              │
+  │              ├── SET STOP LOSS (2%)
+  │              │    └── trailing_stop = price * 0.98
+  │              │
+  │              ├── SET TAKE PROFIT (5%)
+  │              │    └── take_profit = price * 1.05
+  │              │
+  │              └── MONITOR POSITION
+  │                   │
+  │                   ├── Trailing stop activation
+  │                   │    └── Activate after +2% profit
+  │                   │    └── Trail by 1.5%
+  │                   │
+  │                   └── Auto-sell at TP
+  │                        └── Jika price >= take_profit
+
+
+## 🔹 6. PRICE DATA FLOW
+
+======================== PRICE POLLING ========================
+
+PricePoller (REST API - 15 detik)
+  │
+  ├── IndodaxAPI.get_ticker(pair)
+  │     │
+  │     ├── GET /api/ticker/{pair}
+  │     │    └── https://indodax.com/api/ticker/btcidr
+  │     │
+  │     └── Returns: {
+  │            'last': float,
+  │            'high': float,
+  │            'low': float,
+  │            'volume': float,
+  │            'bid': float,
+  │            'ask': float,
+  │            'timestamp': float
+  │         }
+  │
+  ├── Save to redis_price_cache
+  │     │
+  │     ├── redis_price_cache.set_price(pair, price)
+  │     │    └── Cache in Redis dengan TTL 60 detik
+  │     │
+  │     └── Also cache locally in memory
+  │          └── self.price_data[pair] = {...}
+  │
+  └── Save to database
+       │
+       └── db.save_price_history(pair, data)
+            └── Simpan ke SQLite untuk ML training
+
+
+## 🔹 7. SCHEDULED TASKS DETAIL
+
+======================== SCHEDULER ========================
+
+Task 1: Market Scan (5 menit interval)
+  - Scan semua WATCH_PAIRS
+  - Generate signal per pair
+  - Cek RSI + MACD conditions
+  - RSI < 40 + MACD bullish = STRONG_BUY signal
+  - RSI > 65 + MACD bearish = STRONG_SELL signal
+  - Queue strong signals ke signal_queue
+  - Kirim notifikasi ke Telegram admins
+  - Broadcast ke subscribers
+
+Task 2: DB Cleanup (6 jam interval)
+  - Hapus price data > 30 hari
+  - Optimasi database
+  - Log cleanup results
+
+Task 3: Signal Stats (1 jam interval)
+  - Get queue statistics
+  - Log: total signals, buy signals, sell signals
+  - Track signal quality over time
+
+Task 4: Cache Health (30 menit interval)
+  - Check Redis connection
+  - Report local cache size
+  - Log health status
+
+
+## 🔹 8. DATABASE SCHEMA
+
+======================== DATABASE ========================
+
+Table: price_history
+  - pair: TEXT
+  - timestamp: INTEGER
+  - open: REAL
+  - high: REAL
+  - low: REAL
+  - close: REAL
+  - volume: REAL
+
+Table: watchlists
+  - user_id: INTEGER
+  - pair: TEXT
+
+Table: trades
+  - id: INTEGER PRIMARY KEY
+  - user_id: INTEGER
+  - pair: TEXT
+  - type: TEXT (BUY/SELL)
+  - price: REAL
+  - amount: REAL
+  - total: REAL
+  - status: TEXT (OPEN/CLOSED/CANCELLED)
+  - stop_loss: REAL
+  - take_profit: REAL
+  - pnl: REAL
+  - opened_at: INTEGER
+  - closed_at: INTEGER
+
+Table: auto_trade_settings
+  - id: INTEGER PRIMARY KEY
+  - is_dry_run: INTEGER (0/1)
+
+
+## 🔹 9. CONFIGURATION PARAMETERS
+
+======================== CONFIG ========================
+
+# Trading
+INITIAL_BALANCE = 10,000,000 IDR (10 juta)
+MAX_POSITION_SIZE = 25% per trade
+STOP_LOSS_PCT = 2%
+TAKE_PROFIT_PCT = 5%
+
+# Auto-Trading
+AUTO_TRADE_DRY_RUN = true (default: simulation mode)
+MAX_DAILY_TRADES = 10
+DAILY_LOSS_LIMIT = 5%
+TRAILING_STOP_ENABLED = true
+TRAILING_STOP_PCT = 1.5%
+TRAILING_ACTIVATION_PCT = 2.0%
+
+# ML Model
+ML_MODEL_PATH = models/trading_model.pkl
+ML_SEQUENCE_LENGTH = 60 candles
+ML_RETRAIN_INTERVAL = 24 jam
+CONFIDENCE_THRESHOLD = 0.55
+
+# Market Intelligence
+MI_VOLUME_SPIKE_MIN = 1.3x
+MI_ORDERBOOK_BULLISH_MIN = 1.2x
+
+# Watch Pairs Default
+WATCH_PAIRS = btcidr,ethidr,bridr,pippinidr,solidr,dogeidr,xrpidr,adaidr
+
+
+## 🔹 10. THREADS & BACKGROUND TASKS
+
+======================== THREADS ========================
+
+1. Price Poller Thread
+   - Interval: 15 detik
+   - Fungsi: Poll harga dari REST API
+   - Target: Semua WATCH_PAIRS
+
+2. Preload History Thread
+   - Runs: Sekali saat startup
+   - Fungsi: Load historical data dari DB
+
+3. Auto Retrain Thread
+   - Interval: 24 jam
+   - Fungsi: Retrain ML model
+
+4. Async Worker Thread
+   - Runs: Continuous
+   - Fungsi: Process async tasks
+
+5. Scheduler Thread
+   - Runs: Multiple scheduled tasks
+   - Fungsi: Market scan, DB cleanup, dll
+
+6. Health Monitor Thread
+   - Interval: 60 detik
+   - Fungsi: Monitor memory, auto-restart
+
+7. Redis State Syncer Thread
+   - Interval: 60 detik
+   - Fungsi: Sync state ke Redis
+
+8. Telegram Polling Thread
+   - Runs: Continuous
+   - Fungsi: Handle user commands
+
+
+## 🔹 11. KEY CLASSES & DEFINITIONS
+
+======================== CLASSES ========================
+
+AdvancedCryptoBot (main class)
+├── __init__(): Initialize all components
+├── run(): Start bot with all threads
+├── _shutdown(): Graceful shutdown
+└── Telegram handlers (50+ commands)
+
+TechnicalAnalysis
+├── calculate_all_indicators()
+├── _calculate_rsi()
+├── _calculate_macd()
+├── _calculate_bollinger()
+└── _calculate_... (15+ indicators)
+
+TradingEngine
+├── generate_signal()
+└── _validate_signal_inputs()
+
+MLTradingModelV2
+├── train(data)
+├── predict(data)
+└── should_retrain()
+
+RiskManager
+├── check_risk_limits()
+├── calculate_position_size()
+└── validate_trade()
+
+SignalQualityEngine
+├── analyze_signal()
+├── check_confluence()
+├── check_volume()
+└── check_cooldown()
+
+
+## 🔹 12. ERROR HANDLING
+
+======================== ERROR HANDLING ========================
+
+1. API Errors
+   - Timeout: Retry with exponential backoff
+   - Rate limit (429): Wait and retry
+   - Invalid response: Log and skip
+
+2. Database Errors
+   - Connection failed: Fallback to in-memory
+   - Query error: Log and continue
+
+3. ML Errors
+   - Model not loaded: Fallback to V1
+   - Training failed: Skip and log
+   - Prediction error: Use default (0.5)
+
+4. Trading Errors
+   - Insufficient balance: Skip trade
+   - API error: Log and retry
+   - Invalid parameters: Validate and reject
+
+
+## 🔹 13. LOGGING
+
+======================== LOGGING ========================
+
+Log Levels:
+- DEBUG: Detailed debugging info
+- INFO: General info (trade, signals)
+- WARNING: Non-critical issues
+- ERROR: Errors that still allow operation
+- CRITICAL: System-shutdown issues
+
+Log Files:
+- logs/crypto_bot.log
+- logs/crypto_bot_error.log
+
+Log Rotation:
+- Daily rotation
+- Keep 7 days
+- Max 10MB per file
+
+
+## 🔹 14. QUICK REFERENCE
+
+======================== QUICK START ========================
+
+1. Install dependencies:
+   pip install -r requirements.txt
+
+2. Configure .env:
+   - TELEGRAM_BOT_TOKEN
+   - ADMIN_IDS
+   - INDODAX_API_KEY (optional)
+   - INDODAX_SECRET_KEY (optional)
+
+3. Run bot:
+   python bot.py
+
+4. Test commands:
+   /start
+   /help
+   /watch btcidr
+   /signal btcidr
+   /balance
+
+
+======================== END OF DOCUMENTATION ========================

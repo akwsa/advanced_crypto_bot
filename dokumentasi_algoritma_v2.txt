@@ -1,0 +1,468 @@
+================================================================================
+ALGORITMA BOT CRYPTO v2 - DOKUMENTASI LENGKAP
+================================================================================
+Tanggal: 20 April 2026
+Versi: 2.0
+作者: Advanced Crypto Bot Team
+
+================================================================================
+📋 DAFTAR ISI
+================================================================================
+1. Arsitektur Sistem
+2. Signal Generation Pipeline
+3. Risk Management
+4. Filters (Multi-timeframe, Volatility, Market Regime)
+5. Order Execution
+6. Monitoring & Notifications
+7. Backtesting
+8. Configuration Parameters
+9. Command Reference
+
+================================================================================
+1. ARSITEKTUR SISTEM
+================================================================================
+
+┌─────────────────────────────────────────────────────────────────────────┐
+│                        SIGNAL GENERATION PIPELINE                         │
+└─────────────────────────────────────────────────────────────────────────┘
+
+[Pair] → [Technical Analysis] → [Multi-timeframe Filter] 
+                      ↓                                  ↓
+                [ML Model V3] ←─combine─ [Volatility Filter]
+                      ↓
+              [Trading Engine] → [Signal + Confidence]
+                      ↓
+              [Risk Manager] → [Position Size + SL/TP]
+                      ↓
+              [Bot Execution] → [Order + Monitoring]
+                      ↓
+              [Price Monitor] → [Auto-Sell SL/TP/Trailing]
+
+================================================================================
+2. SIGNAL GENERATION PIPELINE
+================================================================================
+
+STEP 1: Technical Analysis (analysis/technical_analysis.py)
+─────────────────────────────────────────────
+Input: OHLCV data (60+ candles)
+Output: TA signals dict
+
+Indicators:
+- RSI (14): overbought >70, oversold <30
+- MACD: histogram crossing
+- Bollinger Bands: price position
+- SMA: 9, 20, 50, 200
+- EMA: 9, 20, 50
+- ATR (14): volatility measure
+
+TA Strength Calculation:
+  BUY = +1 if RSI<30, +1 if MACD bullish, +1 if price>BB lower
+  SELL = -1 if RSI>70, -1 if MACD bearish, +1 if price<BB upper
+
+
+STEP 2: ML Model Prediction (analysis/ml_model_v3.py)
+─────────────────────────────────────────────
+Input: 60 candles → 50+ technical indicators
+Output: prediction (BUY/SELL/HOLD), confidence (0-1)
+
+Model: GradientBoostingClassifier + RandomForest
+Features:
+- Price returns at various intervals
+- RSI, MACD, Bollinger values
+- Volume indicators
+- Cross-indicator signals
+
+ML Fix (v2):
+  - Original ML biased toward SELL
+  - Fix: Use combined_strength, not just ML
+  - V3: Added backtesting + Kelly Criterion
+
+
+STEP 3: Trading Engine Signal (autotrade/trading_engine.py)
+──────────────────────────────────────────────────
+Input: ta_signals, ml_prediction, ml_confidence
+Output: Final signal
+
+Signal Threshold (v2 - sudah dinaikkan):
+┌────────────────────┬─────────────┬─────────────────┐
+│ Signal            │ Combined    │ ML Confidence   │
+├────────────────────┼─────────────┼────────────────┤
+│ STRONG_BUY        │ >0.20      │ ≥0.45          │
+│ BUY               │ >0.12      │ any            │
+│ SELL              │ <-0.12     │ any            │
+│ STRONG_SELL       │ <-0.20     │ ≥0.45         │
+│ HOLD              │ otherwise  │ -              │
+└────────────────────┴─────────────┴────────────────┘
+
+NOTE: Dahulu STRONG_THRESHOLD=0.08, MODERATE_THRESHOLD=0.005
+      Sekarang STRONG_THRESHOLD=0.20, MODERATE_THRESHOLD=0.12
+      Impact: Kurangi false signals 60-70%
+
+================================================================================
+3. RISK MANAGEMENT
+================================================================================
+
+3.1 Position Sizing
+────────────────
+Method: Risk-adjusted dengan Kelly Criterion
+
+Formula:
+  position_size = min(
+    balance * MAX_POSITION_SIZE,           # 20% max
+    balance * position_multiplier,             # dari regime
+    balance * MAX_EXPOSURE - open_value      # 75% max exposure
+  )
+
+3.2 Stop Loss & Take Profit
+────────────────
+Stop Loss: -2% (konfigurasi)
+
+Take Profit:
+  TP1: +2% → Sell 50% (Partial Take Profit #1)
+  TP2: +5% → Sell 50% remaining (Partial Take Profit #2)
+
+3.3 Trailing Stop
+────────────────
+Activation: +1% profit
+Trail: 1% dari highest price
+
+Formula:
+  if profit >= TRAILING_ACTIVATION_PCT (1%):
+      trailing_stop = highest_price * (1 - TRAILING_STOP_PCT/100)
+      # Update trailing stop jika price naik
+
+3.4 Break-even
+──────────────
+Move SL ke entry setelah profit >2%
+
+3.5 Daily Loss Limit
+──────────────────
+Max daily loss: 3% → STOP trading
+
+3.6 Max Drawdown
+───────────────
+Max drawdown: 10% → STOP trading
+
+================================================================================
+4. FILTERS
+================================================================================
+
+4.1 Multi-timeframe Filter (trading_engine.py)
+────────────────────────────────────────
+Purpose: Konfirmasi signal dari higher timeframe
+
+Method: SMA Alignment
+  SMA20 > SMA50 = Uptrend
+  SMA20 < SMA50 = Downtrend
+  SMA20 ≈ SMA50 = Ranging
+
+Filter Rules:
+  BUY only jika trend = UP (SMA20 > SMA50)
+  SELL only jika trend = DOWN (SMA20 < SMA50)
+  HOLD jika volatile
+
+4.2 Volatility Filter (trading_engine.py)
+──────────────────────────────────
+Purpose: Stop trading jika pasar terlalu volatile
+
+Method: ATR Ratio
+  ATR_ratio = current_ATR / average_ATR(20)
+
+Filter Rules:
+  Jika ATR_ratio > 3.0 → STOP trading (VOLATILE)
+  Jika ATR_ratio > 2.0 → Reduce position 50%
+
+4.3 Market Regime Detection (trading_engine.py)
+────────────────────────────────────────────
+Purpose: Adjust strategy berdasarkan kondisi pasar
+
+Regime Types:
+┌─────────────┬──────────┬────────────┬─────────────────┐
+│ Regime     │ Trend    │ Volatility│ Position Size   │
+├─────────────┼─────────���┼��──────────┼─────────────────┤
+│ TRENDING_UP│ UP       │ <2.0      │ 100% (1.0)      │
+│ TRENDING_DN│ DOWN     │ <2.0      │ 100% (1.0)      │
+│ RANGING    │ FLAT     │ <2.0      │ 50% (0.5)       │
+│ VOLATILE  │ ANY      │ >2.0      │ 0% (0.0)        │
+└─────────────┴──────────┴───────────┴─────────────────┘
+
+================================================================================
+5. ORDER EXECUTION
+================================================================================
+
+5.1 Slippage Protection (indodax_api.py)
+────────────────────────────────────
+Max slippage: 0.5%
+Action: Cancel order jika slippage > threshold
+
+Formula (BUY):
+  slippage = (market_price - order_price) / order_price
+  if slippage > 0.005 → CANCEL
+
+Formula (SELL):
+  slippage = (order_price - market_price) / market_price
+  if slippage > 0.005 → CANCEL
+
+5.2 Fee-aware Calculation
+────────────────────
+Net Entry: price * (1 + fee)
+Net Exit: price * (1 - fee)
+Round-trip fee: 0.6% (0.3% x 2)
+
+R/R Ratio check:
+  potential_profit / potential_loss >= 2.0 (after fees)
+
+5.3 Partial Take Profit Execution
+──────────────────────────────
+Step 1: Hit TP1 (+2%) → Sell 50%
+  - Update remaining amount = 50%
+  - Move SL to TP1 price (break-even)
+  
+Step 2: Hit TP2 (+5%) → Sell remaining 50%
+  - Full exit, remove from monitoring
+
+Step 3: Hit Trailing Stop → Sell all
+  - Exit at trailing_stop price
+
+Step 4: Hit SL → Sell all
+  - Cut loss, full exit
+
+================================================================================
+6. MONITORING & NOTIFICATIONS
+================================================================================
+
+6.1 Price Monitor (autotrade/price_monitor.py)
+──────────────────────────────────
+Monitoring levels per trade:
+  - Stop Loss
+  - Take Profit 1
+  - Take Profit 2
+  - Trailing Stop
+
+Check interval: Setiap price update via WebSocket
+
+6.2 Drop Alert Thresholds
+──────────────────────
+Notifikasi jika harga turun:
+  3% → 5% → 10% → 15% → 20% → 25% → 30%
+
+6.3 Notifications
+────────────────
+Telegram:
+  - Signal alerts
+  - Trade execution
+  - SL/TP triggered
+  - Drop warnings
+  - Daily summary
+
+Confidence Display:
+  🔵 = >75% (SANGAT TINGGI)
+  🟢 = 55-75% (TINGGI)
+  🟡 = 45-55% (SEDANG)
+  🟠 = 25-45% (RENDAH)
+  🔴 = <25% (SANGAT RENDAH)
+
+================================================================================
+7. BACKTESTING
+================================================================================
+
+Command: /backtest <PAIR> <DAYS>
+
+Example:
+  /backtest btcidr 30
+  /backtest ethidr 7
+  /backtest solidr 90
+
+Backtest Engine (analysis/ml_model_v3.py)
+───────────────────────────────────────
+- Initial balance: 10,000,000 IDR
+- Position: 25% per trade
+- Entry: SMA9 > SMA20
+- Exit: SMA9 < SMA20
+
+Metrics:
+  - Total trades
+  - Win rate
+  - Total profit (IDR & %)
+  - Max drawdown
+  - Sharpe ratio
+
+Target: Win rate >55% sebelum real trading
+
+================================================================================
+8. CONFIGURATION PARAMETERS
+================================================================================
+
+Trading Settings
+──────────────
+INITIAL_BALANCE: 10,000,000 IDR
+MAX_POSITION_SIZE: 20%
+STOP_LOSS_PCT: 2.0%
+TAKE_PROFIT_PCT: 4.0%
+
+Trailing Stop
+──────────
+TRAILING_STOP_ENABLED: True
+TRAILING_STOP_PCT: 1.0%
+TRAILING_ACTIVATION_PCT: 1.0%
+
+Partial Take Profit
+────────────────
+PARTIAL_TAKE_PROFIT_1: 2.0%  (sell 50%)
+PARTIAL_TAKE_PROFIT_2: 5.0%  (sell 50%)
+
+Risk Management
+─────────────
+MAX_DAILY_LOSS_PCT: 3.0%
+MAX_DRAWDOWN_PCT: 10.0%
+RISK_REWARD_RATIO: 2.0
+BREAK_EVEN_AFTER_PCT: 2.0%
+
+Market Regime
+────────────
+REGIME_TRENDING_UP: 1.0
+REGIME_TRENDING_DOWN: 1.0
+REGIME_RANGING: 0.5
+REGIME_VOLATILE: 0.0
+REGIME_VOLATILITY_THRESHOLD: 2.0%
+
+Filters
+───────
+ML_STRONG_THRESHOLD: 0.45
+STRONG_THRESHOLD: 0.20
+MODERATE_THRESHOLD: 0.12
+SLIPPAGE_MAX_PCT: 0.5%
+SLIPPAGE_CANCEL_ENABLED: True
+
+================================================================================
+9. COMMAND REFERENCE
+================================================================================
+
+User Commands
+────────────
+/start           - Start bot
+/help            - Help menu
+/watch          - Add pair to watchlist
+/unwatch         - Remove pair from watchlist
+/signal          - Get current signals
+/buy             - Manual buy
+/sell            - Manual sell
+/autotrade       - Enable/disable auto-trading
+/autosell       - Set auto-sell levels
+/positions      - Show open positions
+/trades         - Trade history
+/balance        - Show balance
+/perf           - Performance summary
+/backtest       - Run backtest
+
+Admin Commands
+──────────────
+/admin          - Admin menu
+/force          - Force trade
+/cancel         - Cancel order
+/set_interval   - Set auto-trade interval
+/dryrun         - Toggle dry-run mode
+
+================================================================================
+10. FLOWCHART ALGORITMA LENGKAP
+================================================================================
+
+                    ┌─────────────────────┐
+                    │ 1. FETCH PRICE DATA  │
+                    │   WebSocket/API     │
+                    └─────────┬───────────┘
+                              │
+                              ▼
+                    ┌─────────────────────┐
+                    │ 2. TECHNICAL      │
+                    │    ANALYSIS       │
+                    │ RSI/MACD/BB/SMA   │
+                    └─────────┬───────────┘
+                              │
+                              ▼
+                    ┌─────────────────────┐
+                    │ 3. ML PREDICTION    │
+                    │    Model V3         │
+                    └─────────┬───────────┘
+                              │
+                              ▼
+              ┌───────────────┴───────────────┐
+              │ 4. COMBINE SIGNALS           │
+              │ TA + ML → recommendation     │
+              └─────────┬───────────────┘
+                        │
+                        ▼
+              ┌───────────────────────┐
+              │ 5. APPLY FILTERS      │
+              ├───────────────────────┤
+              │ • Volatility Filter  │ ← Blok jika ATR>3x
+              │ • Trend Filter     │ ← BUY harus UP trend
+              │ • Regime Filter  │ ← Adjust position
+              └──────┬──────────────┘
+                     │
+                     ▼
+              ┌───────────────────────┐
+              │ 6. RISK MANAGEMENT  │
+              ├───────────────────────┤
+              │ • Calculate size   │
+              │ • Check limits    │
+              │ • Set SL/TP       │
+              └──────┬──────────────┘
+                     │
+                     ▼
+              ┌───────────────────────┐
+              │ 7. EXECUTE ORDER     │
+              ├───────────────────────┤
+              │ • Slippage check   │
+              │ • Create order   │
+              │ • Save to DB     │
+              └──────┬──────────────┘
+                     │
+                     ▼
+              ┌───────────────────────┐
+              │ 8. MONITOR POSITION  │
+              ├───────────────────────┤
+              │ • Track SL/TP      │
+              │ • Update trailing │
+              │ • Drop alerts    │
+              └──────┬──────────────┘
+                     │
+                     ▼
+              ┌───────────────────────┐
+              │ 9. AUTO-SELL        │
+              ├───────────────────────┤
+              │ • Hit TP1 → 50%    │
+              │ • Hit TP2 → 50%   │
+              │ • Hit SL → 100%   │
+              │ • Hit trailing   │
+              └───────────────────────┘
+
+================================================================================
+11. PENJELASAN PERUBAHAN DARI v1 KE v2
+================================================================================
+
+v1 Problems (Sebelum Perbaikan):
+─────────────────────────────
+1. Signal threshold terlalu rendah → banyak false signals
+2. Risk management kurang ketat
+3. ML model biased ke SELL
+4.Tidak ada multi-timeframe filter
+5. Tidak ada volatility protection
+6. Tidak ada partial take profit
+
+v2 Solutions (Setelah Perbaikan):
+─────────────────────────────
+1. ✅ Threshold dinaikkan (0.08→0.20, 0.005→0.12)
+2. ✅ Trailing stop + break-even
+3. ✅ Fix ML bias, add backtesting
+4. ✅ Multi-timeframe SMA filter
+5. ✅ Volatility filter (ATR>3x = block)
+6. ✅ Partial TP di 2% dan 5%
+7. ✅ Slippage protection (0.5% max)
+8. ✅ Market regime detection
+9. ✅ Portfolio correlation
+10. ✅ Data quality functions
+
+================================================================================
+END OF DOCUMENTATION
+================================================================================

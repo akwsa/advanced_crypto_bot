@@ -1,0 +1,19 @@
+advanced-crypto-bot/
+├── bot.py                      # Main bot
+├── config.py                   # Configuration
+├── requirements.txt            # Dependencies
+├── .env                        # Secrets
+├── database.py                 # SQLite database
+├── websocket_handler.py        # WebSocket manager
+├── technical_analysis.py       # TA indicators
+├── ml_model.py                 # Machine Learning
+├── trading_engine.py           # Trading signals & logic
+├── risk_manager.py             # Risk management
+├── portfolio.py                # Portfolio tracking
+├── backtester.py               # Backtesting engine
+├── logger.py                   # Logging system
+├── utils.py                    # Helper functions
+├── models/                     # Trained ML models
+├── data/                       # Historical data
+├── logs/                       # Log files
+└── reports/                    # Trading reports

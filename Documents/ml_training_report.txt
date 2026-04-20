@@ -1,0 +1,37 @@
+======================================================================
+  ML SIGNAL MODEL TRAINING REPORT
+======================================================================
+Training Date: 2026-04-11 08:45:41
+Database: data/signals.db
+Data Size: 2080 signals
+Date Range: 2026-04-06 12:40:23 to 2026-04-11 08:42:52
+Unique Symbols: 54
+
+MODEL COMPARISON:
+----------------------------------------------------------------------
+  random_forest        Train: 86.84%  Test: 79.81%
+  gradient_boosting    Train: 96.39%  Test: 80.05%
+
+BEST MODEL: gradient_boosting
+Test Accuracy: 80.05%
+
+FEATURE IMPORTANCE:
+----------------------------------------------------------------------
+  price_scaled              40.29%
+  macd_encoded              31.87%
+  rsi_encoded               17.27%
+  ma_encoded                10.57%
+  volume_encoded            0.00%
+  bollinger_encoded         0.00%
+
+CLASS DISTRIBUTION:
+----------------------------------------------------------------------
+  HOLD             1456 (70.0%)
+  STRONG_BUY        219 (10.5%)
+  BUY               178 (8.6%)
+  SELL              130 (6.2%)
+  STRONG_SELL        97 (4.7%)
+
+======================================================================
+  STATUS: ✅ MODEL TRAINED & SAVED (bot tidak diubah)
+======================================================================

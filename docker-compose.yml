@@ -1,0 +1,147 @@
+# =============================================================================
+# Docker Compose - Crypto Trading Bot Stack
+# =============================================================================
+# Services: Bot + Worker + Redis
+# Memory target: < 3.5GB of 4GB VPS
+# =============================================================================
+
+version: '3.8'
+
+services:
+  # ─────────────────────────────────────────────
+  # Redis Cache
+  # ─────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: crypto-redis
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:6379:6379"  # Only accessible locally
+    volumes:
+      - redis-data:/data
+    command: >
+      redis-server
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+      --save 60 1000
+      --appendonly yes
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    networks:
+      - crypto-net
+
+  # ─────────────────────────────────────────────
+  # Main Bot (Telegram + WebSocket + REST Poller)
+  # ─────────────────────────────────────────────
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: crypto-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_DB=0
+    volumes:
+      - bot-data:/app/data
+      - bot-logs:/app/logs
+      - bot-models:/app/models
+      - bot-backups:/app/backups
+    depends_on:
+      redis:
+        condition: service_healthy
+    # Auto-restart on exit code 3 (graceful restart from health monitor)
+    deploy:
+      resources:
+        limits:
+          memory: 1536M    # 1.5GB max
+          cpus: '2.0'      # 2 CPU cores
+        reservations:
+          memory: 512M
+          cpus: '0.5'
+    healthcheck:
+      test: ["CMD", "python", "-c", "print('healthy')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    networks:
+      - crypto-net
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ─────────────────────────────────────────────
+  # Background Worker (Heavy Tasks from Queue)
+  # ─────────────────────────────────────────────
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    container_name: crypto-worker
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_DB=0
+    volumes:
+      - bot-data:/app/data
+      - bot-logs:/app/logs
+      - bot-models:/app/models
+    depends_on:
+      redis:
+        condition: service_healthy
+      bot:
+        condition: service_started
+    deploy:
+      resources:
+        limits:
+          memory: 1024M    # 1GB max
+          cpus: '1.5'      # 1.5 CPU cores
+        reservations:
+          memory: 256M
+          cpus: '0.25'
+    networks:
+      - crypto-net
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+# ─────────────────────────────────────────────
+# Volumes (persistent data)
+# ─────────────────────────────────────────────
+volumes:
+  redis-data:
+    driver: local
+  bot-data:
+    driver: local
+  bot-logs:
+    driver: local
+  bot-models:
+    driver: local
+  bot-backups:
+    driver: local
+
+# ─────────────────────────────────────────────
+# Network (isolated)
+# ─────────────────────────────────────────────
+networks:
+  crypto-net:
+    driver: bridge

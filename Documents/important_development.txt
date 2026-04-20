@@ -1,0 +1,14 @@
+Cara Pakai (3 Options):
+Option 1: Double-Click (Paling Mudah)
+1. Klik 2x file: update_docs.bat
+2. Tunggu selesai
+3. Notepad otomatis buka README_COMMANDS.txt
+Option 2: Command Line
+cd c:\advanced-crypto-bot
+python generate_docs.py
+Option 3: Manual Run
+# Run generator
+python generate_docs.py
+
+# Open hasil
+notepad README_COMMANDS.txt
