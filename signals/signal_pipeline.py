@@ -103,6 +103,15 @@ async def generate_signal_for_pair(bot, pair):
     logger.info(f"📊 ML Confidence: {ml_confidence:.2%}")
     logger.info(f"📊 TA Strength: {ta_signals.get('strength', 0):.2f}")
     logger.info(f"📊 Combined Strength: {signal.get('combined_strength', 0):.2f}")
+    logger.info(
+        "🔎 [PIPELINE BASE] %s | ml_class=%s | base_rec=%s | ml_conf=%.2f | ta_strength=%+.2f | combined=%+.2f",
+        pair,
+        ml_signal_class or "NONE",
+        signal["recommendation"],
+        ml_confidence,
+        ta_signals.get("strength", 0),
+        signal.get("combined_strength", 0),
+    )
 
     original_rec = signal["recommendation"]
     stabilization_applied = False
@@ -221,6 +230,18 @@ async def generate_signal_for_pair(bot, pair):
         signal["quality_approved"] = True
         signal["confluence_score"] = quality_signal.get("confluence", 0)
         logger.info(f"✅ [QUALITY ENGINE] {pair}: {signal['recommendation']} approved (confluence: {quality_signal.get('confluence', 0)})")
+
+    if ml_signal_class_for_engine in ["BUY", "STRONG_BUY"] and signal["recommendation"] != ml_signal_class_for_engine:
+        logger.warning(
+            "🟡 [BUY TRACE] %s | requested=%s | final=%s | reason=%s | confluence=%s | combined=%+.2f | ml_conf=%.2f",
+            pair,
+            ml_signal_class_for_engine,
+            signal["recommendation"],
+            signal.get("reason", "Unknown"),
+            quality_signal.get("confluence", "n/a") if quality_signal else "n/a",
+            signal.get("combined_strength", 0),
+            signal.get("ml_confidence", ml_confidence),
+        )
 
     signal["price"] = real_time_price
 

@@ -98,16 +98,12 @@ class TradingEngine:
             # No ML prediction - use neutral
             ml_strength = 0.0
 
-        # Weight: Priority to TA indicators (they react faster to market changes)
-        # ML can be biased due to imbalanced training data
-        # For BUY signals: give more weight to TA (faster reaction)
-        # For SELL signals: moderate weight to ML (better exit timing)
+        # Weight: keep BUY/SELL symmetric so the engine does not lean bearish
+        # simply because SELL gets a larger ML contribution than BUY.
         if ml_signal_class in ['BUY', 'STRONG_BUY']:
-            # TA already bullish - trust TA more
-            ml_weight = 0.25  
+            ml_weight = 0.30
         elif ml_signal_class in ['SELL', 'STRONG_SELL']:
-            # SELL signal - moderate ML weight for better exit
-            ml_weight = 0.35
+            ml_weight = 0.30
         else:
             # HOLD or unknown - balanced
             ml_weight = 0.30
@@ -139,6 +135,18 @@ class TradingEngine:
         else:
             recommendation = 'HOLD'
             reason = f'Mixed signals, wait for confirmation (Combined: {combined_strength:+.2f})'
+
+        logger.info(
+            "🧮 [ENGINE] %s | ml_class=%s | ta_strength=%+.3f | ml_strength=%+.3f | "
+            "ml_weight=%.2f | combined=%+.3f | rec=%s",
+            pair,
+            ml_signal_class or 'NONE',
+            ta_strength,
+            ml_strength,
+            ml_weight,
+            combined_strength,
+            recommendation,
+        )
         
         signal = {
             'timestamp': datetime.now(),
