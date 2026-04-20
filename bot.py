@@ -2639,12 +2639,12 @@ _Default: pippinidr, bridr, stoidr, drxidr_
                 is_dry = Config.AUTO_TRADE_DRY_RUN
                 if is_dry:
                     text += "🧪 **DRY RUN MODE** - Aktif (Simulasi)\n"
-                    text += "• ✅ Bot scanning setiap 5 menit\n"
+                    text += "• ✅ Bot scanning setiap 10 menit\n"
                     text += "• ✅ Simulasi trade (no real money)\n"
                     text += "• 📊 Use `/autotrade_status` untuk detail\n"
                 else:
                     text += "🔴 **REAL TRADING** - Aktif ⚠️\n"
-                    text += "• 🚨 Bot scanning setiap 5 menit\n"
+                    text += "• 🚨 Bot scanning setiap 10 menit\n"
                     text += "• 🚨 Real orders ke Indodax\n"
                     text += "• 📊 Use `/autotrade_status` untuk detail\n"
             else:
