@@ -2754,6 +2754,7 @@ _Default: pippinidr, bridr, stoidr, drxidr_
             hold_signal_dicts,
             updated_at=datetime.now().strftime('%H:%M:%S'),
             include_hold=True,
+            hold_limit=10,
         )
 
         signals_text += "\n\n<b>🤖 Auto-Trade Status</b>\n"
@@ -7860,6 +7861,22 @@ Contoh: <code>/signal BTCIDR</code>
             return "🔴", "SELL"
         return "⚪", "HOLD"
 
+    def _format_signal_list_price(self, price):
+        if price is None:
+            return "0"
+
+        abs_price = abs(price)
+        if abs_price >= 1000:
+            decimals = 0
+        elif abs_price >= 1:
+            decimals = 2
+        elif abs_price >= 0.01:
+            decimals = 4
+        else:
+            decimals = 6
+
+        return Utils.format_price(price, decimals=decimals)
+
     def _format_signal_scan_line_html(self, signal):
         pair = signal.get("pair", "UNKNOWN").upper()
         recommendation = signal.get("recommendation", "HOLD")
@@ -7870,7 +7887,7 @@ Contoh: <code>/signal BTCIDR</code>
             f"{icon} <b>{pair}</b>  "
             f"<b>{recommendation}</b>  "
             f"<code>{confidence:.0%}</code>\n"
-            f"Price: <code>{Utils.format_price(price)}</code> IDR"
+            f"Price: <code>{self._format_signal_list_price(price)}</code> IDR"
         )
 
     def _format_signal_section_html(self, title, signals):
@@ -7883,19 +7900,40 @@ Contoh: <code>/signal BTCIDR</code>
             lines.append("")
         return "\n".join(lines).rstrip()
 
-    def _build_signal_overview_html(self, buy_signals, sell_signals, hold_signals, updated_at=None, include_hold=True):
+    def _build_signal_overview_html(
+        self,
+        buy_signals,
+        sell_signals,
+        hold_signals,
+        updated_at=None,
+        include_hold=True,
+        hold_limit=None,
+    ):
         sections = ["<b>📊 Trading Opportunities</b>"]
         if updated_at:
             sections.append(f"Updated: <code>{updated_at}</code>")
 
         buy_section = self._format_signal_section_html("🟢 BUY Signals", buy_signals)
         sell_section = self._format_signal_section_html("🔴 SELL Signals", sell_signals)
-        hold_section = self._format_signal_section_html("⚪ HOLD / Neutral", hold_signals) if include_hold else ""
+        visible_hold_signals = hold_signals
+        hidden_hold_count = 0
+        if include_hold and hold_limit is not None and len(hold_signals) > hold_limit:
+            visible_hold_signals = sorted(
+                hold_signals,
+                key=lambda x: x.get("ml_confidence", 0),
+                reverse=True,
+            )[:hold_limit]
+            hidden_hold_count = len(hold_signals) - len(visible_hold_signals)
+
+        hold_section = self._format_signal_section_html("⚪ HOLD / Neutral", visible_hold_signals) if include_hold else ""
 
         for section in [buy_section, sell_section, hold_section]:
             if section:
                 sections.append("")
                 sections.append(section)
+
+        if hidden_hold_count > 0:
+            sections.append(f"… and <b>{hidden_hold_count}</b> more HOLD signals")
 
         if not buy_signals and not sell_signals and (not include_hold or not hold_signals):
             sections.append("")
