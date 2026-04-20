@@ -268,6 +268,72 @@ class TradingEngine:
 
         return True, "All checks passed"
     
+    def check_trading_hours(self):
+        """Check if current time is within allowed trading hours.
+        
+        Returns:
+            tuple: (allowed: bool, reason: str)
+        """
+        if not Config.TRADING_HOURS_ENABLED:
+            return True, "Trading hours check disabled"
+        
+        import time
+        now = time.localtime()
+        # Convert UTC to WITA (UTC+8) - Indodax uses WITA
+        current_hour = (now.tm_hour + 8) % 24
+        
+        if current_hour < Config.TRADING_HOURS_START or current_hour >= Config.TRADING_HOURS_END:
+            return False, f"Outside trading hours ({current_hour}:00 WITA). Allowed: {Config.TRADING_HOURS_START}:00-{Config.TRADING_HOURS_END}:00 WITA"
+        
+        return True, f"Within trading hours ({current_hour}:00 WITA)"
+    
+    def check_correlation_cooldown(self, pair, db):
+        """Check if recently traded a correlated pair.
+        
+        Args:
+            pair: Trading pair (e.g., 'btcidr')
+            db: Database instance
+            
+        Returns:
+            tuple: (allowed: bool, reason: str)
+        """
+        if not Config.CORRELATION_AVOIDANCE_ENABLED:
+            return True, "Correlation check disabled"
+        
+        # Find which group this pair belongs to
+        pair_group = None
+        for group_name, pairs in Config.CORRELATION_GROUPS.items():
+            if pair.lower() in pairs:
+                pair_group = group_name
+                break
+        
+        if not pair_group:
+            return True, "No correlation group found"
+        
+        # Check recent trades
+        cooldown_minutes = Config.CORRELATION_COOLDOWN_MINUTES
+        recent_trades = db.get_trade_history(user_id=1, limit=50)  # Get recent trades
+        
+        if recent_trades:
+            from datetime import datetime, timedelta
+            cutoff = datetime.now() - timedelta(minutes=cooldown_minutes)
+            
+            for trade in recent_trades:
+                trade_time = trade.get('timestamp')
+                if trade_time and isinstance(trade_time, str):
+                    try:
+                        trade_time = datetime.fromisoformat(trade_time.replace('Z', '+00:00'))
+                        if trade_time > cutoff:
+                            # Check if this trade was in a correlated pair
+                            traded_pair = trade.get('pair', '').lower()
+                            for group_name, pairs in Config.CORRELATION_GROUPS.items():
+                                if traded_pair in pairs and group_name == pair_group:
+                                    return False, f"Correlated pair {traded_pair} traded {cooldown_minutes} min ago. Wait for cooldown."
+                    except:
+                        pass
+        
+        return True, "No correlated trades in cooldown period"
+    
     def calculate_position_size(self, user_id, price):
         """Calculate optimal position size.
 

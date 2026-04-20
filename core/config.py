@@ -131,6 +131,13 @@ class Config:
     BB_STD = 2
     ATR_PERIOD = 14
     
+    # Trading Hours (WIB timezone - UTC+7)
+    # Low liquidity: 00:00-06:00 WIB (17:00-23:00 UTC)
+    # High liquidity: 08:00-22:00 WIB
+    TRADING_HOURS_ENABLED = True
+    TRADING_HOURS_START = 8   # Start allowing trades at 8 AM WIB
+    TRADING_HOURS_END = 22  # Stop allowing trades at 10 PM WIB
+    
     # WebSocket
     WS_RECONNECT_DELAY = 5
     WS_HEARTBEAT = 30
@@ -145,6 +152,18 @@ class Config:
     # Performance
     UPDATE_INTERVAL = 5  # seconds
     PRICE_ALERT_THRESHOLD = 1.0  # 1% change
+    
+    # Pair Correlation - Avoid trading correlated pairs simultaneously
+    # BTC is highly correlated with alts
+    CORRELATION_AVOIDANCE_ENABLED = True
+    CORRELATION_COOLDOWN_MINUTES = 30  # Wait N minutes after trade in correlated pair
+    
+    # Known correlation groups (pairs that move together)
+    CORRELATION_GROUPS = {
+        'BTC': ['btcidr', 'wrxidr'],
+        'ETH': ['ethidr', 'maticidr', 'soliddr'],
+        'ALT': ['dogeidr', 'xrpidr', 'adaidr', 'shibidr'],
+    }
     
     @staticmethod
     def get_pair_symbol(pair):
