@@ -231,19 +231,12 @@ async def generate_signal_for_pair(bot, pair):
         signal["confluence_score"] = quality_signal.get("confluence", 0)
         logger.info(f"✅ [QUALITY ENGINE] {pair}: {signal['recommendation']} approved (confluence: {quality_signal.get('confluence', 0)})")
 
-    if ml_signal_class_for_engine in ["BUY", "STRONG_BUY"] and signal["recommendation"] != ml_signal_class_for_engine:
-        logger.warning(
-            "🟡 [BUY TRACE] %s | requested=%s | final=%s | reason=%s | confluence=%s | combined=%+.2f | ml_conf=%.2f",
-            pair,
-            ml_signal_class_for_engine,
-            signal["recommendation"],
-            signal.get("reason", "Unknown"),
-            quality_signal.get("confluence", "n/a") if quality_signal else "n/a",
-            signal.get("combined_strength", 0),
-            signal.get("ml_confidence", ml_confidence),
-        )
-
     signal["price"] = real_time_price
+    support_1 = 0
+    resistance_1 = 0
+    risk_reward = 0
+    distance_to_support_pct = None
+    distance_to_resistance_pct = None
 
     try:
         sr_levels = bot.sr_detector.detect_levels(
@@ -254,11 +247,29 @@ async def generate_signal_for_pair(bot, pair):
             pair=pair,
         )
         signal.update(sr_levels)
+        support_1 = sr_levels.get("support_1", 0)
+        resistance_1 = sr_levels.get("resistance_1", 0)
+        risk_reward = sr_levels.get("risk_reward_ratio", 0)
+        if support_1 > 0 and real_time_price > 0:
+            distance_to_support_pct = abs(real_time_price - support_1) / real_time_price * 100
+        if resistance_1 > 0 and real_time_price > 0:
+            distance_to_resistance_pct = abs(resistance_1 - real_time_price) / real_time_price * 100
+
         logger.info(
             f"📊 [S/R] {pair}: S1={sr_levels.get('support_1', 0):,.0f} | "
             f"R1={sr_levels.get('resistance_1', 0):,.0f} | "
             f"Zone={sr_levels.get('price_zone', 'UNKNOWN')} | "
             f"R/R={sr_levels.get('risk_reward_ratio', 0):.2f}"
+        )
+        logger.info(
+            "🔎 [PIPELINE BASE] %s | final_pre_sr=%s | s1=%s | r1=%s | dist_s1=%s | dist_r1=%s | rr=%.2f",
+            pair,
+            signal["recommendation"],
+            f"{support_1:,.0f}" if support_1 > 0 else "n/a",
+            f"{resistance_1:,.0f}" if resistance_1 > 0 else "n/a",
+            f"{distance_to_support_pct:.2f}%" if distance_to_support_pct is not None else "n/a",
+            f"{distance_to_resistance_pct:.2f}%" if distance_to_resistance_pct is not None else "n/a",
+            risk_reward,
         )
     except Exception as e:
         logger.warning(f"⚠️ [S/R] Failed to detect levels for {pair}: {e}")
@@ -321,6 +332,23 @@ async def generate_signal_for_pair(bot, pair):
                 signal["sr_filtered"] = True
     except Exception as e:
         logger.warning(f"⚠️ [S/R VALIDATION] Failed for {pair}: {e}")
+
+    if ml_signal_class_for_engine in ["BUY", "STRONG_BUY"] and signal["recommendation"] != ml_signal_class_for_engine:
+        logger.warning(
+            "🟡 [BUY TRACE] %s | requested=%s | final=%s | reason=%s | confluence=%s | combined=%+.2f | ml_conf=%.2f | s1=%s | r1=%s | dist_s1=%s | dist_r1=%s | rr=%.2f",
+            pair,
+            ml_signal_class_for_engine,
+            signal["recommendation"],
+            signal.get("reason", "Unknown"),
+            quality_signal.get("confluence", "n/a") if quality_signal else "n/a",
+            signal.get("combined_strength", 0),
+            signal.get("ml_confidence", ml_confidence),
+            f"{support_1:,.0f}" if support_1 > 0 else "n/a",
+            f"{resistance_1:,.0f}" if resistance_1 > 0 else "n/a",
+            f"{distance_to_support_pct:.2f}%" if distance_to_support_pct is not None else "n/a",
+            f"{distance_to_resistance_pct:.2f}%" if distance_to_resistance_pct is not None else "n/a",
+            risk_reward,
+        )
 
     try:
         volume_24h = None

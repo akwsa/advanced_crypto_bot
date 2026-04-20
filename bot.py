@@ -2735,50 +2735,39 @@ _Default: pippinidr, bridr, stoidr, drxidr_
             return
         
         # Format output
-        signals_text = "📊 TRADING OPPORTUNITIES\n\n"
-        signals_text += f"Updated: {datetime.now().strftime('%H:%M:%S')}\n\n"
-        signals_text += "=" * 40 + "\n\n"
-        
-        if buy_signals:
-            signals_text += "🟢 BUY OPPORTUNITIES\n"
-            for pair, price, rec, conf, emoji in sorted(buy_signals, key=lambda x: x[3], reverse=True):
-                signals_text += f"\n{emoji} {pair} - {Utils.format_price(price)} IDR\n"
-                signals_text += f"   Signal: {rec} | Confidence: {conf:.0%}\n"
+        buy_signal_dicts = [
+            {"pair": pair, "price": price, "recommendation": rec, "ml_confidence": conf}
+            for pair, price, rec, conf, _ in buy_signals
+        ]
+        sell_signal_dicts = [
+            {"pair": pair, "price": price, "recommendation": rec, "ml_confidence": conf}
+            for pair, price, rec, conf, _ in sell_signals
+        ]
+        hold_signal_dicts = [
+            {"pair": pair, "price": price, "recommendation": rec, "ml_confidence": conf}
+            for pair, price, rec, conf, _ in hold_signals
+        ]
 
-        if sell_signals:
-            signals_text += "\n🔴 SELL OPPORTUNITIES\n"
-            for pair, price, rec, conf, emoji in sorted(sell_signals, key=lambda x: x[3], reverse=True):
-                signals_text += f"\n{emoji} {pair} - {Utils.format_price(price)} IDR\n"
-                signals_text += f"   Signal: {rec} | Confidence: {conf:.0%}\n"
+        signals_text = self._build_signal_overview_html(
+            buy_signal_dicts,
+            sell_signal_dicts,
+            hold_signal_dicts,
+            updated_at=datetime.now().strftime('%H:%M:%S'),
+            include_hold=True,
+        )
 
-        if hold_signals:
-            signals_text += "\n⏸️ HOLD / NEUTRAL\n"
-            for pair, price, rec, conf, emoji in hold_signals:
-                signals_text += f"\n{emoji} {pair} - {Utils.format_price(price)} IDR\n"
-        
-        if not buy_signals and not sell_signals and not hold_signals:
-            signals_text += "⚠️ No signals available yet\n\n"
-            signals_text += "Pairs need 60+ candles of data.\n"
-            signals_text += "Use /watch to add more pairs.\n"
-        
-        signals_text += "\n" + "=" * 40
-        
-        # Auto-Trade Status
-        signals_text += "\n\n🤖 AUTO-TRADE STATUS:\n"
+        signals_text += "\n\n<b>🤖 Auto-Trade Status</b>\n"
         if self.is_trading:
             is_dry = Config.AUTO_TRADE_DRY_RUN
-            if is_dry:
-                signals_text += "🧪 DRY RUN MODE - Aktif (Simulasi)\n"
-            else:
-                signals_text += "🔴 REAL TRADING - Aktif\n"
+            signals_text += "🧪 DRY RUN MODE - Aktif (Simulasi)\n" if is_dry else "🔴 REAL TRADING - Aktif\n"
         else:
-            signals_text += "⏸️ Auto-Trade: OFF\n"
+            signals_text += "⚪ Auto-Trade: OFF\n"
         
         try:
-            await self._send_message(update, context, signals_text)
+            await self._send_message(update, context, signals_text, parse_mode='HTML')
         except Exception as e:
             logger.warning(f"Error sending /signals: {e}")
-            await self._send_message(update, context, signals_text)
+            await self._send_message(update, context, signals_text, parse_mode='HTML')
         
     async def signal_buy_only(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Show BUY/STRONG_BUY signals for all watched pairs"""
@@ -2819,16 +2808,17 @@ _Default: pippinidr, bridr, stoidr, drxidr_
         buy_signals = await loop.run_in_executor(None, _scan_buy)
         
         if not buy_signals:
-            await self._send_message(update, context, f"🔴 No BUY signals found in {len(watched_pairs)} pairs.")
+            await self._send_message(update, context, f"⚪ No BUY signals found in {len(watched_pairs)} pairs.")
             return
         
-        # Format results
-        result = f"🟢 BUY SIGNALS ({len(buy_signals)} found)\n\n"
-        for sig in sorted(buy_signals, key=lambda x: x.get('ml_confidence', 0), reverse=True):
-            result += f"• {sig['pair'].upper()}: {sig.get('recommendation')} ({sig.get('ml_confidence', 0):.0%})\n"
-            result += f"  Price: {Utils.format_price(sig.get('price', 0))} IDR\n\n"
-        
-        await self._send_message(update, context, result)
+        result = self._build_signal_overview_html(
+            buy_signals,
+            [],
+            [],
+            updated_at=datetime.now().strftime('%H:%M:%S'),
+            include_hold=False,
+        )
+        await self._send_message(update, context, result, parse_mode='HTML')
 
     async def signal_sell_only(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Show SELL/STRONG_SELL signals for all watched pairs"""
@@ -2868,15 +2858,17 @@ _Default: pippinidr, bridr, stoidr, drxidr_
         sell_signals = await loop.run_in_executor(None, _scan_sell)
         
         if not sell_signals:
-            await self._send_message(update, context, f"🔴 No SELL signals found in {len(watched_pairs)} pairs.")
+            await self._send_message(update, context, f"⚪ No SELL signals found in {len(watched_pairs)} pairs.")
             return
         
-        result = f"🔴 SELL SIGNALS ({len(sell_signals)} found)\n\n"
-        for sig in sorted(sell_signals, key=lambda x: x.get('ml_confidence', 0), reverse=True):
-            result += f"• {sig['pair'].upper()}: {sig.get('recommendation')} ({sig.get('ml_confidence', 0):.0%})\n"
-            result += f"  Price: {Utils.format_price(sig.get('price', 0))} IDR\n\n"
-        
-        await self._send_message(update, context, result)
+        result = self._build_signal_overview_html(
+            [],
+            sell_signals,
+            [],
+            updated_at=datetime.now().strftime('%H:%M:%S'),
+            include_hold=False,
+        )
+        await self._send_message(update, context, result, parse_mode='HTML')
 
     async def signal_hold_only(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Show HOLD signals for all watched pairs"""
@@ -2916,15 +2908,17 @@ _Default: pippinidr, bridr, stoidr, drxidr_
         hold_signals = await loop.run_in_executor(None, _scan_hold)
         
         if not hold_signals:
-            await self._send_message(update, context, f"No HOLD signals found in {len(watched_pairs)} pairs.")
+            await self._send_message(update, context, f"⚪ No HOLD signals found in {len(watched_pairs)} pairs.")
             return
         
-        result = f"⏸️ HOLD SIGNALS ({len(hold_signals)} found)\n\n"
-        for sig in sorted(hold_signals, key=lambda x: x.get('ml_confidence', 0), reverse=True):
-            result += f"• {sig['pair'].upper()}: HOLD ({sig.get('ml_confidence', 0):.0%})\n"
-            result += f"  Price: {Utils.format_price(sig.get('price', 0))} IDR\n\n"
-        
-        await self._send_message(update, context, result)
+        result = self._build_signal_overview_html(
+            [],
+            [],
+            hold_signals,
+            updated_at=datetime.now().strftime('%H:%M:%S'),
+            include_hold=True,
+        )
+        await self._send_message(update, context, result, parse_mode='HTML')
 
     async def signal_buysell(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Show BUY and SELL signals for all watched pairs (no HOLD)"""
@@ -2968,23 +2962,19 @@ _Default: pippinidr, bridr, stoidr, drxidr_
         loop = asyncio.get_event_loop()
         buy_signals, sell_signals = await loop.run_in_executor(None, _scan_buysell)
         
-        result = f"📊 BUY/SELL SIGNALS\n\n"
-        
-        if buy_signals:
-            result += f"🟢 BUY ({len(buy_signals)} found)\n"
-            for sig in sorted(buy_signals, key=lambda x: x.get('ml_confidence', 0), reverse=True):
-                result += f"• {sig['pair'].upper()}: {sig.get('ml_confidence', 0):.0%}\n"
-            result += "\n"
-        
-        if sell_signals:
-            result += f"🔴 SELL ({len(sell_signals)} found)\n"
-            for sig in sorted(sell_signals, key=lambda x: x.get('ml_confidence', 0), reverse=True):
-                result += f"• {sig['pair'].upper()}: {sig.get('ml_confidence', 0):.0%}\n"
-        
         if not buy_signals and not sell_signals:
-            result = f"No BUY/SELL signals found in {len(watched_pairs)} pairs. All are HOLD."
-        
-        await self._send_message(update, context, result)
+            result = f"⚪ No BUY/SELL signals found in {len(watched_pairs)} pairs. All are HOLD."
+            await self._send_message(update, context, result)
+            return
+
+        result = self._build_signal_overview_html(
+            buy_signals,
+            sell_signals,
+            [],
+            updated_at=datetime.now().strftime('%H:%M:%S'),
+            include_hold=False,
+        )
+        await self._send_message(update, context, result, parse_mode='HTML')
 
     async def notifications(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """
@@ -7862,6 +7852,56 @@ Contoh: <code>/signal BTCIDR</code>
 
     def _generate_strength_bar_html(self, strength):
         return generate_strength_bar_html(strength)
+
+    def _signal_visual(self, recommendation):
+        if recommendation in ["BUY", "STRONG_BUY"]:
+            return "🟢", "BUY"
+        if recommendation in ["SELL", "STRONG_SELL"]:
+            return "🔴", "SELL"
+        return "⚪", "HOLD"
+
+    def _format_signal_scan_line_html(self, signal):
+        pair = signal.get("pair", "UNKNOWN").upper()
+        recommendation = signal.get("recommendation", "HOLD")
+        confidence = signal.get("ml_confidence", 0)
+        price = signal.get("price", 0)
+        icon, _ = self._signal_visual(recommendation)
+        return (
+            f"{icon} <b>{pair}</b>  "
+            f"<b>{recommendation}</b>  "
+            f"<code>{confidence:.0%}</code>\n"
+            f"Price: <code>{Utils.format_price(price)}</code> IDR"
+        )
+
+    def _format_signal_section_html(self, title, signals):
+        if not signals:
+            return ""
+
+        lines = [f"<b>{title}</b>"]
+        for signal in sorted(signals, key=lambda x: x.get("ml_confidence", 0), reverse=True):
+            lines.append(self._format_signal_scan_line_html(signal))
+            lines.append("")
+        return "\n".join(lines).rstrip()
+
+    def _build_signal_overview_html(self, buy_signals, sell_signals, hold_signals, updated_at=None, include_hold=True):
+        sections = ["<b>📊 Trading Opportunities</b>"]
+        if updated_at:
+            sections.append(f"Updated: <code>{updated_at}</code>")
+
+        buy_section = self._format_signal_section_html("🟢 BUY Signals", buy_signals)
+        sell_section = self._format_signal_section_html("🔴 SELL Signals", sell_signals)
+        hold_section = self._format_signal_section_html("⚪ HOLD / Neutral", hold_signals) if include_hold else ""
+
+        for section in [buy_section, sell_section, hold_section]:
+            if section:
+                sections.append("")
+                sections.append(section)
+
+        if not buy_signals and not sell_signals and (not include_hold or not hold_signals):
+            sections.append("")
+            sections.append("⚠️ <b>No actionable signals found</b>")
+
+        return "\n".join(sections)
 
     async def _monitor_strong_signal(self, pair, signal=None):
         return await monitor_strong_signal(self, pair, signal=signal)
