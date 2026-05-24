@@ -23,6 +23,22 @@ class IndodaxAPI:
         self.base_url = Config.INDODAX_REST_URL
         self.session = requests.Session()
 
+    @staticmethod
+    def _private_pair_symbol(pair):
+        """Return Indodax private Trade API pair format.
+
+        Public ticker URLs use concatenated pairs like ``jellyjellyidr`` while
+        the private trade endpoint expects ``jellyjelly_idr``. Telegram scalper
+        normalizes user input to the public form, so convert before placing the
+        authenticated order.
+        """
+        pair_symbol = str(pair).strip().lower().replace('/', '_')
+        if '_' in pair_symbol:
+            return pair_symbol
+        if pair_symbol.endswith('idr') and len(pair_symbol) > 3:
+            return f"{pair_symbol[:-3]}_idr"
+        return pair_symbol
+
     def _generate_signature(self, post_params):
         """Generate HMAC signature for API requests"""
         # Signature is HMAC-SHA512 of the POST body (totalParams)
@@ -387,7 +403,7 @@ class IndodaxAPI:
             max_slippage = Config.SLIPPAGE_MAX_PCT
         
         try:
-            pair_symbol = pair.replace('/', '_').lower()
+            pair_symbol = self._private_pair_symbol(pair)
             
             # Get current market price for slippage check
             ticker = self.get_ticker(pair)
