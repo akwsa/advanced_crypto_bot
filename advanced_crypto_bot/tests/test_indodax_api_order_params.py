@@ -34,6 +34,16 @@ class _FakeSession:
         })
         return _FakeResponse(self.payload)
 
+    def get(self, url, headers=None, timeout=None):
+        self.post_calls.append({
+            "url": url,
+            "headers": headers,
+            "data": None,
+            "timeout": timeout,
+            "method": "GET",
+        })
+        return _FakeResponse(self.payload)
+
 
 class TestIndodaxOrderParams(unittest.TestCase):
     def test_create_order_formats_concatenated_idr_pair_for_private_trade_api(self):
@@ -61,11 +71,37 @@ class TestIndodaxOrderParams(unittest.TestCase):
         result = api.get_trade_history("edenidr")
 
         self.assertEqual(result, [])
-        self.assertEqual(len(api.session.post_calls), 1)
-        params = parse_qs(api.session.post_calls[0]["data"])
+        self.assertGreaterEqual(len(api.session.post_calls), 1)
+        params = parse_qs(api.session.post_calls[-1]["data"])
         flattened = {key: values[0] for key, values in params.items()}
         self.assertEqual(flattened["method"], "orderHistory")
         self.assertEqual(flattened["pair"], "eden_idr")
+
+    def test_get_trade_history_prefers_v2_my_trades_before_legacy_order_history(self):
+        api = IndodaxAPI(api_key="key", secret_key="secret")
+        api.session = _FakeSession(payload={
+            "data": [
+                {
+                    "tradeId": "t1",
+                    "symbol": "edenidr",
+                    "price": "1704",
+                    "qty": "25",
+                    "isBuyer": True,
+                    "time": 1723442692520,
+                }
+            ]
+        })
+
+        result = api.get_trade_history("edenidr")
+
+        self.assertEqual(result[0]["price"], "1704")
+        self.assertEqual(len(api.session.post_calls), 1)
+        call = api.session.post_calls[0]
+        self.assertEqual(call["method"], "GET")
+        self.assertIn("/api/v2/myTrades?", call["url"])
+        self.assertIn("symbol=edenidr", call["url"])
+        self.assertIn("X-APIKEY", call["headers"])
+        self.assertIn("Sign", call["headers"])
 
 
 if __name__ == "__main__":

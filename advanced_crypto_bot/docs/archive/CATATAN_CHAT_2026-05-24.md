@@ -7,7 +7,7 @@ Memperbaiki logic Telegram Scalper REAL mode agar `/s_posisi`, refresh posisi, d
 ## Files Changed
 
 - `api/indodax_api.py`
-  - `get_trade_history()` sekarang memakai format pair private Indodax (`edenidr` → `eden_idr`) untuk `orderHistory`.
+  - `get_trade_history()` sekarang memakai Trade API v2 `/api/v2/myTrades` terlebih dahulu, lalu fallback legacy `orderHistory` dengan format pair private Indodax (`edenidr` → `eden_idr`).
 - `scalper/scalper_module.py`
   - REAL position sync membaca holding aktual dari Indodax `get_balance()`.
   - Entry REAL direkonstruksi dari Indodax order/trade history dengan lot accounting, bukan cache Telegram/local.
@@ -17,10 +17,12 @@ Memperbaiki logic Telegram Scalper REAL mode agar `/s_posisi`, refresh posisi, d
   - Regression SELL callback/confirmed SELL agar memakai entry dan amount hasil sync Indodax.
 - `tests/test_indodax_api_order_params.py`
   - Regression format private pair untuk `orderHistory`.
+  - Regression agar `get_trade_history()` memakai Trade API v2 `/api/v2/myTrades` saat tersedia.
 
 ## RED/GREEN Evidence
 
 - RED: `test_posisi_real_mode_uses_indodax_trade_history_entry_not_stale_local_cache` gagal sebelum patch karena `/s_posisi` masih menampilkan `Entry 1,648`.
+- RED kedua: `test_posisi_real_mode_uses_indodax_order_history_amount_fields_not_stale_cache` gagal karena parser legacy `orderHistory` belum membaca amount dari `order_idr`/`remain_idr`.
 - GREEN: focused regression dan related tests sudah pass.
 
 ## Verification
@@ -28,7 +30,7 @@ Memperbaiki logic Telegram Scalper REAL mode agar `/s_posisi`, refresh posisi, d
 ```bash
 cd /home/officer/advanced_crypto_bot/advanced_crypto_bot
 scripts/test.sh -q tests/test_scalper_dryrun_positions.py tests/test_indodax_api_order_params.py
-# 35 passed, 2 warnings
+# 37 passed, 2 warnings
 
 PYTHONPATH=. python - <<'PY'
 import bot

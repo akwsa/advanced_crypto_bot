@@ -405,15 +405,65 @@ class ScalperModule:
                 continue
         return 0.0
 
-    def _trade_row_amount(self, row, price):
-        for key in ('success_amount', 'filled_amount', 'executed_amount', 'deal_amount', 'amount'):
+    def _trade_row_amount(self, row, price, pair=None):
+        """Return executed base-asset amount from Indodax history row shapes.
+
+        Legacy ``orderHistory`` does not expose a generic ``amount`` field for
+        BUY rows; it usually reports quote fields like ``order_idr`` and
+        ``remain_idr``. A filled EDEN buy can therefore look like
+        ``price=1704, order_idr=42600, remain_idr=0``. Treating only
+        ``amount``/``remain_amount`` as executable amount makes history parsing
+        fail and leaves REAL /s_posisi on stale local cache.
+        """
+        for key in ('success_amount', 'filled_amount', 'executed_amount', 'deal_amount', 'amount', 'qty', 'executedQty'):
             amount = self._safe_float(row.get(key))
             if amount > 0:
                 return amount
 
-        total = self._safe_float(row.get('total') or row.get('idr'))
-        if total > 0 and price > 0:
-            return total / price
+        trade_type = str(row.get('type') or row.get('side') or '').lower()
+        if 'isBuyer' in row:
+            trade_type = 'buy' if bool(row.get('isBuyer')) else 'sell'
+
+        quote_total = self._safe_float(row.get('total') or row.get('idr') or row.get('quoteQty'))
+        if quote_total > 0 and price > 0:
+            return quote_total / price
+
+        normalized_pair = self._normalize_pair(row.get('pair') or row.get('symbol') or pair or '')
+        coin = normalized_pair[:-3] if normalized_pair.endswith('idr') else normalized_pair
+        quote_keys = ('idr', 'rp', 'usdt')
+        coin_keys = tuple(k for k in (coin, 'coin', 'asset') if k)
+
+        def executed_from_order_minus_remain(prefix_keys):
+            for suffix in prefix_keys:
+                order_val = self._safe_float(row.get(f'order_{suffix}') or row.get(f'ori_{suffix}'))
+                remain_val = self._safe_float(row.get(f'remain_{suffix}'))
+                if order_val > 0:
+                    executed = max(order_val - remain_val, 0.0)
+                    if executed > 0:
+                        return executed
+            return 0.0
+
+        if trade_type == 'buy':
+            base_amount = executed_from_order_minus_remain(coin_keys)
+            if base_amount > 0:
+                return base_amount
+            quote_amount = executed_from_order_minus_remain(quote_keys)
+            if quote_amount > 0 and price > 0:
+                return quote_amount / price
+        elif trade_type == 'sell':
+            base_amount = executed_from_order_minus_remain(coin_keys)
+            if base_amount > 0:
+                return base_amount
+            quote_amount = executed_from_order_minus_remain(quote_keys)
+            if quote_amount > 0 and price > 0:
+                return quote_amount / price
+        else:
+            base_amount = executed_from_order_minus_remain(coin_keys)
+            if base_amount > 0:
+                return base_amount
+            quote_amount = executed_from_order_minus_remain(quote_keys)
+            if quote_amount > 0 and price > 0:
+                return quote_amount / price
 
         for key in ('remain_amount', 'amount_remain'):
             amount = self._safe_float(row.get(key))
@@ -446,8 +496,10 @@ class ScalperModule:
                 continue
 
             trade_type = str(row.get('type') or row.get('side') or '').lower()
+            if 'isBuyer' in row:
+                trade_type = 'buy' if bool(row.get('isBuyer')) else 'sell'
             price = self._safe_float(row.get('price'))
-            amount = self._trade_row_amount(row, price)
+            amount = self._trade_row_amount(row, price, pair=pair)
             if price <= 0 or amount <= 0:
                 continue
 

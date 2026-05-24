@@ -8,6 +8,7 @@ import hmac
 import time
 import requests
 import json
+from urllib.parse import urlencode
 from core.config import Config
 import logging
 import asyncio
@@ -60,6 +61,15 @@ class IndodaxAPI:
             hashlib.sha512
         ).hexdigest()
         return signature
+
+    def _generate_v2_signature(self, params):
+        """Generate HMAC signature for Indodax Trade API v2 query strings."""
+        query = urlencode(params)
+        return hmac.new(
+            self.secret_key.encode(),
+            query.encode(),
+            hashlib.sha512
+        ).hexdigest()
 
     def _get_headers(self, post_params):
         """Generate headers for authenticated requests"""
@@ -508,7 +518,42 @@ class IndodaxAPI:
         return None
 
     def get_trade_history(self, pair=None, limit=100):
-        """Get trade history"""
+        """Get private execution history for a pair.
+
+        Prefer Indodax Trade API v2 ``/api/v2/myTrades`` because legacy
+        ``orderHistory`` is being decommissioned and its BUY rows often expose
+        only quote fields (``order_idr``/``remain_idr``), not base quantity.
+        Fall back to the legacy TAPI method for older environments.
+        """
+        try:
+            if pair:
+                pair_symbol_v2 = str(pair).strip().lower().replace('/', '').replace('_', '')
+                params = {
+                    'symbol': pair_symbol_v2,
+                    'limit': str(max(10, min(int(limit or 100), 1000))),
+                    'timestamp': str(int(time.time() * 1000)),
+                    'recvWindow': '5000',
+                }
+                query = urlencode(params)
+                headers = {
+                    'Accept': 'application/json',
+                    'Content-Type': 'application/json',
+                    'X-APIKEY': self.api_key,
+                    'Sign': self._generate_v2_signature(params),
+                }
+                v2_base_url = self.base_url.replace('https://indodax.com', 'https://tapi.indodax.com').rstrip('/')
+                response = self.session.get(
+                    f"{v2_base_url}/api/v2/myTrades?{query}",
+                    headers=headers,
+                    timeout=10,
+                )
+                data = response.json()
+                trades = data.get('data') if isinstance(data, dict) else None
+                if isinstance(trades, list):
+                    return trades
+        except Exception as e:
+            logger.debug(f"V2 trade history unavailable for {pair}: {e}")
+
         try:
             url = f"{self.base_url}/tapi"
             nonce = int(time.time() * 1000000)
@@ -518,11 +563,13 @@ class IndodaxAPI:
                 post_params = {
                     'method': 'orderHistory',
                     'pair': pair_symbol,
+                    'count': str(limit or 100),
                     'nonce': str(nonce)
                 }
             else:
                 post_params = {
                     'method': 'orderHistory',
+                    'count': str(limit or 100),
                     'nonce': str(nonce)
                 }
 

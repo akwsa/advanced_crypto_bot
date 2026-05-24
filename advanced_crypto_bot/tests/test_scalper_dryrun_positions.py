@@ -572,6 +572,48 @@ class TestScalperDryRunPositions(unittest.IsolatedAsyncioTestCase):
         self.assertIn("pippinidr", scalper.active_positions)
         self.assertEqual(scalper.active_positions["pippinidr"]["order_id"], "12345")
 
+    async def test_posisi_real_mode_uses_indodax_order_history_amount_fields_not_stale_cache(self):
+        scalper = self._scalper(
+            real=True,
+            indodax=_FakeIndodax(
+                idr_balance=684,
+                balances={"eden": "25"},
+                trade_history={
+                    "edenidr": [
+                        {
+                            "order_id": "ed-actual-buy",
+                            "type": "buy",
+                            "price": "1704",
+                            "status": "filled",
+                            "submit_time": "1716530000",
+                            "finish_time": "1716530100",
+                            "order_idr": "42600",
+                            "remain_idr": "0",
+                        }
+                    ]
+                },
+            ),
+        )
+        scalper._get_price_from_api_only = lambda pair: 1665
+        scalper.active_positions["edenidr"] = {
+            "entry": 1648,
+            "time": 1,
+            "amount": 33.0,
+            "capital": 54_384,
+        }
+
+        update = self._update()
+        with patch("cache.redis_price_cache.price_cache.get_price_sync", return_value=None):
+            await scalper.cmd_posisi(update, SimpleNamespace(args=[]))
+
+        text = update.effective_message.replies[-1][0]
+        self.assertIn("EDENIDR", text)
+        self.assertIn("Entry `1,704`", text)
+        self.assertNotIn("Entry `1,648`", text)
+        self.assertEqual(scalper.active_positions["edenidr"]["entry"], 1704)
+        self.assertEqual(scalper.active_positions["edenidr"]["amount"], 25)
+        self.assertEqual(scalper.active_positions["edenidr"]["source"], "indodax_trade_history")
+
     async def test_posisi_keeps_position_visible_when_live_price_unavailable(self):
         scalper = self._scalper()
         scalper._get_price_sync = lambda pair: None
