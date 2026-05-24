@@ -51,3 +51,14 @@ def test_market_scan_signal_uses_same_readable_decision_label():
     assert "Keputusan: Jual" in text
     assert "Keputusan: JUAL" not in text
     assert "<b>" not in text
+
+
+def test_signal_message_uses_compact_indicator_layout():
+    text = format_signal_message_html(_sample_signal("BUY"))
+
+    assert "RSI: <code>NEUTRAL</code>   🟢 MACD: <code>BULLISH</code>" in text
+    assert "MA: <code>BULLISH</code>   ⚪ BB: <code>NORMAL</code>" in text
+    assert "⚪ Vol: <code>HIGH</code>" in text
+    assert "Trend MA:" not in text
+    assert "Bollinger:" not in text
+    assert "Volume:" not in text

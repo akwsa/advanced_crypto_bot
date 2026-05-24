@@ -121,6 +121,7 @@ Cuma 4 file inti (dipindah dari kondisi lama yang punya 38 file):
 | File | Isi |
 |------|-----|
 | **README.md** (file ini) | Overview, install, config, safety |
+| **[GOALS.md](GOALS.md)** | Roadmap, target metrics, timeline menuju real trading |
 | **[ARCHITECTURE.md](ARCHITECTURE.md)** | Struktur modul, data flow, signal pipeline, trading flow |
 | **[COMMANDS.md](COMMANDS.md)** | Semua Telegram command (watchlist, signal, trade, admin) |
 | **[CHANGELOG.md](CHANGELOG.md)** | History perubahan per tanggal |

@@ -347,11 +347,9 @@ Ringkasan
 • Arah cepat: {perf_indicator}
 
 Indikator utama
-{rsi_emoji} RSI: <code>{_safe_text(rsi_val)}</code>
-{macd_emoji} MACD: <code>{_safe_text(macd_val)}</code>
-{ma_emoji} Trend MA: <code>{_safe_text(ma_val)}</code>
-{bb_emoji} Bollinger: <code>{_safe_text(bb_val)}</code>
-⚪ Volume: <code>{_safe_text(vol_val)}</code>
+{rsi_emoji} RSI: <code>{_safe_text(rsi_val)}</code>   {macd_emoji} MACD: <code>{_safe_text(macd_val)}</code>
+{ma_emoji} MA: <code>{_safe_text(ma_val)}</code>   {bb_emoji} BB: <code>{_safe_text(bb_val)}</code>
+⚪ Vol: <code>{_safe_text(vol_val)}</code>
 {sr_section}{quant_section}
 
 Catatan bot

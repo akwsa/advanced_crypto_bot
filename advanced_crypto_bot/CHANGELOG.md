@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed - 2026-05-24 (Kiro Claude Scalper Balance Verification & Compact Signal UI)
+- `scalper/scalper_module.py`: verifier posisi REAL sekarang membaca response `IndodaxAPI.get_balance()` dari key `balance` (bukan `funds`), sehingga warning `Could not fetch balance to verify position ...` tidak muncul untuk response valid dan posisi EDEN/PIPPIN bisa diverifikasi dari saldo coin.
+- `signals/signal_formatter.py`: tampilan indikator utama Telegram dibuat lebih compact (`RSI/MACD`, `MA/BB`, `Vol`) agar signal lebih pendek dan mudah dibaca di mobile.
+- `GOALS.md` ditambahkan dan ditautkan dari `README.md` sebagai roadmap target metrik/timeline menuju real trading bertahap; drawdown config didokumentasikan sebagai fraction `0.10` = 10%.
+- Safety: tidak mengubah path eksekusi order, sizing, TP/SL, mode DRY RUN AutoTrade/Hunter, atau API key gate; perubahan Scalper hanya validasi saldo posisi dan formatting pesan/dokumentasi roadmap.
+
+### Verification - 2026-05-24 (Kiro Claude Scalper Balance Verification & Compact Signal UI)
+- Regression: `scripts/test.sh -q tests/test_scalper_dryrun_positions.py::TestScalperDryRunPositions::test_real_position_verification_uses_indodax_balance_key tests/test_signal_formatter_telegram_display.py::test_signal_message_uses_compact_indicator_layout` ✅.
+- Related suite: `scripts/test.sh -q tests/test_scalper_dryrun_positions.py tests/test_signal_formatter_telegram_display.py tests/test_telegram_signal_scalper_buttons.py` ✅.
+- Syntax: `python -m py_compile scalper/scalper_module.py signals/signal_formatter.py` ✅.
+
 ### Changed - 2026-05-24 (Runtime History Reset & Retention)
 - `bot.py` scheduled DB cleanup sekarang menjalankan retention 30 hari dengan guard ukuran DB 10GB untuk price history, runtime trade history, dan signal history.
 - `core/database.py` menambah cleanup/reset runtime history untuk tabel AutoTrade/SmartHunter/AutoHunter (`trades`, `trade_reviews`, `trade_outcomes`, `performance`, `pair_performance`, `signals`) tanpa menghapus user/watchlist/config; cleanup berkala tetap mempertahankan posisi `OPEN`.

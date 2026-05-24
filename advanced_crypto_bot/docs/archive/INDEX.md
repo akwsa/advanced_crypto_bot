@@ -2,7 +2,7 @@
 
 **Last Updated:** 2026-05-24
 **Version:** 1.0
-**Status:** Critical/High bug report verified; runtime fixes, Prioritas 7 refactor notes, dashboard-web Phase 0 audit/heartbeat, 2026-05-22 bot.py pending-order hardening, dashboard chart graphics clean-thin polish, 2026-05-22 Sesi 3 thinnest-continuous chart line iterasi, 2026-05-22 Sesi 4 Prioritas 1 signal entry tuning, 2026-05-22 Sesi 5 Telegram signal action buttons wiring, 2026-05-22 Sesi 6 Telegram signal font/emphasis compact, **2026-05-24 AutoTrade DRY RUN BUY→SELL cycle**, dan Scalper REAL position entry fix documented
+**Status:** Critical/High bug report verified; runtime fixes, Prioritas 7 refactor notes, dashboard-web Phase 0 audit/heartbeat, 2026-05-22 bot.py pending-order hardening, dashboard chart graphics clean-thin polish, 2026-05-22 Sesi 3 thinnest-continuous chart line iterasi, 2026-05-22 Sesi 4 Prioritas 1 signal entry tuning, 2026-05-22 Sesi 5 Telegram signal action buttons wiring, 2026-05-22 Sesi 6 Telegram signal font/emphasis compact, **2026-05-24 AutoTrade DRY RUN BUY→SELL cycle**, Scalper REAL position entry fix, runtime history reset/retention, dan Kiro Claude Scalper balance/signal UI update documented
 
 ---
 
@@ -18,7 +18,7 @@
 - **[CATATAN_CHAT_2026-05-20.md](CATATAN_CHAT_2026-05-20.md)** - 2026-05-20 fix session notes and verification log
 - **[CATATAN_CHAT_2026-05-21.md](CATATAN_CHAT_2026-05-21.md)** - Prioritas 7 bot.py refactor notes: admin panel helper extraction and quick action tests
 - **[CATATAN_CHAT_2026-05-22.md](CATATAN_CHAT_2026-05-22.md)** - bot.py pending-order hardening: `order_id=None` regression and verification log
-- **[CATATAN_CHAT_2026-05-24.md](CATATAN_CHAT_2026-05-24.md)** - AutoTrade DRY RUN BUY→SELL cycle dan Scalper REAL `/s_posisi`/SELL sync dari Indodax holdings/trade history
+- **[CATATAN_CHAT_2026-05-24.md](CATATAN_CHAT_2026-05-24.md)** - AutoTrade DRY RUN BUY→SELL cycle, Scalper REAL `/s_posisi`/SELL sync dari Indodax holdings/trade history, runtime history reset, dan Kiro Claude balance/signal UI update
 - **[TESTING_PLAN_AUTOTRADE_HUNTER.md](TESTING_PLAN_AUTOTRADE_HUNTER.md)** - Testing procedures
 - **[OPTIMIZATION_FIXES.md](OPTIMIZATION_FIXES.md)** - Critical fixes & optimizations
 

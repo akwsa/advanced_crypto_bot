@@ -614,6 +614,14 @@ class TestScalperDryRunPositions(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(scalper.active_positions["edenidr"]["amount"], 25)
         self.assertEqual(scalper.active_positions["edenidr"]["source"], "indodax_trade_history")
 
+    async def test_real_position_verification_uses_indodax_balance_key(self):
+        scalper = self._scalper(
+            real=True,
+            indodax=_FakeIndodax(idr_balance=684, balances={"eden": "29.20328061"}),
+        )
+
+        self.assertTrue(scalper._verify_position_exists("edenidr"))
+
     async def test_posisi_keeps_position_visible_when_live_price_unavailable(self):
         scalper = self._scalper()
         scalper._get_price_sync = lambda pair: None

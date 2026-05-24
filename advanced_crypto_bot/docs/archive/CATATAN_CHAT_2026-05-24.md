@@ -1,4 +1,49 @@
-# Catatan Chat 2026-05-24 — AutoTrade DRY RUN BUY→SELL Cycle, Scalper REAL Position Entry Fix, Runtime History Reset
+# Catatan Chat 2026-05-24 — AutoTrade DRY RUN BUY→SELL Cycle, Scalper REAL Position Entry Fix, Runtime History Reset, Kiro Claude Balance/Signal UI
+
+## Scope — Kiro Claude Scalper Balance Verification & Compact Signal UI
+
+Mencatat perubahan dari Kiro Claude: verifier posisi REAL Scalper memakai key saldo Indodax yang benar (`balance`), dan format indikator utama signal Telegram dibuat lebih compact agar mudah dibaca di mobile.
+
+## Files Changed — Kiro Claude Scalper Balance Verification & Compact Signal UI
+
+- `scalper/scalper_module.py`
+  - `_verify_position_exists()` sekarang menerima format `IndodaxAPI.get_balance()` yang berisi `balance` dan bukan `funds`.
+  - Dampak: response valid dari Indodax tidak lagi menghasilkan warning `Could not fetch balance to verify position ...`; posisi tetap fail-safe bila API gagal.
+- `signals/signal_formatter.py`
+  - Bagian `Indikator utama` diringkas menjadi baris `RSI/MACD`, `MA/BB`, dan `Vol`.
+- `GOALS.md` / `README.md`
+  - Menambahkan roadmap target metrik/timeline menuju real trading bertahap dan menautkannya dari README.
+  - Catatan safety: `MAX_DRAWDOWN_PCT = 0.10` berarti 10% karena config memakai fraction.
+- `tests/test_scalper_dryrun_positions.py`
+  - Regression untuk memastikan verifikasi posisi REAL membaca saldo coin dari key `balance`.
+- `tests/test_signal_formatter_telegram_display.py`
+  - Regression untuk layout indikator compact.
+
+## Verification — Kiro Claude Scalper Balance Verification & Compact Signal UI
+
+```bash
+cd /home/officer/advanced_crypto_bot/advanced_crypto_bot
+scripts/test.sh -q tests/test_scalper_dryrun_positions.py::TestScalperDryRunPositions::test_real_position_verification_uses_indodax_balance_key tests/test_signal_formatter_telegram_display.py::test_signal_message_uses_compact_indicator_layout
+# PASS
+
+scripts/test.sh -q tests/test_scalper_dryrun_positions.py tests/test_signal_formatter_telegram_display.py tests/test_telegram_signal_scalper_buttons.py
+# PASS
+
+python -m py_compile scalper/scalper_module.py signals/signal_formatter.py
+# OK
+```
+
+## Safety Impact — Kiro Claude Scalper Balance Verification & Compact Signal UI
+
+- Tidak mengubah order execution path Indodax, `_execute_real_sell()`, `create_order()`, sizing, TP/SL trigger, atau API key gate.
+- Perubahan Scalper hanya pada verifikasi saldo posisi REAL; saat balance API gagal, logic tetap fail-safe dan tidak menghapus posisi.
+- Perubahan signal hanya formatting Telegram; keputusan internal (`BUY`, `SELL`, `HOLD`) tidak berubah.
+
+## Rollback Plan — Kiro Claude Scalper Balance Verification & Compact Signal UI
+
+Revert commit perubahan ini untuk mengembalikan verifier ke behavior sebelumnya dan format indikator lama. Tidak ada migrasi DB atau data runtime baru.
+
+---
 
 ## Scope — Runtime History Reset & Retention
 

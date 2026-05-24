@@ -1182,11 +1182,11 @@ class ScalperModule:
         try:
             # Get balance from Indodax
             balance_info = self.indodax.get_balance()
-            if not balance_info or 'funds' not in balance_info:
+            if not balance_info or 'balance' not in balance_info:
                 logger.warning(f"⚠️ Could not fetch balance to verify position {pair.upper()}")
                 return True  # Assume valid if we can't verify
 
-            funds = balance_info['funds']
+            funds = balance_info['balance']
 
             # Extract coin name from pair (e.g., 'arcidr' -> 'arc')
             coin = pair.lower().replace('idr', '').strip()
