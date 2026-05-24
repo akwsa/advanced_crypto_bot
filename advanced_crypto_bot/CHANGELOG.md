@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed - 2026-05-24 (Scalper REAL Position Entry)
+- `/s_posisi`, refresh posisi, SELL callback, confirmed SELL, dan `/s_sell` di REAL mode sekarang sync dari Indodax holdings/trade history sebelum menampilkan atau menjual posisi.
+- Entry REAL direkonstruksi dari Indodax order/trade history; kasus EDENIDR local stale `1,648` sekarang akan menampilkan entry aktual dari eksekusi terbaru seperti `1,704` bila itulah lot yang tersisa di Indodax.
+- `IndodaxAPI.get_trade_history()` memakai format private pair Indodax (`edenidr` → `eden_idr`) untuk `orderHistory`.
+- Local `active_positions` hanya dipakai sebagai metadata fallback (TP/SL/order_id), bukan sumber kebenaran entry/amount REAL.
+
+### Verification - 2026-05-24 (Scalper REAL Position Entry)
+- RED: regression `/s_posisi` gagal sebelum patch karena masih menampilkan `Entry 1,648` dari cache local.
+- GREEN: `scripts/test.sh -q tests/test_scalper_dryrun_positions.py tests/test_indodax_api_order_params.py` ✅ 35 passed, 2 warnings.
+- Import check: `PYTHONPATH=. python - <<'PY' ... import bot ... PY` ✅ `bot import ok`.
+
 ### Changed - 2026-05-23 (Scalper Telegram SL/TP UI)
 - `scalper/scalper_module.py`: tampilan Telegram-only untuk Scalper SL/TP sekarang menampilkan persentase TP/SL dari entry, estimasi Risk/Reward, R/R, dan warning bahwa SL/TP adalah bot-side polling bukan native OCO Indodax.
 - Tombol cepat TP/SL posisi diperjelas menjadi preset `TP +1% / SL -0.5%`, `TP +2% / SL -1%`, `TP +3% / SL -2%`, dan `SL BE`.

@@ -514,7 +514,7 @@ class IndodaxAPI:
             nonce = int(time.time() * 1000000)
 
             if pair:
-                pair_symbol = pair.replace('/', '_').lower()
+                pair_symbol = self._private_pair_symbol(pair)
                 post_params = {
                     'method': 'orderHistory',
                     'pair': pair_symbol,

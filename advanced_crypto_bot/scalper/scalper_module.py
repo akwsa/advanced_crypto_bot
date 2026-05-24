@@ -352,38 +352,165 @@ class ScalperModule:
         makes ``order.get(...)`` crash. This normalizer keeps /s_sync tolerant
         without changing order execution behavior.
         """
-        if isinstance(raw_open_orders, dict):
-            iterator = raw_open_orders.items()
-        elif isinstance(raw_open_orders, list):
-            iterator = [(None, item) for item in raw_open_orders]
+        yield from self._iter_indodax_rows(raw_open_orders, row_kind="open order")
+
+    def _iter_indodax_rows(self, raw_rows, row_kind="row"):
+        """Yield dict rows from list/dict Indodax response shapes with pair hints."""
+        if isinstance(raw_rows, dict):
+            if isinstance(raw_rows.get('orders'), (list, dict)):
+                iterator = [(None, raw_rows.get('orders'))]
+            else:
+                iterator = raw_rows.items()
+        elif isinstance(raw_rows, list):
+            iterator = [(None, item) for item in raw_rows]
         else:
             return
 
-        for pair_hint, order_group in iterator:
-            if isinstance(order_group, dict):
-                orders = [order_group]
-            elif isinstance(order_group, list):
-                orders = order_group
+        for pair_hint, row_group in iterator:
+            if isinstance(row_group, dict):
+                rows = [row_group]
+            elif isinstance(row_group, list):
+                rows = row_group
             else:
                 logger.warning(
-                    "Skipping unsupported Indodax open order entry for %s: %s",
+                    "Skipping unsupported Indodax %s entry for %s: %s",
+                    row_kind,
                     pair_hint,
-                    type(order_group).__name__,
+                    type(row_group).__name__,
                 )
                 continue
 
-            for order in orders:
-                if not isinstance(order, dict):
+            for row in rows:
+                if not isinstance(row, dict):
                     logger.warning(
-                        "Skipping unsupported Indodax open order item for %s: %s",
+                        "Skipping unsupported Indodax %s item for %s: %s",
+                        row_kind,
                         pair_hint,
-                        type(order).__name__,
+                        type(row).__name__,
                     )
                     continue
-                normalized_order = dict(order)
-                if pair_hint and not normalized_order.get('pair'):
-                    normalized_order['pair'] = pair_hint
-                yield normalized_order
+                normalized_row = dict(row)
+                if pair_hint and not normalized_row.get('pair'):
+                    normalized_row['pair'] = pair_hint
+                yield normalized_row
+
+    def _trade_row_timestamp(self, row):
+        for key in ('finish_time', 'submit_time', 'timestamp', 'trade_date', 'date', 'time'):
+            value = row.get(key)
+            if value in (None, ''):
+                continue
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                continue
+        return 0.0
+
+    def _trade_row_amount(self, row, price):
+        for key in ('success_amount', 'filled_amount', 'executed_amount', 'deal_amount', 'amount'):
+            amount = self._safe_float(row.get(key))
+            if amount > 0:
+                return amount
+
+        total = self._safe_float(row.get('total') or row.get('idr'))
+        if total > 0 and price > 0:
+            return total / price
+
+        for key in ('remain_amount', 'amount_remain'):
+            amount = self._safe_float(row.get(key))
+            if amount > 0:
+                return amount
+        return 0.0
+
+    def _entry_from_indodax_trade_history(self, pair, current_amount):
+        """Return an execution-derived entry for the current real Indodax holding.
+
+        REAL /s_posisi must not present stale Telegram/local entries as facts.
+        This reconstructs the currently held lots from Indodax order history and
+        trims older lots if the history total exceeds the actual getInfo balance.
+        """
+        if not self._is_real_order_ready() or current_amount <= 0:
+            return None
+
+        try:
+            raw_history = self.indodax.get_trade_history(pair=pair, limit=100)
+        except TypeError:
+            raw_history = self.indodax.get_trade_history(pair)
+        except Exception as e:
+            logger.debug(f"Indodax trade history unavailable for {pair}: {e}")
+            return None
+
+        lots = []
+        for row in sorted(self._iter_indodax_rows(raw_history, row_kind="trade history"), key=self._trade_row_timestamp):
+            row_pair = self._normalize_pair(row.get('pair') or pair)
+            if row_pair and row_pair != pair:
+                continue
+
+            trade_type = str(row.get('type') or row.get('side') or '').lower()
+            price = self._safe_float(row.get('price'))
+            amount = self._trade_row_amount(row, price)
+            if price <= 0 or amount <= 0:
+                continue
+
+            if trade_type == 'buy':
+                lots.append({'amount': amount, 'price': price, 'time': self._trade_row_timestamp(row)})
+            elif trade_type == 'sell':
+                remaining_sell = amount
+                while remaining_sell > 1e-12 and lots:
+                    consume = min(lots[0]['amount'], remaining_sell)
+                    lots[0]['amount'] -= consume
+                    remaining_sell -= consume
+                    if lots[0]['amount'] <= 1e-12:
+                        lots.pop(0)
+
+        if not lots:
+            return None
+
+        known_amount = sum(lot['amount'] for lot in lots)
+        amount_to_price = min(current_amount, known_amount)
+        if amount_to_price <= 1e-12:
+            return None
+
+        # If account balance is smaller than known buy lots (history window or
+        # outside-Telegram sells), use the most recent remaining lots for the
+        # current scalper position instead of old cached Telegram entries.
+        selected = []
+        remaining = amount_to_price
+        for lot in reversed(lots):
+            if remaining <= 1e-12:
+                break
+            take = min(lot['amount'], remaining)
+            selected.append((take, lot['price']))
+            remaining -= take
+
+        selected_amount = sum(amount for amount, _ in selected)
+        if selected_amount <= 1e-12:
+            return None
+
+        entry = sum(amount * price for amount, price in selected) / selected_amount
+        first_time = min((lot.get('time', 0) for lot in lots if lot.get('time')), default=time.time())
+        return {
+            'entry': entry,
+            'capital': entry * current_amount,
+            'known_amount': known_amount,
+            'time': first_time,
+            'source': 'indodax_trade_history',
+        }
+
+    def _sync_real_positions_if_ready(self, reason="real position sync"):
+        """Refresh REAL scalper positions from Indodax holdings when possible.
+
+        Returns True only when a real holdings sync was attempted successfully.
+        Callers in DRY RUN or REAL-without-API continue using local state so
+        existing fail-closed real-order gates can produce their normal message.
+        """
+        if not self._is_real_order_ready():
+            return False
+        try:
+            self._real_positions_from_indodax_holdings()
+            return True
+        except Exception as e:
+            logger.debug(f"Indodax holdings sync failed for {reason}: {e}")
+            return False
 
     def _real_positions_from_indodax_holdings(self):
         """Build real-mode display/sell positions from Indodax asset balances.
@@ -438,14 +565,24 @@ class ScalperModule:
 
             old_amount = self._safe_float(old.get('amount'))
             old_capital = self._safe_float(old.get('capital'))
-            capital = old_capital if old_capital > 0 and abs(old_amount - amount) <= 1e-8 else entry * amount
+
+            history_entry = self._entry_from_indodax_trade_history(pair, amount)
+            if history_entry:
+                entry = self._safe_float(history_entry.get('entry'))
+                capital = self._safe_float(history_entry.get('capital'))
+                source = history_entry.get('source', 'indodax_trade_history')
+                position_time = history_entry.get('time', old.get('time', time.time()))
+            else:
+                source = 'indodax_balance'
+                position_time = old.get('time', time.time())
+                capital = old_capital if old_capital > 0 and abs(old_amount - amount) <= 1e-8 else entry * amount
 
             position = {
                 'entry': entry,
-                'time': old.get('time', time.time()),
+                'time': position_time,
                 'amount': amount,
                 'capital': capital,
-                'source': 'indodax_balance',
+                'source': source,
             }
             for key in ('tp', 'sl', 'order_id'):
                 if key in old:
@@ -2110,6 +2247,7 @@ class ScalperModule:
 
     async def _execute_confirmed_sell(self, query, pair, price, sell_amount=None):
         pair = self._normalize_pair(pair)
+        self._sync_real_positions_if_ready(f"confirmed sell {pair}")
         price = await self._resolve_callback_price(pair, price)
 
         if not price or price <= 0:
@@ -2430,6 +2568,7 @@ class ScalperModule:
     async def _initiate_sell(self, query, pair: str):
         """Initiate sell process - get price and show confirmation"""
         pair = self._normalize_pair(pair)
+        self._sync_real_positions_if_ready(f"sell callback {pair}")
         await self._answer_callback(query, f"💰 Selling {pair.upper()}...")
 
         if pair not in self.active_positions:
@@ -2699,6 +2838,7 @@ class ScalperModule:
             await update.effective_message.reply_text("⚠️ Format: `/s_sell <pair> [price] [amount]`", parse_mode='Markdown')
             return
         pair = self._normalize_pair(context.args[0])
+        self._sync_real_positions_if_ready(f"/s_sell {pair}")
         if pair not in self.active_positions:
             await update.effective_message.reply_text(f"⚠️ Tidak ada posisi di {pair.upper()}.")
             return
@@ -2992,12 +3132,8 @@ class ScalperModule:
 
         # In REAL mode, position display/sell buttons must reflect actual
         # Indodax asset holdings, not stale local JSON/Redis simulated state.
-        if self._is_real_order_ready():
-            try:
-                self._real_positions_from_indodax_holdings()
-            except Exception as e:
-                logger.debug(f"Indodax holdings sync failed for /s_posisi: {e}")
-        elif not self.dry_run:
+        self._sync_real_positions_if_ready("/s_posisi")
+        if not self.dry_run and not self._is_real_order_ready():
             try:
                 from core.database import Database
                 db = Database()
@@ -4434,11 +4570,7 @@ class ScalperModule:
 
         # In REAL mode, refresh must reconcile from actual Indodax holdings
         # before rendering buttons; local cache is only metadata fallback.
-        if self._is_real_order_ready():
-            try:
-                self._real_positions_from_indodax_holdings()
-            except Exception as e:
-                logger.debug(f"Indodax holdings sync failed for refresh posisi: {e}")
+        self._sync_real_positions_if_ready("refresh posisi")
 
         # Phase 2: Pre-fetch ALL position prices in parallel, cache to Redis
         price_cache_map = {}

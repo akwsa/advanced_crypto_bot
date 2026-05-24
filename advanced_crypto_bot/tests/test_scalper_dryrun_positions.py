@@ -34,11 +34,13 @@ class _FakeStateManager:
 
 
 class _FakeIndodax:
-    def __init__(self, idr_balance=123_456, balances=None, balance_hold=None, open_orders=None):
+    def __init__(self, idr_balance=123_456, balances=None, balance_hold=None, open_orders=None, trade_history=None):
         self.idr_balance = idr_balance
         self.balances = dict(balances or {})
         self.balance_hold = dict(balance_hold or {})
         self.open_orders = open_orders if open_orders is not None else []
+        self.trade_history = dict(trade_history or {})
+        self.orders = []
 
     def get_balance(self):
         balance = {"idr": str(self.idr_balance)}
@@ -50,6 +52,24 @@ class _FakeIndodax:
 
     def get_open_orders(self):
         return self.open_orders
+
+    def get_trade_history(self, pair=None, limit=100):
+        normalized = str(pair or "").lower().replace("/", "").replace("_", "")
+        if normalized and not normalized.endswith("idr"):
+            normalized += "idr"
+        return self.trade_history.get(normalized, [])
+
+    def create_order(self, pair, order_type, price, amount):
+        normalized = str(pair or "").lower().replace("/", "").replace("_", "")
+        if normalized and not normalized.endswith("idr"):
+            normalized += "idr"
+        self.orders.append({
+            "pair": normalized,
+            "type": order_type,
+            "price": float(price),
+            "amount": float(amount),
+        })
+        return {"success": 1, "return": {"order_id": "sell-123"}}
 
 
 class _FakeRedisStateManager(_FakeStateManager):
@@ -359,6 +379,105 @@ class TestScalperDryRunPositions(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("DRY RUN", text)
         self.assertNotIn("Kas IDR", text)
         self.assertNotIn("50,000,000", text)
+
+    async def test_posisi_real_mode_uses_indodax_trade_history_entry_not_stale_local_cache(self):
+        scalper = self._scalper(
+            real=True,
+            indodax=_FakeIndodax(
+                idr_balance=684,
+                balances={"eden": "25"},
+                trade_history={
+                    "edenidr": [
+                        {"type": "buy", "price": "1648", "amount": "10", "submit_time": "100"},
+                        {"type": "buy", "price": "1704", "amount": "25", "submit_time": "200"},
+                    ]
+                },
+            ),
+        )
+        scalper._get_price_from_api_only = lambda pair: {"edenidr": 1697}[pair]
+        scalper.active_positions["edenidr"] = {
+            "entry": 1648,
+            "time": 1,
+            "amount": 25,
+            "capital": 41_200,
+        }
+
+        update = self._update()
+        with patch("cache.redis_price_cache.price_cache.get_price_sync", return_value=None):
+            await scalper.cmd_posisi(update, SimpleNamespace(args=[]))
+
+        text = update.effective_message.replies[-1][0]
+        self.assertIn("EDENIDR", text)
+        self.assertIn("Entry `1,704`", text)
+        self.assertNotIn("Entry `1,648`", text)
+        self.assertEqual(scalper.active_positions["edenidr"]["entry"], 1704)
+        self.assertEqual(scalper.active_positions["edenidr"]["source"], "indodax_trade_history")
+
+    async def test_sell_callback_real_mode_syncs_holdings_before_confirmation(self):
+        indodax = _FakeIndodax(
+            idr_balance=684,
+            balances={"eden": "25"},
+            trade_history={
+                "edenidr": [
+                    {"type": "buy", "price": "1648", "amount": "10", "submit_time": "100"},
+                    {"type": "buy", "price": "1704", "amount": "25", "submit_time": "200"},
+                ]
+            },
+        )
+        scalper = self._scalper(real=True, indodax=indodax)
+        scalper._get_price_sync = lambda pair: {"edenidr": 1697}[pair]
+        scalper._get_price_from_api_only = lambda pair: {"edenidr": 1697}[pair]
+        scalper.active_positions["edenidr"] = {
+            "entry": 1648,
+            "time": 1,
+            "amount": 25,
+            "capital": 41_200,
+        }
+
+        query = _FakeCallbackQuery("s_sell:edenidr")
+        await scalper._initiate_sell(query, "edenidr")
+
+        text, kwargs = query.edits[-1]
+        callbacks = [
+            button.callback_data
+            for row in kwargs["reply_markup"].inline_keyboard
+            for button in row
+        ]
+        self.assertIn("SELL EDENIDR", text)
+        self.assertIn("Entry: `1,704`", text)
+        self.assertNotIn("Entry: `1,648`", text)
+        self.assertIn("s_confirm_sell:edenidr", callbacks[0])
+        self.assertEqual(scalper.active_positions["edenidr"]["entry"], 1704)
+
+    async def test_confirmed_real_sell_uses_indodax_synced_amount_not_stale_local_amount(self):
+        indodax = _FakeIndodax(
+            idr_balance=684,
+            balances={"eden": "25"},
+            trade_history={
+                "edenidr": [
+                    {"type": "buy", "price": "1704", "amount": "25", "submit_time": "200"},
+                ]
+            },
+        )
+        scalper = self._scalper(real=True, indodax=indodax)
+        scalper._get_price_sync = lambda pair: {"edenidr": 1697}[pair]
+        scalper._get_price_from_api_only = lambda pair: {"edenidr": 1697}[pair]
+        scalper.active_positions["edenidr"] = {
+            "entry": 1648,
+            "time": 1,
+            "amount": 10,
+            "capital": 16_480,
+        }
+
+        query = _FakeCallbackQuery("s_confirm_sell:edenidr:1697")
+        await scalper._execute_confirmed_sell(query, "edenidr", 1697)
+
+        self.assertEqual(len(indodax.orders), 1)
+        self.assertEqual(indodax.orders[0]["pair"], "edenidr")
+        self.assertEqual(indodax.orders[0]["type"], "sell")
+        self.assertEqual(indodax.orders[0]["amount"], 25)
+        self.assertNotIn("edenidr", scalper.active_positions)
+        self.assertIn("SELL EDENIDR", query.edits[-1][0])
 
     async def test_posisi_real_mode_builds_positions_from_indodax_holdings_not_local_cache(self):
         scalper = self._scalper(
