@@ -343,6 +343,48 @@ class ScalperModule:
         except (TypeError, ValueError):
             return float(default)
 
+    def _iter_indodax_open_orders(self, raw_open_orders):
+        """Yield normalized open-order dicts from Indodax openOrders shapes.
+
+        Indodax can return a flat list of orders for one pair, or a dict keyed
+        by pair when all pairs are requested. The pair-keyed shape contains
+        strings/lists/dicts, so iterating it directly yields pair strings and
+        makes ``order.get(...)`` crash. This normalizer keeps /s_sync tolerant
+        without changing order execution behavior.
+        """
+        if isinstance(raw_open_orders, dict):
+            iterator = raw_open_orders.items()
+        elif isinstance(raw_open_orders, list):
+            iterator = [(None, item) for item in raw_open_orders]
+        else:
+            return
+
+        for pair_hint, order_group in iterator:
+            if isinstance(order_group, dict):
+                orders = [order_group]
+            elif isinstance(order_group, list):
+                orders = order_group
+            else:
+                logger.warning(
+                    "Skipping unsupported Indodax open order entry for %s: %s",
+                    pair_hint,
+                    type(order_group).__name__,
+                )
+                continue
+
+            for order in orders:
+                if not isinstance(order, dict):
+                    logger.warning(
+                        "Skipping unsupported Indodax open order item for %s: %s",
+                        pair_hint,
+                        type(order).__name__,
+                    )
+                    continue
+                normalized_order = dict(order)
+                if pair_hint and not normalized_order.get('pair'):
+                    normalized_order['pair'] = pair_hint
+                yield normalized_order
+
     def _real_positions_from_indodax_holdings(self):
         """Build real-mode display/sell positions from Indodax asset balances.
 
@@ -3988,19 +4030,17 @@ class ScalperModule:
             synced_positions = {}
             sync_details = []
             
-            for order in open_orders:
-                pair = order.get('pair', '').lower()
+            normalized_open_orders = list(self._iter_indodax_open_orders(open_orders))
+
+            for order in normalized_open_orders:
+                pair = self._normalize_pair(order.get('pair', ''))
                 if not pair:
                     continue
                 
-                # Normalize pair name
-                if not pair.endswith('idr'):
-                    pair += 'idr'
-                
-                order_type = order.get('type', 'buy').lower()
-                price = float(order.get('price', 0))
-                amount_remaining = float(order.get('amount_remain', 0))
-                order_id = order.get('order', 0)
+                order_type = str(order.get('type', 'buy')).lower()
+                price = self._safe_float(order.get('price', 0))
+                amount_remaining = self._safe_float(order.get('amount_remain', order.get('amount', 0)))
+                order_id = order.get('order', order.get('order_id', 0))
                 
                 # Hanya sync BUY orders (posisi yang masih terbuka)
                 if order_type == 'buy' and amount_remaining > 0:
@@ -4056,7 +4096,7 @@ class ScalperModule:
             else:
                 summary = (
                     f"ℹ️ **TIDAK ADA POSISI BARU**\n\n"
-                    f"Open orders di Indodax: {len(open_orders)}\n"
+                    f"Open orders di Indodax: {len(normalized_open_orders)}\n"
                     f"(Mungkin SELL orders atau belum filled)"
                     f"\n\n{balance_info_text}"
                 )

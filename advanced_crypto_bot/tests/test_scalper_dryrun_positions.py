@@ -34,10 +34,11 @@ class _FakeStateManager:
 
 
 class _FakeIndodax:
-    def __init__(self, idr_balance=123_456, balances=None, balance_hold=None):
+    def __init__(self, idr_balance=123_456, balances=None, balance_hold=None, open_orders=None):
         self.idr_balance = idr_balance
         self.balances = dict(balances or {})
         self.balance_hold = dict(balance_hold or {})
+        self.open_orders = open_orders if open_orders is not None else []
 
     def get_balance(self):
         balance = {"idr": str(self.idr_balance)}
@@ -46,6 +47,9 @@ class _FakeIndodax:
             "balance": balance,
             "balance_hold": {asset: str(amount) for asset, amount in self.balance_hold.items()},
         }
+
+    def get_open_orders(self):
+        return self.open_orders
 
 
 class _FakeRedisStateManager(_FakeStateManager):
@@ -72,9 +76,14 @@ class _FakeRedisStateManager(_FakeStateManager):
 class _FakeMessage:
     def __init__(self):
         self.replies = []
+        self.edits = []
 
     async def reply_text(self, text, **kwargs):
         self.replies.append((text, kwargs))
+        return self
+
+    async def edit_text(self, text, **kwargs):
+        self.edits.append((text, kwargs))
 
 
 class _FakeCallbackQuery:
@@ -414,6 +423,35 @@ class TestScalperDryRunPositions(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("PIPPINIDR", text)
         self.assertNotIn("Tidak ada posisi", text)
         self.assertIn("s_sell:l3idr", callbacks)
+
+    async def test_sync_accepts_indodax_open_orders_dict_by_pair_without_str_get_error(self):
+        scalper = self._scalper(
+            real=True,
+            indodax=_FakeIndodax(
+                idr_balance=765_432,
+                open_orders={
+                    "pippin_idr": [
+                        {
+                            "order": "12345",
+                            "type": "buy",
+                            "price": "710",
+                            "amount_remain": "100",
+                        }
+                    ],
+                    "ignored_idr": "unexpected-non-dict-entry",
+                },
+            ),
+        )
+
+        update = self._update()
+        await scalper.cmd_sync(update, SimpleNamespace(args=[]))
+
+        text = update.effective_message.edits[-1][0]
+        self.assertNotIn("str' object has no attribute 'get", text)
+        self.assertIn("SYNC SELESAI", text)
+        self.assertIn("PIPPINIDR", text)
+        self.assertIn("pippinidr", scalper.active_positions)
+        self.assertEqual(scalper.active_positions["pippinidr"]["order_id"], "12345")
 
     async def test_posisi_keeps_position_visible_when_live_price_unavailable(self):
         scalper = self._scalper()
