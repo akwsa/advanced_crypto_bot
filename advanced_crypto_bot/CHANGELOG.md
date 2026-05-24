@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed - 2026-05-24 (AutoTrade DRY RUN BUY→SELL Cycle)
+- `autotrade/runtime.py`: AutoTrade scan cooldown sekarang tetap bisa dilewati saat pair punya posisi terbuka, supaya signal SELL/STRONG_SELL untuk pair yang sama dapat menutup posisi DRY RUN tanpa menunggu interval scan berikutnya.
+- Tambah regression `tests/test_autotrade_dryrun_signal_cycle.py` yang membuktikan BUY membuka posisi DRY RUN dan SELL berikutnya menutup posisi pair yang sama.
+- Safety: default AutoTrade tetap DRY RUN; tidak ada perubahan ke `MAX_DRAWDOWN_PCT`, API key real-trading gate, atau order execution real-money.
+
+### Verification - 2026-05-24 (AutoTrade DRY RUN BUY→SELL Cycle)
+- RED: regression gagal sebelum patch karena SELL kedua tertahan cooldown `last_ml_update`, posisi DRY RUN tetap OPEN.
+- GREEN: `scripts/test.sh -q tests/test_autotrade_dryrun_signal_cycle.py tests/test_signal_notification_controls.py tests/test_signal_formatter_telegram_display.py` ✅ 31 passed.
+- Import check: `PYTHONPATH=. python - <<'PY' ... import bot ... PY` ✅ `bot import ok`.
+- Full suite: `scripts/test.sh -q tests/` ✅ 344 passed, 10 warnings (pre-existing quant/v4 warnings).
+
 ### Fixed - 2026-05-24 (Scalper REAL Position Entry)
 - `/s_posisi`, refresh posisi, SELL callback, confirmed SELL, dan `/s_sell` di REAL mode sekarang sync dari Indodax holdings/trade history sebelum menampilkan atau menjual posisi.
 - Entry REAL direkonstruksi dari Indodax order/trade history; kasus EDENIDR local stale `1,648` sekarang akan menampilkan entry aktual dari eksekusi terbaru seperti `1,704` bila itulah lot yang tersisa di Indodax.

@@ -174,8 +174,7 @@ def format_signal_message(signal):
     if support_1 > 0 or resistance_1 > 0:
         sr_section = f"""
 🎯 Support/Resistance:
-• Support: `{Utils.format_price(support_1)}` {'IDR' if support_1 > 0 else ''}
-• Resistance: `{Utils.format_price(resistance_1)}` {'IDR' if resistance_1 > 0 else ''}"""
+• S: `{Utils.format_price(support_1)}`   • R: `{Utils.format_price(resistance_1)}`"""
 
     strength_bar = generate_strength_bar_plain(combined_strength)
 
@@ -258,12 +257,14 @@ def format_signal_message_html(signal):
 
     sr_section = ""
     if support_1 > 0 or resistance_1 > 0:
+        s1 = Utils.format_price(support_1) if support_1 > 0 else '—'
+        s2 = Utils.format_price(support_2) if support_2 > 0 else '—'
+        r1 = Utils.format_price(resistance_1) if resistance_1 > 0 else '—'
+        r2 = Utils.format_price(resistance_2) if resistance_2 > 0 else '—'
         sr_section = f"""
 🎯 Support/Resistance:
-• S1: <code>{Utils.format_price(support_1) if support_1 > 0 else '—'}</code>
-• S2: <code>{Utils.format_price(support_2) if support_2 > 0 else '—'}</code>
-• R1: <code>{Utils.format_price(resistance_1) if resistance_1 > 0 else '—'}</code>
-• R2: <code>{Utils.format_price(resistance_2) if resistance_2 > 0 else '—'}</code>
+• S1: <code>{s1}</code>   • S2: <code>{s2}</code>
+• R1: <code>{r1}</code>   • R2: <code>{r2}</code>
 
 📍 Zona Harga: {_safe_text(price_zone)}
 ⚖️ Risk/Reward: {rr_ratio:.2f}"""

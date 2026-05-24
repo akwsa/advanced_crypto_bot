@@ -1,3 +1,52 @@
+# Catatan Chat 2026-05-24 — AutoTrade DRY RUN BUY→SELL Cycle & Scalper REAL Position Entry Fix
+
+## Scope — AutoTrade DRY RUN BUY→SELL Cycle
+
+Memperbaiki AutoTrade DRY RUN agar signal BUY/STRONG_BUY membuka posisi dan signal SELL/STRONG_SELL berikutnya untuk pair yang sama bisa menutup posisi tanpa tertahan cooldown scan `last_ml_update`.
+
+## Files Changed — AutoTrade DRY RUN BUY→SELL Cycle
+
+- `autotrade/runtime.py`
+  - `check_trading_opportunity()` sekarang mengecek posisi terbuka per-pair sebelum cooldown scan.
+  - Jika posisi pair sudah terbuka, cooldown boleh dilewati supaya SELL monitoring tetap berjalan.
+  - Jika tidak ada posisi terbuka, cooldown tetap menahan scan seperti sebelumnya.
+- `tests/test_autotrade_dryrun_signal_cycle.py`
+  - Regression in-memory untuk BUY membuka posisi DRY RUN dan SELL menutup pair yang sama.
+
+## RED/GREEN Evidence — AutoTrade DRY RUN BUY→SELL Cycle
+
+- RED: test baru gagal sebelum patch karena SELL kedua tertahan cooldown dan posisi tetap `OPEN`.
+- GREEN: focused regression pass setelah patch cooldown hanya bypass saat ada posisi terbuka.
+
+## Verification — AutoTrade DRY RUN BUY→SELL Cycle
+
+```bash
+cd /home/officer/advanced_crypto_bot/advanced_crypto_bot
+scripts/test.sh -q tests/test_autotrade_dryrun_signal_cycle.py tests/test_signal_notification_controls.py tests/test_signal_formatter_telegram_display.py
+# 31 passed
+
+PYTHONPATH=. python - <<'PY'
+import bot
+print('bot import ok')
+PY
+# bot import ok
+
+scripts/test.sh -q tests/
+# 344 passed, 10 warnings (pre-existing quant/v4 warnings)
+```
+
+## Safety Impact — AutoTrade DRY RUN BUY→SELL Cycle
+
+- Default AutoTrade tetap DRY RUN.
+- Tidak mengubah `MAX_DRAWDOWN_PCT`, real API-key gate, position sizing, atau order execution real-money.
+- Perubahan hanya membuat SELL monitoring tidak tertahan scan interval saat pair sudah punya posisi terbuka.
+
+## Rollback Plan — AutoTrade DRY RUN BUY→SELL Cycle
+
+Revert perubahan `autotrade/runtime.py` dan hapus `tests/test_autotrade_dryrun_signal_cycle.py` untuk kembali ke cooldown scan sebelumnya. Jika runtime anomali, matikan AutoTrade dan gunakan Scalper/manual confirmation sampai state open trade diverifikasi.
+
+---
+
 # Catatan Chat 2026-05-24 — Scalper REAL Position Entry Fix
 
 ## Scope

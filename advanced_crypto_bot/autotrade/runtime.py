@@ -346,14 +346,24 @@ async def check_trading_opportunity(bot, pair, signal=None):
         return
 
     pair_key = _normalize_pair(pair)
+    user_id = list(bot.subscribers.keys())[0] if bot.subscribers else 1
+    open_trades_for_pair = []
+    try:
+        open_trades_for_pair = [
+            t for t in bot.db.get_open_trades(user_id)
+            if _normalize_pair(t.get("pair") if hasattr(t, "get") else t["pair"]) == pair_key
+        ]
+    except Exception as e:
+        logger.debug(f"⚠️ Could not inspect open trades before auto-trade cooldown for {pair}: {e}")
+
+    cooldown_active = False
     now = datetime.now()
     with _get_runtime_state_lock(bot):
         last_ml_update = getattr(bot, "last_ml_update", {})
         last_update = last_ml_update.get(pair_key)
-        if last_update and now - last_update < timedelta(minutes=bot.auto_trade_interval_minutes):
+        cooldown_active = bool(last_update and now - last_update < timedelta(minutes=bot.auto_trade_interval_minutes))
+        if cooldown_active and not open_trades_for_pair:
             return
-        last_ml_update[pair_key] = now
-        bot.last_ml_update = last_ml_update
 
     is_dry_run = Config.AUTO_TRADE_DRY_RUN
     mode_label = "🧪 DRY RUN" if is_dry_run else "🔴 REAL"
@@ -373,8 +383,15 @@ async def check_trading_opportunity(bot, pair, signal=None):
     if signal["recommendation"] not in ["STRONG_BUY", "BUY", "STRONG_SELL", "SELL"]:
         logger.debug(f"⏸️ Skipping {pair}: Weak signal ({signal['recommendation']})")
         return
-
-    user_id = list(bot.subscribers.keys())[0] if bot.subscribers else 1
+    if cooldown_active and signal["recommendation"] not in ["STRONG_SELL", "SELL"]:
+        logger.debug(f"⏭️ Skipping {pair}: scan cooldown active and signal is not SELL")
+        return
+    if cooldown_active:
+        logger.debug(f"⏭️ Bypassing auto-trade scan cooldown for {pair}: open position needs SELL monitoring")
+    with _get_runtime_state_lock(bot):
+        last_ml_update = getattr(bot, "last_ml_update", {})
+        last_ml_update[pair_key] = now
+        bot.last_ml_update = last_ml_update
     signal_text = f"{mode_label}\n\n{bot._format_signal_message_html(signal)}"
     notif_filter_pass = _signal_passes_filter(bot, signal["recommendation"])
     if not notif_filter_pass:
