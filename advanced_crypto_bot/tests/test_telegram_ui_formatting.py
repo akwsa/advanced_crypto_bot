@@ -168,9 +168,8 @@ class TestTelegramUiFormatting(unittest.TestCase):
 
         text = format_signal_message_html(signal)
 
-        # Implementation uses Title Case for readability (see test_signal_formatter_telegram_display.py).
-        self.assertIn("Keputusan: Beli", text)
-        self.assertNotIn("Keputusan: BELI", text)
+        # Implementation uses UPPER CASE for decision badge.
+        self.assertIn("Keputusan: BELI", text)
         self.assertIn("Saran:", text)
         self.assertIn("Keyakinan bot", text)
         self.assertIn("RSI &lt; 30 &amp; MACD &gt; signal", text)
@@ -187,9 +186,8 @@ class TestTelegramUiFormatting(unittest.TestCase):
             "reason": "price < support",
         })
 
-        # Implementation uses Title Case for readability (see test_signal_formatter_telegram_display.py).
-        self.assertIn("Keputusan: Jual kuat", text)
-        self.assertNotIn("Keputusan: JUAL KUAT", text)
+        # Implementation uses UPPER CASE for decision badge.
+        self.assertIn("Keputusan: JUAL KUAT", text)
         self.assertIn("Harga:", text)
         self.assertIn("Keyakinan:", text)
         self.assertIn("price &lt; support", text)

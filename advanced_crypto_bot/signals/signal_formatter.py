@@ -92,12 +92,8 @@ def _alert_marker(recommendation):
 
 
 def _display_badge(theme):
-    """Return a readable decision label for Telegram text.
-
-    Internal recommendation values stay uppercase (BUY/SELL/etc.) for trading
-    logic, but user-facing Telegram copy should be calmer and easier to read.
-    """
-    return str(theme.get("badge", "")).capitalize()
+    """Return a readable decision label for Telegram text (UPPER CASE)."""
+    return str(theme.get("badge", "")).upper()
 
 
 def generate_strength_bar(strength):
