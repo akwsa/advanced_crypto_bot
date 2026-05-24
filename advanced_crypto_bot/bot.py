@@ -86,6 +86,7 @@ from signals.signal_formatter import (
     generate_strength_bar,
     generate_strength_bar_html,
 )
+from signals.near_miss import build_near_miss_summary, format_near_miss_report_html
 
 # Local modules - Cache
 from cache.redis_price_cache import price_cache as redis_price_cache  # NEW: Redis-backed price cache
@@ -3112,6 +3113,7 @@ class AdvancedCryptoBot:
                 "• `/signal sell` - SELL/STRONG_SELL watchlist\n"
                 "• `/signal hold` - HOLD watchlist\n"
                 "• `/signal buysell` - BUY + SELL watchlist\n"
+                "• `/signal near` - near-miss BUY/SELL informatif\n"
                 "• `/signal on|off` - nyalakan/matikan notif otomatis\n"
                 "• `/signal_notif buy|sell|both` - saring notif otomatis ke Telegram",
                 parse_mode='Markdown'
@@ -3165,6 +3167,11 @@ class AdvancedCryptoBot:
         if subcommand in ("buysell", "buy_sell", "buy-sell", "actionable"):
             context.args = []
             await self.signal_buysell(update, context)
+            return
+
+        if subcommand in ("near", "nearmiss", "near_miss", "near-miss"):
+            context.args = []
+            await self.signal_near_miss(update, context)
             return
 
         # Get pair and sanitize
@@ -4112,6 +4119,27 @@ class AdvancedCryptoBot:
         self._create_background_task(
             self._run_buysell_signal_scan(update, context, watched_pairs)
         )
+        return
+
+    async def signal_near_miss(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Show read-only near-miss BUY/SELL candidates from saved watchlist signals."""
+        user_id = update.effective_user.id
+        watched_pairs = self._get_watched_pairs_for_user(user_id)
+
+        if not watched_pairs:
+            await self._send_message(update, context, "No watched pairs. Use /watch <PAIR> to add.")
+            return
+
+        try:
+            signals = self._get_latest_saved_watchlist_signals(watched_pairs)
+        except Exception as e:
+            logger.error(f"❌ /signal near saved-signal report error: {e}")
+            await self._send_message(update, context, "❌ Gagal membaca signal tersimpan.")
+            return
+
+        summary = build_near_miss_summary(signals)
+        text = format_near_miss_report_html(summary, watched_count=len(watched_pairs))
+        await self._send_message(update, context, text, parse_mode='HTML')
         return
 
     async def _signal_buysell_legacy_unused(self, update: Update, context: ContextTypes.DEFAULT_TYPE):

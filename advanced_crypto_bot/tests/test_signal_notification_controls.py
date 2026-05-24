@@ -45,6 +45,7 @@ class TestSignalNotificationControls(unittest.IsolatedAsyncioTestCase):
         bot._send_message = AsyncMock()
         bot.signal_buy_only = AsyncMock()
         bot.signal_sell_only = AsyncMock()
+        bot.signal_near_miss = AsyncMock()
         return bot
 
     async def test_signal_off_disables_and_persists_automatic_notifications(self):
@@ -82,17 +83,23 @@ class TestSignalNotificationControls(unittest.IsolatedAsyncioTestCase):
         bot.signal_sell_only.assert_awaited_once()
         bot.signal_buy_only.assert_not_awaited()
 
-    async def test_signal_hold_and_buysell_subcommands_route_to_watchlist_filters(self):
+    async def test_signal_hold_buysell_and_near_subcommands_route_to_watchlist_filters(self):
         bot = self._bot_for_signal_command()
         bot.signal_hold_only = AsyncMock()
         bot.signal_buysell = AsyncMock()
+        bot.signal_near_miss = AsyncMock()
 
         await bot.get_signal(self._update(), SimpleNamespace(args=["hold"]))
         bot.signal_hold_only.assert_awaited_once()
         bot.signal_buysell.assert_not_awaited()
+        bot.signal_near_miss.assert_not_awaited()
 
         await bot.get_signal(self._update(), SimpleNamespace(args=["buysell"]))
         bot.signal_buysell.assert_awaited_once()
+        bot.signal_near_miss.assert_not_awaited()
+
+        await bot.get_signal(self._update(), SimpleNamespace(args=["near"]))
+        bot.signal_near_miss.assert_awaited_once()
 
     async def test_signal_hold_only_shows_only_hold_and_neutral(self):
         bot = AdvancedCryptoBot.__new__(AdvancedCryptoBot)
@@ -205,6 +212,31 @@ class TestSignalNotificationControls(unittest.IsolatedAsyncioTestCase):
         bot._get_latest_saved_watchlist_signals = Mock(return_value=signals)
         bot._build_signal_action_markup = Mock(return_value=None)
         return bot
+
+    async def test_signal_near_miss_uses_saved_signals_without_scanning(self):
+        bot = self._bot_for_saved_signal_filter([
+            {
+                "pair": "btcidr",
+                "recommendation": "HOLD",
+                "combined_strength": 0.42,
+                "ml_confidence": 0.81,
+                "reason": "BUY rejected: BUY at/near resistance",
+                "final_gate_source": "SR_VALIDATION",
+            },
+            {"pair": "ethidr", "recommendation": "BUY", "combined_strength": 0.5, "ml_confidence": 0.9},
+        ])
+
+        await bot.signal_near_miss(self._update(), SimpleNamespace(args=[]))
+
+        bot._collect_watchlist_signals.assert_not_called()
+        bot._get_latest_saved_watchlist_signals.assert_called_once()
+        result_text = bot._send_message.await_args.args[2]
+        self.assertIn("Near-miss Signal", result_text)
+        self.assertIn("hanya informatif", result_text)
+        self.assertIn("Tidak membuka order", result_text)
+        self.assertIn("BTCIDR", result_text)
+        self.assertNotIn("ETHIDR", result_text)
+        bot._send_signal_batch_with_actions.assert_not_awaited()
 
     async def test_signal_buy_only_shows_only_buy_and_strong_buy(self):
         bot = self._bot_for_saved_signal_filter([
