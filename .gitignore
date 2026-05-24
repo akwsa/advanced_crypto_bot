@@ -55,6 +55,9 @@ ta-lib-*.tar.gz
 # Continue conversation history
 .continue/
 
+# Local operational backups
+backups/
+
 # Nested bot app runtime/local artifacts
 advanced_crypto_bot/.env
 advanced_crypto_bot/.codex

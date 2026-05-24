@@ -457,10 +457,44 @@ class SignalDatabase:
         """Get most recent signals"""
         return self.get_signals(limit=limit, order="DESC")
     
-    def delete_old_signals(self, days: int = 90) -> int:
-        """Delete signals older than N days"""
+    def _db_size_gb(self) -> float:
+        """Return SQLite DB size including WAL/SHM sidecars."""
+        try:
+            size = os.path.getsize(self.db_path)
+            for suffix in ("-wal", "-shm"):
+                sidecar = f"{self.db_path}{suffix}"
+                if os.path.exists(sidecar):
+                    size += os.path.getsize(sidecar)
+            return size / (1024 ** 3)
+        except OSError:
+            return 0.0
+
+    def reset_history(self) -> Dict[str, int]:
+        """Clear all Telegram signal history so analysis starts fresh now."""
+        deleted = {}
+        with self.get_connection(autocommit=True) as conn:
+            cursor = conn.cursor()
+            for table in ("signals", "signal_metadata"):
+                cursor.execute(f"SELECT COUNT(*) FROM {table}")
+                deleted[table] = cursor.fetchone()[0]
+                if deleted[table] > 0:
+                    cursor.execute(f"DELETE FROM {table}")
+        if any(deleted.values()):
+            logger.warning(f"🧹 Signal history reset completed: {deleted}")
+            self._vacuum()
+        return deleted
+
+    def delete_old_signals(self, days: int = 90, max_db_size_gb: float = None) -> int:
+        """Delete signals older than N days.
+
+        ``max_db_size_gb`` documents/enables the VPS space guard: when the DB is
+        larger than the threshold, the same retention cleanup is applied and the
+        size trigger is logged. The retention cutoff remains ``days``.
+        """
         from datetime import timedelta
         cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+        db_size_gb = self._db_size_gb()
+        size_triggered = max_db_size_gb is not None and db_size_gb > max_db_size_gb
         
         with self.get_connection(autocommit=True) as conn:
             cursor = conn.cursor()
@@ -468,7 +502,8 @@ class SignalDatabase:
             deleted = cursor.rowcount
             
             if deleted > 0:
-                logger.info(f"🗑️ Deleted {deleted} old signals (older than {days} days)")
+                suffix = f" (DB size {db_size_gb:.2f}GB > {max_db_size_gb}GB)" if size_triggered else ""
+                logger.info(f"🗑️ Deleted {deleted} old signals (older than {days} days){suffix}")
         if deleted > 0:
             self._vacuum()
             

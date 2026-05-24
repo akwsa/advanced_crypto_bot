@@ -1339,9 +1339,11 @@ class AdvancedCryptoBot:
         """Cleanup old data every 6 hours"""
         try:
             logger.info("⏰ Running scheduled DB cleanup...")
-            self.db.cleanup_old_price_data(days=30)
+            self.db.cleanup_old_price_data(days=30, max_db_size_gb=10)
+            runtime_deleted = self.db.cleanup_old_runtime_history(days=30, max_db_size_gb=10)
+            logger.info(f"🗑️ Cleaned up runtime history: {runtime_deleted}")
             if hasattr(self, '_signal_db') and self._signal_db:
-                deleted_signals = self._signal_db.delete_old_signals(days=30)
+                deleted_signals = self._signal_db.delete_old_signals(days=30, max_db_size_gb=10)
                 logger.info(f"🗑️ Cleaned up {deleted_signals} old signals")
             logger.info("✅ DB cleanup complete")
         except Exception as e:

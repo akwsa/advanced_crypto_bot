@@ -462,27 +462,130 @@ class Database:
                 df = df.dropna(subset=['timestamp'])
             return df.sort_values('timestamp')
 
-    def cleanup_old_price_data(self, days=30):
-        """Delete old price history data to save storage space"""
-        from datetime import timedelta
+    def _table_count(self, cursor, table, where_clause=None, params=()):
+        query = f"SELECT COUNT(*) as cnt FROM {table}"
+        if where_clause:
+            query += f" WHERE {where_clause}"
+        cursor.execute(query, params)
+        return cursor.fetchone()['cnt']
+
+    def _delete_from_table(self, cursor, table, where_clause=None, params=()):
+        count = self._table_count(cursor, table, where_clause, params)
+        if count <= 0:
+            return 0
+        query = f"DELETE FROM {table}"
+        if where_clause:
+            query += f" WHERE {where_clause}"
+        cursor.execute(query, params)
+        return cursor.rowcount
+
+    def _db_size_gb(self):
+        import os
+        try:
+            size = os.path.getsize(self.db_path)
+            for suffix in ('-wal', '-shm'):
+                sidecar = f"{self.db_path}{suffix}"
+                if os.path.exists(sidecar):
+                    size += os.path.getsize(sidecar)
+            return size / (1024 ** 3)
+        except OSError:
+            return 0.0
+
+    def cleanup_old_price_data(self, days=30, max_db_size_gb=None):
+        """Delete old price history data to save storage space.
+
+        Keeps the normal retention window at ``days``. If ``max_db_size_gb`` is
+        provided and the SQLite database is larger than that limit, this still
+        applies the same retention cutoff immediately and logs the size trigger.
+        """
         cutoff_date = datetime.now() - timedelta(days=days)
+        db_size_gb = self._db_size_gb()
+        size_triggered = max_db_size_gb is not None and db_size_gb > max_db_size_gb
         
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            
-            # Count records before deletion
-            cursor.execute('SELECT COUNT(*) as cnt FROM price_history WHERE timestamp < ?', (cutoff_date,))
-            old_count = cursor.fetchone()['cnt']
-            
+            old_count = self._table_count(cursor, 'price_history', 'timestamp < ?', (cutoff_date,))
             if old_count > 0:
                 cursor.execute('DELETE FROM price_history WHERE timestamp < ?', (cutoff_date,))
                 conn.commit()
-                logger.info(f"🗑️ Cleaned up {old_count} old price records (older than {days} days)")
+                suffix = f" (DB size {db_size_gb:.2f}GB > {max_db_size_gb}GB)" if size_triggered else ""
+                logger.info(f"🗑️ Cleaned up {old_count} old price records (older than {days} days){suffix}")
             else:
                 logger.debug(f"✅ No old price data to cleanup (keeping last {days} days)")
         
         # VACUUM must run outside active transaction.
         self._vacuum_database()
+        return old_count
+
+    def cleanup_old_runtime_history(self, days=30, max_db_size_gb=None):
+        """Delete old closed bot runtime history while preserving open positions.
+
+        This covers Telegram AutoTrade/SmartHunter/AutoHunter analysis history:
+        closed trades, daily performance, pair performance, trade reviews,
+        trade outcomes, and in-DB signal rows. Open trades are intentionally
+        preserved so live/running positions are not removed by retention.
+        """
+        cutoff_dt = datetime.now() - timedelta(days=days)
+        cutoff_date = cutoff_dt.date().isoformat()
+        db_size_gb = self._db_size_gb()
+        size_triggered = max_db_size_gb is not None and db_size_gb > max_db_size_gb
+        deleted = {}
+
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            old_closed_ids = [
+                row['id'] for row in cursor.execute(
+                    """
+                    SELECT id FROM trades
+                    WHERE status = 'CLOSED'
+                      AND COALESCE(closed_at, opened_at) < ?
+                    """,
+                    (cutoff_dt,),
+                ).fetchall()
+            ]
+            if old_closed_ids:
+                placeholders = ','.join('?' for _ in old_closed_ids)
+                deleted['trade_reviews'] = self._delete_from_table(cursor, 'trade_reviews', f'trade_id IN ({placeholders})', old_closed_ids)
+                deleted['trade_outcomes'] = self._delete_from_table(cursor, 'trade_outcomes', f'trade_id IN ({placeholders})', old_closed_ids)
+                deleted['trades'] = self._delete_from_table(cursor, 'trades', f'id IN ({placeholders})', old_closed_ids)
+            else:
+                deleted['trade_reviews'] = 0
+                deleted['trade_outcomes'] = 0
+                deleted['trades'] = 0
+
+            deleted['performance'] = self._delete_from_table(cursor, 'performance', 'date < ?', (cutoff_date,))
+            deleted['pair_performance'] = self._delete_from_table(cursor, 'pair_performance', 'last_trade_at < ?', (cutoff_dt,))
+            deleted['signals'] = self._delete_from_table(cursor, 'signals', 'timestamp < ?', (cutoff_dt,))
+
+        if any(deleted.values()):
+            suffix = f" (DB size {db_size_gb:.2f}GB > {max_db_size_gb}GB)" if size_triggered else ""
+            logger.info(f"🗑️ Runtime history cleanup (> {days} days){suffix}: {deleted}")
+            self._vacuum_database()
+        return deleted
+
+    def reset_runtime_history(self, include_open=False):
+        """Reset Telegram bot runtime history so analysis starts fresh now.
+
+        By default this clears only closed trade history and analytics. Passing
+        ``include_open=True`` also removes open bot positions; use only for an
+        explicit operator-requested reset.
+        """
+        deleted = {}
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            deleted['trade_reviews'] = self._delete_from_table(cursor, 'trade_reviews')
+            deleted['trade_outcomes'] = self._delete_from_table(cursor, 'trade_outcomes')
+            if include_open:
+                deleted['trades'] = self._delete_from_table(cursor, 'trades')
+            else:
+                deleted['trades'] = self._delete_from_table(cursor, 'trades', "status = 'CLOSED'")
+            deleted['performance'] = self._delete_from_table(cursor, 'performance')
+            deleted['pair_performance'] = self._delete_from_table(cursor, 'pair_performance')
+            deleted['signals'] = self._delete_from_table(cursor, 'signals')
+        if any(deleted.values()):
+            logger.warning(f"🧹 Runtime history reset completed: {deleted}")
+            self._vacuum_database()
+        return deleted
 
     def save_price_history(self, pair, df):
         """Save historical price data (candles) to database using batch insert.

@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed - 2026-05-24 (Runtime History Reset & Retention)
+- `bot.py` scheduled DB cleanup sekarang menjalankan retention 30 hari dengan guard ukuran DB 10GB untuk price history, runtime trade history, dan signal history.
+- `core/database.py` menambah cleanup/reset runtime history untuk tabel AutoTrade/SmartHunter/AutoHunter (`trades`, `trade_reviews`, `trade_outcomes`, `performance`, `pair_performance`, `signals`) tanpa menghapus user/watchlist/config; cleanup berkala tetap mempertahankan posisi `OPEN`.
+- `signals/signal_db.py` menambah reset signal history dan parameter `max_db_size_gb` pada cleanup signal lama.
+- History runtime live sudah dibackup lalu di-reset agar mulai baru dari sekarang: `trades/trade_reviews/trade_outcomes/performance/pair_performance` menjadi 0, `signals.db` lama terhapus; signal baru setelah reset tetap boleh masuk.
+- Safety: tidak mengubah `AUTO_TRADE_DRY_RUN`, real-order path, sizing, TP/SL, API key gate, atau `MAX_DRAWDOWN_PCT`.
+
+### Verification - 2026-05-24 (Runtime History Reset & Retention)
+- Regression: `scripts/test.sh -q tests/test_history_cleanup_retention.py` ✅ 3 passed.
+- Related suite: `scripts/test.sh -q tests/test_history_cleanup_retention.py tests/test_performance_backfill.py tests/test_dashboard_api_phase1.py tests/test_dashboard_api_readonly_phase1_endpoints.py` ✅ 23 passed.
+- Syntax: `python -m py_compile bot.py core/database.py signals/signal_db.py` ✅.
+- Live DB check: old runtime rows older than 30 days = 0; runtime trade/review/outcome/performance tables = 0 after reset; `signals.db` old signals = 0.
+
 ### Fixed - 2026-05-24 (AutoTrade DRY RUN BUY→SELL Cycle)
 - `autotrade/runtime.py`: AutoTrade scan cooldown sekarang tetap bisa dilewati saat pair punya posisi terbuka, supaya signal SELL/STRONG_SELL untuk pair yang sama dapat menutup posisi DRY RUN tanpa menunggu interval scan berikutnya.
 - Tambah regression `tests/test_autotrade_dryrun_signal_cycle.py` yang membuktikan BUY membuka posisi DRY RUN dan SELL berikutnya menutup posisi pair yang sama.

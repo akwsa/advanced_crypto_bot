@@ -1599,9 +1599,22 @@ class ScalperModule:
                 logger.info("✅ No open orders at Indodax - clean start")
                 return
             
+            # Normalize: openOrders tanpa pair bisa return dict {pair: [orders]}
+            if isinstance(open_orders, dict):
+                flat_orders = []
+                for p, orders_list in open_orders.items():
+                    if isinstance(orders_list, list):
+                        for o in orders_list:
+                            if isinstance(o, dict) and 'pair' not in o:
+                                o['pair'] = p.replace('_', '')
+                            flat_orders.append(o)
+                open_orders = flat_orders
+
             # Parse dan sync posisi
             synced_count = 0
             for order in open_orders:
+                if not isinstance(order, dict):
+                    continue
                 pair = order.get('pair', '').lower()
                 if not pair.endswith('idr'):
                     pair += 'idr'
