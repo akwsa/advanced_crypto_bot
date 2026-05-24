@@ -1,0 +1,56 @@
+# Cursor Rules — Advanced Crypto Bot
+
+You are working on `/home/officer/advanced_crypto_bot/advanced_crypto_bot`, an Indodax + Telegram crypto trading bot.
+
+## Non-negotiable Safety
+
+- Default mode is DRY RUN. Do not enable real trading unless explicitly requested and confirmed.
+- Never print, commit, or paste API keys/secrets/tokens. Use `[REDACTED]` in notes.
+- Do not change `Config.MAX_DRAWDOWN_PCT = 0.10` to `10.0`; code compares drawdown as a fraction, so `0.10` means 10%.
+- Avoid broad refactors in trading paths without tests and rollback.
+
+## Read First
+
+Before editing, read relevant files plus:
+
+- `BMAD_AI_TEAM_PLAYBOOK.md`
+- `INDEX.md`
+- `SYSTEM_MAP.md`
+- `BUG_REPORT_CRITICAL.md`
+- `CATATAN_CHAT_2026-05-20.md`
+
+## Test Command
+
+The project venv may not have pytest. Use the known-good interpreter:
+
+```bash
+/home/officer/.hermes/bin/python -m pytest -q
+```
+
+For focused changes, run target tests first, then full suite when feasible.
+
+## Coding Rules
+
+- Prefer small, isolated changes.
+- Add regression tests for behavior changes.
+- For risk/trading code, include dry-run safety tests if private API calls could be touched.
+- Do not add snapshot/change-detector tests for model catalogs, counts, timestamps, or docs.
+- Preserve existing public Telegram command behavior unless the task explicitly changes it.
+- If modifying ML/quant logic, document expected impact on BUY/SELL/HOLD distribution.
+
+## Known Hotspots
+
+- `bot.py` is ~9.7k LOC; extract gradually.
+- `signals/signal_pipeline.py::generate_signal_for_pair` is very long; prefer helper extraction.
+- `scalper/scalper_module.py` mixes UI, state, and trading operations.
+- Threads/background tasks need careful lifecycle and locking.
+
+## Report Format
+
+After changes, report:
+
+1. Files changed
+2. Why changed
+3. Tests run and results
+4. Trading/safety risk
+5. Rollback plan

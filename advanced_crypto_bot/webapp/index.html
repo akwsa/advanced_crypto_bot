@@ -1,0 +1,658 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="Portfolio website untuk Advanced Crypto Bot: sistem trading crypto read-only first, DRY RUN locked, dashboard observability, dan automation bot." />
+  <title>Advanced Crypto Bot — Portfolio Sistem Trading Otomatis</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #050608;
+      --bg-soft: #08090d;
+      --panel: rgba(255, 255, 255, 0.035);
+      --panel-strong: rgba(255, 255, 255, 0.065);
+      --line: rgba(255, 255, 255, 0.095);
+      --line-soft: rgba(255, 255, 255, 0.055);
+      --text: #f7f8f8;
+      --muted: #9aa3af;
+      --faint: #626b76;
+      --accent: #6f7cff;
+      --accent-2: #00d4ff;
+      --safe: #16c784;
+      --warn: #ffcc66;
+      --danger: #ff5d73;
+      --radius-xl: 28px;
+      --radius-lg: 20px;
+      --radius-md: 14px;
+      --shadow: 0 32px 120px rgba(0, 0, 0, 0.55);
+      --max: 1180px;
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background:
+        radial-gradient(circle at 15% 0%, rgba(111, 124, 255, 0.28), transparent 34rem),
+        radial-gradient(circle at 85% 14%, rgba(0, 212, 255, 0.12), transparent 26rem),
+        linear-gradient(180deg, #050608 0%, #08090d 46%, #050608 100%);
+      color: var(--text);
+      font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-feature-settings: "cv01", "ss03";
+      line-height: 1.5;
+      overflow-x: hidden;
+    }
+
+    a { color: inherit; text-decoration: none; }
+    button, a { -webkit-tap-highlight-color: transparent; }
+
+    .shell {
+      width: min(var(--max), calc(100% - 36px));
+      margin: 0 auto;
+    }
+
+    .nav {
+      position: sticky;
+      top: 14px;
+      z-index: 20;
+      width: min(var(--max), calc(100% - 28px));
+      margin: 14px auto 0;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 10px 12px 10px 16px;
+      border: 1px solid var(--line-soft);
+      border-radius: 999px;
+      background: rgba(5, 6, 8, 0.72);
+      backdrop-filter: blur(18px);
+      box-shadow: 0 12px 45px rgba(0, 0, 0, 0.28);
+    }
+
+    .brand {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      min-width: max-content;
+      font-weight: 650;
+      letter-spacing: -0.02em;
+    }
+
+    .brand-mark {
+      width: 28px;
+      height: 28px;
+      border-radius: 50%;
+      background:
+        linear-gradient(135deg, rgba(111, 124, 255, 0.95), rgba(0, 212, 255, 0.85)),
+        #111;
+      box-shadow: 0 0 0 5px rgba(111, 124, 255, 0.08), 0 0 34px rgba(111, 124, 255, 0.35);
+      position: relative;
+    }
+    .brand-mark::after {
+      content: "";
+      position: absolute;
+      inset: 8px;
+      border-radius: inherit;
+      background: #050608;
+    }
+
+    .nav-links {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 4px;
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 510;
+    }
+    .nav-links a {
+      padding: 9px 11px;
+      border-radius: 999px;
+      transition: background 160ms ease, color 160ms ease;
+    }
+    .nav-links a:hover { background: rgba(255,255,255,0.06); color: var(--text); }
+
+    .nav-cta, .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      min-height: 42px;
+      padding: 0 18px;
+      border-radius: 999px;
+      border: 1px solid rgba(255,255,255,0.12);
+      background: #f7f8f8;
+      color: #050608;
+      font-size: 13px;
+      font-weight: 680;
+      letter-spacing: -0.01em;
+      transition: transform 160ms ease, opacity 160ms ease, border-color 160ms ease;
+    }
+    .btn:hover, .nav-cta:hover { transform: translateY(-1px); opacity: 0.92; }
+    .btn.secondary {
+      background: rgba(255,255,255,0.04);
+      color: var(--text);
+      border-color: var(--line);
+    }
+
+    .hero {
+      position: relative;
+      padding: 96px 0 54px;
+    }
+
+    .hero-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(360px, 0.78fr);
+      gap: 34px;
+      align-items: end;
+    }
+
+    .kicker, .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      width: max-content;
+      margin: 0 0 18px;
+      padding: 7px 10px;
+      border: 1px solid var(--line-soft);
+      border-radius: 999px;
+      background: rgba(255,255,255,0.035);
+      color: #cdd3ff;
+      font-family: "JetBrains Mono", ui-monospace, monospace;
+      font-size: 11px;
+      font-weight: 500;
+      letter-spacing: 0.02em;
+      text-transform: uppercase;
+    }
+    .dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--safe);
+      box-shadow: 0 0 16px rgba(22, 199, 132, 0.8);
+    }
+
+    h1, h2, h3, p { margin: 0; }
+    h1 {
+      max-width: 860px;
+      font-size: clamp(54px, 9.2vw, 118px);
+      line-height: 0.88;
+      letter-spacing: clamp(-5.2px, -0.055em, -2px);
+      font-weight: 650;
+      text-wrap: balance;
+    }
+    .gradient-text {
+      background: linear-gradient(90deg, #ffffff, #bfc5ff 48%, #83e9ff);
+      -webkit-background-clip: text;
+      background-clip: text;
+      color: transparent;
+    }
+    .hero-copy {
+      max-width: 680px;
+      margin-top: 26px;
+      color: var(--muted);
+      font-size: clamp(16px, 2.1vw, 20px);
+      line-height: 1.65;
+      letter-spacing: -0.02em;
+    }
+    .hero-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-top: 30px;
+    }
+
+    .proof-row {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 10px;
+      margin-top: 38px;
+      max-width: 760px;
+    }
+    .proof {
+      padding: 14px;
+      border: 1px solid var(--line-soft);
+      border-radius: 16px;
+      background: rgba(255,255,255,0.028);
+    }
+    .proof strong {
+      display: block;
+      font-size: 22px;
+      letter-spacing: -0.04em;
+    }
+    .proof span {
+      display: block;
+      margin-top: 3px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .terminal-card {
+      border: 1px solid var(--line);
+      border-radius: var(--radius-xl);
+      background:
+        linear-gradient(180deg, rgba(255,255,255,0.065), rgba(255,255,255,0.026)),
+        rgba(7, 9, 14, 0.86);
+      box-shadow: var(--shadow), inset 0 1px 0 rgba(255,255,255,0.08);
+      overflow: hidden;
+    }
+    .terminal-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--line-soft);
+      color: var(--muted);
+      font-family: "JetBrains Mono", monospace;
+      font-size: 11px;
+    }
+    .traffic { display: flex; gap: 7px; }
+    .traffic i { width: 10px; height: 10px; border-radius: 50%; display: block; }
+    .traffic i:nth-child(1) { background: #ff5d73; }
+    .traffic i:nth-child(2) { background: #ffcc66; }
+    .traffic i:nth-child(3) { background: #16c784; }
+    .terminal-body { padding: 18px; }
+    .code-line {
+      display: grid;
+      grid-template-columns: 72px 1fr;
+      gap: 14px;
+      padding: 10px 0;
+      border-bottom: 1px solid rgba(255,255,255,0.045);
+      font-family: "JetBrains Mono", monospace;
+      font-size: 12px;
+    }
+    .code-line:last-child { border-bottom: 0; }
+    .code-line span:first-child { color: var(--faint); }
+    .code-line span:last-child { color: #d8dcff; }
+    .safe { color: var(--safe) !important; }
+    .warn { color: var(--warn) !important; }
+    .danger { color: var(--danger) !important; }
+
+    section { padding: 58px 0; }
+    .section-head {
+      display: grid;
+      grid-template-columns: minmax(0, 0.9fr) minmax(260px, 0.55fr);
+      gap: 28px;
+      align-items: end;
+      margin-bottom: 24px;
+    }
+    h2 {
+      font-size: clamp(34px, 5.3vw, 64px);
+      line-height: 0.98;
+      letter-spacing: -0.052em;
+      font-weight: 620;
+      text-wrap: balance;
+    }
+    .section-copy {
+      color: var(--muted);
+      font-size: 15px;
+      line-height: 1.7;
+    }
+
+    .work-grid {
+      display: grid;
+      grid-template-columns: 1.12fr 0.88fr;
+      gap: 14px;
+    }
+    .case-card, .feature-card, .metric-panel {
+      border: 1px solid var(--line-soft);
+      border-radius: var(--radius-lg);
+      background: var(--panel);
+      overflow: hidden;
+      transition: transform 180ms ease, border-color 180ms ease, background 180ms ease;
+    }
+    .case-card:hover, .feature-card:hover {
+      transform: translateY(-2px);
+      border-color: rgba(111,124,255,0.38);
+      background: rgba(255,255,255,0.052);
+    }
+    .case-card.featured { grid-row: span 2; }
+    .case-media {
+      min-height: 310px;
+      padding: 18px;
+      display: grid;
+      align-items: end;
+      background:
+        radial-gradient(circle at 25% 18%, rgba(111,124,255,0.35), transparent 14rem),
+        radial-gradient(circle at 82% 12%, rgba(0,212,255,0.14), transparent 12rem),
+        #0a0c12;
+    }
+    .mini-dashboard {
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 18px;
+      background: rgba(5,6,8,0.76);
+      box-shadow: 0 26px 80px rgba(0,0,0,0.42);
+      overflow: hidden;
+    }
+    .mini-chart {
+      height: 170px;
+      padding: 18px;
+      display: flex;
+      align-items: flex-end;
+      gap: 8px;
+      border-bottom: 1px solid rgba(255,255,255,0.07);
+    }
+    .bar {
+      flex: 1;
+      border-radius: 999px 999px 4px 4px;
+      background: linear-gradient(180deg, rgba(111,124,255,0.98), rgba(0,212,255,0.35));
+      min-height: 24px;
+      animation: rise 900ms ease both;
+    }
+    .bar:nth-child(2) { height: 45%; animation-delay: 60ms; }
+    .bar:nth-child(3) { height: 72%; animation-delay: 120ms; }
+    .bar:nth-child(4) { height: 52%; animation-delay: 180ms; }
+    .bar:nth-child(5) { height: 86%; animation-delay: 240ms; }
+    .bar:nth-child(6) { height: 64%; animation-delay: 300ms; }
+    .bar:nth-child(7) { height: 94%; animation-delay: 360ms; }
+    .mini-stats { display: grid; grid-template-columns: repeat(3, 1fr); }
+    .mini-stats div { padding: 13px; border-right: 1px solid rgba(255,255,255,0.07); }
+    .mini-stats div:last-child { border-right: 0; }
+    .mini-stats strong { display: block; font-size: 18px; letter-spacing: -0.04em; }
+    .mini-stats span { color: var(--muted); font-size: 11px; }
+
+    .case-body { padding: 22px; }
+    .case-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 16px;
+    }
+    .tag {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 9px;
+      border: 1px solid var(--line-soft);
+      border-radius: 999px;
+      color: #d0d6e0;
+      background: rgba(255,255,255,0.03);
+      font-family: "JetBrains Mono", monospace;
+      font-size: 10px;
+      text-transform: uppercase;
+    }
+    .case-body h3, .feature-card h3 { font-size: 22px; line-height: 1.15; letter-spacing: -0.035em; }
+    .case-body p, .feature-card p { margin-top: 10px; color: var(--muted); font-size: 14px; line-height: 1.7; }
+
+    .feature-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 14px;
+    }
+    .feature-card { padding: 20px; min-height: 210px; }
+    .icon {
+      width: 38px;
+      height: 38px;
+      margin-bottom: 28px;
+      border-radius: 12px;
+      display: grid;
+      place-items: center;
+      background: rgba(111,124,255,0.15);
+      border: 1px solid rgba(111,124,255,0.26);
+      color: #cfd4ff;
+      font-family: "JetBrains Mono", monospace;
+      font-size: 13px;
+      font-weight: 700;
+    }
+
+    .architecture {
+      display: grid;
+      grid-template-columns: 0.8fr 1.2fr;
+      gap: 14px;
+    }
+    .metric-panel { padding: 24px; }
+    .metric-panel h3 { font-size: 28px; letter-spacing: -0.04em; line-height: 1; }
+    .flow {
+      display: grid;
+      gap: 10px;
+      margin-top: 22px;
+    }
+    .flow-row {
+      display: grid;
+      grid-template-columns: 120px 1fr;
+      gap: 12px;
+      align-items: center;
+      padding: 14px;
+      border: 1px solid var(--line-soft);
+      border-radius: 16px;
+      background: rgba(0,0,0,0.22);
+    }
+    .flow-row b { font-family: "JetBrains Mono", monospace; font-size: 11px; color: #cdd3ff; text-transform: uppercase; }
+    .flow-row span { color: var(--muted); font-size: 13px; }
+
+    .cta {
+      margin: 58px auto 26px;
+      padding: clamp(28px, 6vw, 58px);
+      border: 1px solid rgba(111,124,255,0.28);
+      border-radius: 34px;
+      background:
+        linear-gradient(135deg, rgba(111,124,255,0.18), rgba(0,212,255,0.045)),
+        rgba(255,255,255,0.035);
+      box-shadow: var(--shadow);
+      text-align: center;
+    }
+    .cta h2 { max-width: 880px; margin: 0 auto; }
+    .cta p { max-width: 650px; margin: 18px auto 0; color: var(--muted); }
+
+    footer {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 28px 0 46px;
+      color: var(--faint);
+      font-size: 12px;
+    }
+
+    @keyframes rise {
+      from { transform: scaleY(0.2); opacity: 0.35; transform-origin: bottom; }
+      to { transform: scaleY(1); opacity: 1; transform-origin: bottom; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { animation: none !important; scroll-behavior: auto !important; transition: none !important; }
+    }
+
+    @media (max-width: 920px) {
+      .nav-links { display: none; }
+      .hero { padding-top: 72px; }
+      .hero-grid, .section-head, .work-grid, .architecture { grid-template-columns: 1fr; }
+      .feature-grid { grid-template-columns: repeat(2, 1fr); }
+      .terminal-card { max-width: 620px; }
+    }
+
+    @media (max-width: 620px) {
+      .shell { width: min(100% - 24px, var(--max)); }
+      .nav { width: calc(100% - 18px); top: 8px; }
+      .brand span { display: none; }
+      .nav-cta { min-height: 38px; padding: 0 13px; }
+      .hero { padding: 56px 0 36px; }
+      .hero-actions, footer { flex-direction: column; }
+      .btn { width: 100%; }
+      .proof-row, .feature-grid { grid-template-columns: 1fr; }
+      .case-media { min-height: 240px; }
+      .code-line { grid-template-columns: 56px 1fr; font-size: 11px; }
+      .flow-row { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <nav class="nav" aria-label="Navigasi utama">
+    <a class="brand" href="#top" aria-label="Advanced Crypto Bot home">
+      <span class="brand-mark" aria-hidden="true"></span>
+      <span>Advanced Crypto Bot</span>
+    </a>
+    <div class="nav-links" aria-label="Section links">
+      <a href="#work">Portfolio</a>
+      <a href="#features">Fitur</a>
+      <a href="#architecture">Arsitektur</a>
+      <a href="#deploy">Deploy</a>
+    </div>
+    <a class="nav-cta" href="#deploy">Lihat Rencana VPS</a>
+  </nav>
+
+  <main id="top">
+    <header class="hero shell">
+      <div class="hero-grid">
+        <div>
+          <p class="kicker"><span class="dot"></span> DRY RUN LOCKED / READ-ONLY FIRST</p>
+          <h1>Portfolio sistem <span class="gradient-text">trading bot</span> yang dibuat seperti produk fintech.</h1>
+          <p class="hero-copy">
+            Website ini mengadopsi prinsip portfolio modern: hero yang kuat, studi kasus yang jelas,
+            bukti teknis, dan visual dashboard sebagai produk utama — tanpa menyalin identitas brand lain.
+          </p>
+          <div class="hero-actions">
+            <a class="btn" href="#work">Explore Portfolio</a>
+            <a class="btn secondary" href="../dashboard_frontend/index.html">Buka Dashboard Lokal</a>
+          </div>
+          <div class="proof-row" aria-label="Ringkasan sistem">
+            <div class="proof"><strong>24/7</strong><span>bot service di VPS</span></div>
+            <div class="proof"><strong>0 POST</strong><span>fase dashboard read-only</span></div>
+            <div class="proof"><strong>DRY</strong><span>real trading locked</span></div>
+          </div>
+        </div>
+
+        <aside class="terminal-card" aria-label="Runtime status preview">
+          <div class="terminal-top">
+            <div class="traffic" aria-hidden="true"><i></i><i></i><i></i></div>
+            <span>runtime/safety.json</span>
+          </div>
+          <div class="terminal-body">
+            <div class="code-line"><span>mode</span><span class="safe">DRY_RUN_LOCKED</span></div>
+            <div class="code-line"><span>api</span><span>FastAPI / Uvicorn :8001</span></div>
+            <div class="code-line"><span>bot</span><span>systemd service / auto restart</span></div>
+            <div class="code-line"><span>chart</span><span>TradingView fallback symbols</span></div>
+            <div class="code-line"><span>vps</span><span class="warn">Sumopod + Nginx + SSL</span></div>
+            <div class="code-line"><span>site</span><span>Qwords public hosting</span></div>
+          </div>
+        </aside>
+      </div>
+    </header>
+
+    <section id="work" class="shell">
+      <div class="section-head">
+        <div>
+          <p class="eyebrow">Portfolio / Case Studies</p>
+          <h2>Yang ditampilkan bukan klaim, tapi sistem yang bisa dilihat.</h2>
+        </div>
+        <p class="section-copy">
+          Referensi terbaik saat ini mengarah ke portfolio yang show-don't-tell: visual kuat,
+          case study ringkas, dan bukti ownership. Struktur ini diadaptasi untuk bot trading crypto.
+        </p>
+      </div>
+
+      <div class="work-grid">
+        <article class="case-card featured">
+          <div class="case-media">
+            <div class="mini-dashboard" aria-label="Dashboard preview">
+              <div class="mini-chart">
+                <span class="bar" style="height: 38%"></span><span class="bar"></span><span class="bar"></span><span class="bar"></span><span class="bar"></span><span class="bar"></span><span class="bar"></span>
+              </div>
+              <div class="mini-stats">
+                <div><strong>Safe</strong><span>Real lock</span></div>
+                <div><strong>Open</strong><span>Positions</span></div>
+                <div><strong>Live</strong><span>Signals</span></div>
+              </div>
+            </div>
+          </div>
+          <div class="case-body">
+            <div class="case-meta"><span class="tag">FastAPI</span><span class="tag">TradingView</span><span class="tag">Read-only</span></div>
+            <h3>Dashboard observability untuk posisi, sinyal, dan status keamanan.</h3>
+            <p>Panel dibuat untuk membantu monitoring cepat: pair aktif, open positions, sinyal terakhir, trade history, dan status DRY RUN.</p>
+          </div>
+        </article>
+
+        <article class="case-card">
+          <div class="case-body">
+            <div class="case-meta"><span class="tag">Telegram Bot</span><span class="tag">Automation</span></div>
+            <h3>Bot runtime dipisah dari website publik.</h3>
+            <p>Website tetap statis di Qwords, sedangkan bot.py dan dashboard API berjalan di VPS agar stabil 24/7.</p>
+          </div>
+        </article>
+
+        <article class="case-card">
+          <div class="case-body">
+            <div class="case-meta"><span class="tag">Safety</span><span class="tag">No write route</span></div>
+            <h3>Fase awal sengaja read-only.</h3>
+            <p>Tidak ada tombol Buy/Sell, hunter control, atau real trading toggle sampai ada approval eksplisit.</p>
+          </div>
+        </article>
+      </div>
+    </section>
+
+    <section id="features" class="shell">
+      <div class="section-head">
+        <div>
+          <p class="eyebrow">Feature System</p>
+          <h2>Desain portfolio, isi tetap teknis dan operasional.</h2>
+        </div>
+        <p class="section-copy">Gaya visual mengambil prinsip Framer/Linear: dark canvas, type hierarchy besar, card ring halus, dan satu warna accent.</p>
+      </div>
+
+      <div class="feature-grid">
+        <article class="feature-card"><div class="icon">01</div><h3>Safety-first</h3><p>DRY RUN menjadi pesan utama agar pengunjung paham sistem belum membuka real trading.</p></article>
+        <article class="feature-card"><div class="icon">02</div><h3>Proof visual</h3><p>Dashboard preview dipakai sebagai hero asset agar website terasa seperti portfolio produk nyata.</p></article>
+        <article class="feature-card"><div class="icon">03</div><h3>Deploy-ready</h3><p>Struktur copy sudah selaras dengan rencana Qwords untuk website dan Sumopod untuk backend.</p></article>
+        <article class="feature-card"><div class="icon">04</div><h3>Responsive</h3><p>Layout mobile dibuat stack bersih, tombol tetap besar, dan navigasi disederhanakan.</p></article>
+      </div>
+    </section>
+
+    <section id="architecture" class="shell">
+      <div class="architecture">
+        <div class="metric-panel">
+          <p class="eyebrow">Architecture</p>
+          <h3>Website publik dan bot diperlakukan sebagai dua project.</h3>
+          <p class="section-copy" style="margin-top:14px">Ini menjaga hosting Qwords tetap ringan, sementara proses Python 24/7 ditaruh di VPS.</p>
+        </div>
+        <div class="metric-panel">
+          <div class="flow">
+            <div class="flow-row"><b>Qwords</b><span>Landing / portfolio / halaman publik statis.</span></div>
+            <div class="flow-row"><b>Sumopod</b><span>FastAPI dashboard, bot.py, database, webhook, worker.</span></div>
+            <div class="flow-row"><b>Nginx</b><span>Reverse proxy HTTPS ke Uvicorn internal 127.0.0.1:8001.</span></div>
+            <div class="flow-row"><b>Safety</b><span>Dashboard Phase 1 tetap GET-only dan read-only.</span></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="deploy" class="shell">
+      <div class="cta">
+        <p class="eyebrow" style="margin-inline:auto">Next Deploy Path</p>
+        <h2>Siap dipakai sebagai landing portfolio di hosting Qwords.</h2>
+        <p>Backend/dashboard tetap bisa diarahkan ke subdomain VPS seperti <strong>dashboard.domainkamu.com</strong>, sedangkan halaman ini bisa menjadi wajah publik project.</p>
+        <div class="hero-actions" style="justify-content:center">
+          <a class="btn" href="#top">Kembali ke Atas</a>
+          <a class="btn secondary" href="../dashboard_frontend/index.html">Preview Dashboard</a>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="shell">
+    <span>© 2026 Advanced Crypto Bot Portfolio</span>
+    <span>Original design inspired by modern portfolio principles — not an exact clone.</span>
+  </footer>
+
+  <script>
+    const prefersReduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if (!prefersReduced) {
+      document.querySelectorAll('.case-card, .feature-card, .metric-panel').forEach((card) => {
+        card.addEventListener('mousemove', (event) => {
+          const rect = card.getBoundingClientRect();
+          const x = ((event.clientX - rect.left) / rect.width - 0.5) * 6;
+          const y = ((event.clientY - rect.top) / rect.height - 0.5) * -6;
+          card.style.transform = `perspective(900px) rotateX(${y}deg) rotateY(${x}deg) translateY(-2px)`;
+        });
+        card.addEventListener('mouseleave', () => {
+          card.style.transform = '';
+        });
+      });
+    }
+  </script>
+</body>
+</html>

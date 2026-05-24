@@ -1,0 +1,73 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# Virtual environment
+venv/
+env/
+.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Data/runtime artifacts (mounted as volumes)
+data/
+logs/
+*.log
+bot.log
+models/*.pkl
+models/**/*.pkl
+backups/
+tmp/
+cache/
+*.db
+*.db-*
+*.db-wal
+*.db-shm
+*.backup_*
+*.csv
+
+# Git
+.git/
+.gitignore
+
+# Documentation (not needed in container)
+*.md
+*.txt
+*.xlsx
+*.docx
+*.pdf
+
+# Backup files
+*.backup
+*.bak
+
+# Docker
+Dockerfile
+Dockerfile.worker
+docker-compose.yml
+.dockerignore
+
+# Deploy scripts
+deploy_vps.sh
+crypto-bot.service
+
+# Test files
+test_*.py
+*_test.py
+
+# Redis dump
+dump.rdb

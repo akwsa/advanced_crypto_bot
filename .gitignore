@@ -54,3 +54,38 @@ ta-lib-*.tar.gz
 
 # Continue conversation history
 .continue/
+
+# Nested bot app runtime/local artifacts
+advanced_crypto_bot/.env
+advanced_crypto_bot/.codex
+advanced_crypto_bot/.claude/
+advanced_crypto_bot/.vscode/
+advanced_crypto_bot/.idea/
+advanced_crypto_bot/venv/
+advanced_crypto_bot/env/
+advanced_crypto_bot/ENV/
+advanced_crypto_bot/__pycache__/
+advanced_crypto_bot/**/__pycache__/
+advanced_crypto_bot/.pytest_cache/
+advanced_crypto_bot/.ruff_cache/
+advanced_crypto_bot/logs/
+advanced_crypto_bot/*.log
+advanced_crypto_bot/*.log.*
+advanced_crypto_bot/data/*.db
+advanced_crypto_bot/data/*.db-*
+advanced_crypto_bot/data/*.backup*
+advanced_crypto_bot/data/*.csv
+advanced_crypto_bot/models/*.pkl
+advanced_crypto_bot/models/**/*.pkl
+advanced_crypto_bot/models/*.h5
+advanced_crypto_bot/models/*.hdf5
+advanced_crypto_bot/models/*.joblib
+advanced_crypto_bot/scalper_positions.json
+advanced_crypto_bot/scalper_manual_history.csv
+advanced_crypto_bot/autonomous_baseline.json
+advanced_crypto_bot/autonomous_state.json
+advanced_crypto_bot/core/*.backup*
+advanced_crypto_bot/signals/*.backup*
+advanced_crypto_bot/deprecated.archived/
+advanced_crypto_bot/_archive/
+advanced_crypto_bot/tmp/
