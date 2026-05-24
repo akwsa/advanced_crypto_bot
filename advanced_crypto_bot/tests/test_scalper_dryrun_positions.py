@@ -33,6 +33,14 @@ class _FakeStateManager:
         return False
 
 
+class _FakeIndodax:
+    def __init__(self, idr_balance=123_456):
+        self.idr_balance = idr_balance
+
+    def get_balance(self):
+        return {"balance": {"idr": str(self.idr_balance)}}
+
+
 class _FakeRedisStateManager(_FakeStateManager):
     def __init__(self):
         super().__init__()
@@ -289,6 +297,52 @@ class TestScalperDryRunPositions(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any("Avg" in button for button in buttons))
         self.assertTrue(any("TP/SL" in button for button in buttons))
         self.assertTrue(any("SL BE" in button for button in buttons))
+
+    async def test_posisi_real_mode_uses_indodax_balance_and_mode_label_without_dryrun_cash(self):
+        scalper = self._scalper(real=True, indodax=_FakeIndodax(idr_balance=765_432))
+        scalper.balance = 50_000_000
+        scalper._get_price_from_api_only = lambda pair: 805
+        scalper.active_positions["pippinidr"] = {
+            "entry": 710,
+            "time": 1,
+            "amount": 100,
+            "capital": 71_000,
+        }
+
+        update = self._update()
+        with patch("cache.redis_price_cache.price_cache.get_price_sync", return_value=None):
+            await scalper.cmd_posisi(update, SimpleNamespace(args=[]))
+
+        text = update.effective_message.replies[-1][0]
+        self.assertIn("Mode: 🔴 REAL", text)
+        self.assertIn("Saldo Indodax", text)
+        self.assertIn("765,432", text)
+        self.assertNotIn("DRY RUN", text)
+        self.assertNotIn("Kas IDR", text)
+        self.assertNotIn("50,000,000", text)
+
+    async def test_refresh_posisi_real_mode_uses_indodax_balance_and_mode_label_without_dryrun_cash(self):
+        scalper = self._scalper(real=True, indodax=_FakeIndodax(idr_balance=765_432))
+        scalper.balance = 50_000_000
+        scalper._get_price_from_api_only = lambda pair: 805
+        scalper.active_positions["pippinidr"] = {
+            "entry": 710,
+            "time": 1,
+            "amount": 100,
+            "capital": 71_000,
+        }
+
+        update = self._callback_update("s_refresh_posisi")
+        with patch("cache.redis_price_cache.price_cache.get_price_sync", return_value=None):
+            await scalper.refresh_posisi_callback(update, SimpleNamespace(args=[]))
+
+        text = update.callback_query.edits[-1][0]
+        self.assertIn("Mode: 🔴 REAL", text)
+        self.assertIn("Saldo Indodax", text)
+        self.assertIn("765,432", text)
+        self.assertNotIn("DRY RUN", text)
+        self.assertNotIn("Kas IDR", text)
+        self.assertNotIn("50,000,000", text)
 
     async def test_posisi_keeps_position_visible_when_live_price_unavailable(self):
         scalper = self._scalper()

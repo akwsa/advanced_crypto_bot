@@ -2933,12 +2933,13 @@ class ScalperModule:
 
         # Build header message
         pnl_emoji = "🟢" if unrealized_pnl >= 0 else "🔴"
+        mode_label = "🟡 DRY RUN" if self.dry_run else self._real_mode_status_label()
         balance_text = (
             self._dryrun_balance_text(price_cache_map)
             if self.dry_run
-            else f"💰 Saldo: {self.balance:,.0f} IDR"
+            else self._account_balance_text()
         )
-        msg = f"📦 **POSISI AKTIF**\n\n{balance_text}\n📈 P/L: {pnl_emoji} {unrealized_pnl:+,.0f} IDR\n📊 Open: {len(self.active_positions)}"
+        msg = f"📦 **POSISI AKTIF**\n\nMode: {mode_label}\n{balance_text}\n📈 P/L: {pnl_emoji} {unrealized_pnl:+,.0f} IDR\n📊 Open: {len(self.active_positions)}"
 
         keyboard = []
         if self.active_positions:
@@ -4351,12 +4352,13 @@ class ScalperModule:
 
         # Build header message
         pnl_emoji = "🟢" if unrealized_pnl >= 0 else "🔴"
+        mode_label = "🟡 DRY RUN" if self.dry_run else self._real_mode_status_label()
         balance_text = (
             self._dryrun_balance_text(price_cache_map)
             if self.dry_run
-            else f"💰 Saldo: {self.balance:,.0f} IDR"
+            else self._account_balance_text()
         )
-        msg = f"📦 **POSISI AKTIF** [{datetime.now().strftime('%H:%M:%S')}]\n\n{balance_text}\n📈 P/L: {pnl_emoji} {unrealized_pnl:+,.0f} IDR\n📊 Open: {len(self.active_positions)}"
+        msg = f"📦 **POSISI AKTIF** [{datetime.now().strftime('%H:%M:%S')}]\n\nMode: {mode_label}\n{balance_text}\n📈 P/L: {pnl_emoji} {unrealized_pnl:+,.0f} IDR\n📊 Open: {len(self.active_positions)}"
 
         keyboard = []
         if self.active_positions:
