@@ -320,7 +320,8 @@ class ScalperModule:
             if self.indodax:
                 info = self.indodax.get_balance()
                 balances = (info or {}).get('balance', {}) if isinstance(info, dict) else {}
-                idr = float(balances.get('idr') or 0)
+                idr = self._safe_float(balances.get('idr'))
+                self.balance = idr
                 text = f"{idr:,.0f}"
                 if markdown:
                     text = f"`{text}`"
@@ -332,6 +333,86 @@ class ScalperModule:
         if markdown:
             fallback = f"`{fallback}`"
         return f"{prefix}: {fallback} IDR (cached)"
+
+    @staticmethod
+    def _safe_float(value, default=0.0) -> float:
+        try:
+            if value is None or value == "":
+                return float(default)
+            return float(value)
+        except (TypeError, ValueError):
+            return float(default)
+
+    def _real_positions_from_indodax_holdings(self):
+        """Build real-mode display/sell positions from Indodax asset balances.
+
+        Indodax getInfo exposes actual assets in ``balance`` and assets locked
+        in orders in ``balance_hold``. In REAL mode, Telegram position display
+        must trust those holdings instead of stale local JSON/Redis positions.
+        Local matching positions are only used to preserve bot-side TP/SL and
+        previous entry/capital metadata when the asset is still held.
+        """
+        if not self._is_real_order_ready():
+            return None
+
+        info = self.indodax.get_balance()
+        if not isinstance(info, dict):
+            return None
+
+        balances = info.get('balance') or {}
+        holds = info.get('balance_hold') or {}
+        if not isinstance(balances, dict):
+            balances = {}
+        if not isinstance(holds, dict):
+            holds = {}
+
+        idr_balance = self._safe_float(balances.get('idr'))
+        if idr_balance >= 0:
+            self.balance = idr_balance
+
+        old_positions = dict(self.active_positions)
+        positions = {}
+        asset_keys = set(balances.keys()) | set(holds.keys())
+        for raw_asset in sorted(asset_keys):
+            asset = str(raw_asset or '').lower().strip().replace('/', '').replace('_', '')
+            if not asset or asset == 'idr':
+                continue
+
+            amount = self._safe_float(balances.get(raw_asset)) + self._safe_float(holds.get(raw_asset))
+            if amount <= 1e-12:
+                continue
+
+            pair = self._normalize_pair(asset)
+            old = old_positions.get(pair, {}) if isinstance(old_positions.get(pair), dict) else {}
+            entry = self._safe_float(old.get('entry'))
+            if entry <= 0:
+                try:
+                    entry = self._safe_float(self._get_price_from_api_only(pair))
+                except Exception as e:
+                    logger.debug(f"Real holding price fetch failed for {pair}: {e}")
+                    entry = self._safe_float(old.get('entry'))
+            if entry <= 0:
+                entry = 1.0
+
+            old_amount = self._safe_float(old.get('amount'))
+            old_capital = self._safe_float(old.get('capital'))
+            capital = old_capital if old_capital > 0 and abs(old_amount - amount) <= 1e-8 else entry * amount
+
+            position = {
+                'entry': entry,
+                'time': old.get('time', time.time()),
+                'amount': amount,
+                'capital': capital,
+                'source': 'indodax_balance',
+            }
+            for key in ('tp', 'sl', 'order_id'):
+                if key in old:
+                    position[key] = old[key]
+            positions[pair] = position
+
+        self.active_positions = positions
+        self._save_positions()
+        return positions
 
     def _callback_price(self, price) -> str:
         """Encode prices for Telegram callbacks without rounding micro-price pairs to zero."""
@@ -2867,9 +2948,14 @@ class ScalperModule:
             await update.effective_message.reply_text("❌ Akses Ditolak")
             return
 
-        # DRY RUN scalper uses its own virtual balance from Config/file state.
-        # Real mode may still show the main DB balance as a display fallback.
-        if not self.dry_run:
+        # In REAL mode, position display/sell buttons must reflect actual
+        # Indodax asset holdings, not stale local JSON/Redis simulated state.
+        if self._is_real_order_ready():
+            try:
+                self._real_positions_from_indodax_holdings()
+            except Exception as e:
+                logger.debug(f"Indodax holdings sync failed for /s_posisi: {e}")
+        elif not self.dry_run:
             try:
                 from core.database import Database
                 db = Database()
@@ -4305,6 +4391,14 @@ class ScalperModule:
         if not query or not self._is_admin(query.from_user.id):
             return
         await self._answer_callback(query, "🔄 Refreshing...")
+
+        # In REAL mode, refresh must reconcile from actual Indodax holdings
+        # before rendering buttons; local cache is only metadata fallback.
+        if self._is_real_order_ready():
+            try:
+                self._real_positions_from_indodax_holdings()
+            except Exception as e:
+                logger.debug(f"Indodax holdings sync failed for refresh posisi: {e}")
 
         # Phase 2: Pre-fetch ALL position prices in parallel, cache to Redis
         price_cache_map = {}

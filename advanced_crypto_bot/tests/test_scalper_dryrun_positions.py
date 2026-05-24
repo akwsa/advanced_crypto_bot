@@ -34,11 +34,18 @@ class _FakeStateManager:
 
 
 class _FakeIndodax:
-    def __init__(self, idr_balance=123_456):
+    def __init__(self, idr_balance=123_456, balances=None, balance_hold=None):
         self.idr_balance = idr_balance
+        self.balances = dict(balances or {})
+        self.balance_hold = dict(balance_hold or {})
 
     def get_balance(self):
-        return {"balance": {"idr": str(self.idr_balance)}}
+        balance = {"idr": str(self.idr_balance)}
+        balance.update({asset: str(amount) for asset, amount in self.balances.items()})
+        return {
+            "balance": balance,
+            "balance_hold": {asset: str(amount) for asset, amount in self.balance_hold.items()},
+        }
 
 
 class _FakeRedisStateManager(_FakeStateManager):
@@ -343,6 +350,70 @@ class TestScalperDryRunPositions(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("DRY RUN", text)
         self.assertNotIn("Kas IDR", text)
         self.assertNotIn("50,000,000", text)
+
+    async def test_posisi_real_mode_builds_positions_from_indodax_holdings_not_local_cache(self):
+        scalper = self._scalper(
+            real=True,
+            indodax=_FakeIndodax(
+                idr_balance=765_432,
+                balances={"l3": "100", "pippin": "0"},
+            ),
+        )
+        scalper._get_price_from_api_only = lambda pair: {"l3idr": 210, "pippinidr": 805}[pair]
+        scalper.active_positions["pippinidr"] = {
+            "entry": 710,
+            "time": 1,
+            "amount": 100,
+            "capital": 71_000,
+        }
+
+        update = self._update()
+        with patch("cache.redis_price_cache.price_cache.get_price_sync", return_value=None):
+            await scalper.cmd_posisi(update, SimpleNamespace(args=[]))
+
+        text, kwargs = update.effective_message.replies[-1]
+        callbacks = [
+            button.callback_data
+            for row in kwargs["reply_markup"].inline_keyboard
+            for button in row
+        ]
+        self.assertIn("L3IDR", text)
+        self.assertIn("Open: 1", text)
+        self.assertNotIn("PIPPINIDR", text)
+        self.assertNotIn("Tidak ada posisi", text)
+        self.assertIn("s_sell:l3idr", callbacks)
+
+    async def test_refresh_posisi_real_mode_builds_positions_from_indodax_holdings_not_local_cache(self):
+        scalper = self._scalper(
+            real=True,
+            indodax=_FakeIndodax(
+                idr_balance=765_432,
+                balances={"l3": "100", "pippin": "0"},
+            ),
+        )
+        scalper._get_price_from_api_only = lambda pair: {"l3idr": 210, "pippinidr": 805}[pair]
+        scalper.active_positions["pippinidr"] = {
+            "entry": 710,
+            "time": 1,
+            "amount": 100,
+            "capital": 71_000,
+        }
+
+        update = self._callback_update("s_refresh_posisi")
+        with patch("cache.redis_price_cache.price_cache.get_price_sync", return_value=None):
+            await scalper.refresh_posisi_callback(update, SimpleNamespace(args=[]))
+
+        text, kwargs = update.callback_query.edits[-1]
+        callbacks = [
+            button.callback_data
+            for row in kwargs["reply_markup"].inline_keyboard
+            for button in row
+        ]
+        self.assertIn("L3IDR", text)
+        self.assertIn("Open: 1", text)
+        self.assertNotIn("PIPPINIDR", text)
+        self.assertNotIn("Tidak ada posisi", text)
+        self.assertIn("s_sell:l3idr", callbacks)
 
     async def test_posisi_keeps_position_visible_when_live_price_unavailable(self):
         scalper = self._scalper()
