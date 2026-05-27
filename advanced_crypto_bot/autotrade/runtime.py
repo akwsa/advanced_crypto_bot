@@ -155,6 +155,26 @@ def _is_valid_position_size(amount, total):
         return False
 
 
+def _calculate_dry_run_total_from_price(price):
+    """Return DRY RUN nominal based on pair price tier.
+
+    Rules:
+    - price < 10,000  => price * 1000
+    - 10,000..100,000 => price * 100
+    - price > 100,000 => price * 10
+    """
+    price_value = _to_positive_float(price)
+    if price_value is None:
+        return None
+    if price_value < 10_000:
+        multiplier = 1000
+    elif price_value <= 100_000:
+        multiplier = 100
+    else:
+        multiplier = 10
+    return float(price_value * multiplier)
+
+
 async def _get_cached_signal(bot, pair):
     now = datetime.now()
     cache = getattr(bot, "_signal_result_cache", {})
@@ -186,8 +206,37 @@ async def process_price_update_signal_tasks(bot, pair):
         await check_trading_opportunity(bot, pair)
         return
 
-    if watched:
+    if watched and bot.is_trading and Config.AUTO_TRADE_DRY_RUN:
+        # Auto-promote: generate signal, if BUY/STRONG_BUY (pre-SR) → add to auto_trade_pairs and execute
+        signal = await _get_cached_signal(bot, pair)
+        if signal:
+            # Use pre-SR recommendation: SR_VALIDATION may convert BUY→HOLD for
+            # notification purposes, but autotrade has its own entry gates (R/R,
+            # market intelligence, etc.) so we let it through.
+            pre_sr_rec = signal.get("pre_sr_recommendation") or signal.get("recommendation", "HOLD")
+            if pre_sr_rec in ("BUY", "STRONG_BUY"):
+                _auto_promote_pair(bot, pair)
+                await check_trading_opportunity(bot, pair, signal=signal)
+                return
+            else:
+                logger.info(f"⏭️ [AUTO-PROMOTE] {pair}: pre_sr_rec={pre_sr_rec}, final_rec={signal.get('recommendation')}, skipping")
+        # Still send notification for non-BUY actionable signals
+        await monitor_strong_signal(bot, pair, signal=signal)
+    elif watched:
         await monitor_strong_signal(bot, pair)
+
+
+def _auto_promote_pair(bot, pair):
+    """Auto-add a watched pair to auto_trade_pairs on BUY/STRONG_BUY signal."""
+    pair_norm = _normalize_pair(pair)
+    user_id = list(bot.subscribers.keys())[0] if bot.subscribers else None
+    if user_id is None:
+        return
+    if user_id not in bot.auto_trade_pairs:
+        bot.auto_trade_pairs[user_id] = []
+    if not any(_normalize_pair(p) == pair_norm for p in bot.auto_trade_pairs[user_id]):
+        bot.auto_trade_pairs[user_id].append(pair)
+        logger.info(f"🚀 [AUTO-PROMOTE] {pair} added to auto_trade_pairs on BUY signal (DRY RUN)")
 
 
 async def monitor_strong_signal(bot, pair, signal=None):
@@ -340,10 +389,14 @@ async def check_trading_opportunity(bot, pair, signal=None):
         return
 
     if not _is_auto_trade_pair(bot, pair):
-        logger.debug(f"⏭️ Skipping {pair}: Not in auto-trade list (only in watchlist)")
-        if _is_watched(bot, pair):
-            await monitor_strong_signal(bot, pair, signal=signal)
-        return
+        # Auto-promote: in DRY RUN, watched pairs with BUY signal get promoted
+        if Config.AUTO_TRADE_DRY_RUN and _is_watched(bot, pair):
+            _auto_promote_pair(bot, pair)
+        else:
+            logger.debug(f"⏭️ Skipping {pair}: Not in auto-trade list (only in watchlist)")
+            if _is_watched(bot, pair):
+                await monitor_strong_signal(bot, pair, signal=signal)
+            return
 
     pair_key = _normalize_pair(pair)
     user_id = list(bot.subscribers.keys())[0] if bot.subscribers else 1
@@ -380,9 +433,15 @@ async def check_trading_opportunity(bot, pair, signal=None):
     signal.setdefault("pair", pair)
     signal.setdefault("indicators", {})
     signal.setdefault("reason", "Signal alert generated from auto-trade queue")
-    if signal["recommendation"] not in ["STRONG_BUY", "BUY", "STRONG_SELL", "SELL"]:
-        logger.debug(f"⏸️ Skipping {pair}: Weak signal ({signal['recommendation']})")
+    # For autotrade, use pre-SR recommendation if available. SR_VALIDATION is
+    # designed for Telegram notification filtering; autotrade has its own entry
+    # gates (market intelligence, R/R, profit optimizer) that are more appropriate.
+    effective_rec = signal.get("pre_sr_recommendation") or signal["recommendation"]
+    if effective_rec not in ["STRONG_BUY", "BUY", "STRONG_SELL", "SELL"]:
+        logger.debug(f"⏸️ Skipping {pair}: Weak signal ({effective_rec})")
         return
+    # Override recommendation with pre-SR for autotrade execution path
+    signal["recommendation"] = effective_rec
     if cooldown_active and signal["recommendation"] not in ["STRONG_SELL", "SELL"]:
         logger.debug(f"⏭️ Skipping {pair}: scan cooldown active and signal is not SELL")
         return
@@ -392,7 +451,7 @@ async def check_trading_opportunity(bot, pair, signal=None):
         last_ml_update = getattr(bot, "last_ml_update", {})
         last_ml_update[pair_key] = now
         bot.last_ml_update = last_ml_update
-    signal_text = f"{mode_label}\n\n{bot._format_signal_message_html(signal)}"
+    signal_text = bot._format_signal_message_html(signal)
     notif_filter_pass = _signal_passes_filter(bot, signal["recommendation"])
     if not notif_filter_pass:
         logger.info(
@@ -478,9 +537,11 @@ async def check_trading_opportunity(bot, pair, signal=None):
 
         market_conditions = await analyze_market_intelligence(bot, pair, current_price)
         regime = detect_market_regime(bot, pair)
-        if not market_conditions.get("passes_entry_filter", True):
+        if not market_conditions.get("passes_entry_filter", True) and not is_dry_run:
             logger.info(f"🚫 Entry blocked for {pair}: MI filter failed (Signal={market_conditions['overall_signal']})")
             return
+        elif not market_conditions.get("passes_entry_filter", True):
+            logger.info(f"⚠️ [DRY RUN] MI filter would block {pair} (Signal={market_conditions['overall_signal']}), proceeding anyway")
 
         if regime["is_high_vol"]:
             logger.info(f"⚠️ HIGH VOLATILITY regime detected for {pair} - proceeding with caution")
@@ -522,6 +583,18 @@ async def check_trading_opportunity(bot, pair, signal=None):
             if not _is_valid_position_size(amount, total):
                 logger.warning(f"⚠️ Position sizing failed for {pair}")
                 return
+
+        if is_dry_run:
+            dry_run_total = _calculate_dry_run_total_from_price(current_price)
+            if dry_run_total is None or dry_run_total <= 0:
+                logger.warning(f"⚠️ DRY RUN nominal sizing failed for {pair} at price {current_price}")
+                return
+            total = dry_run_total
+            amount = total / current_price
+            logger.info(
+                f"🧪 [DRY RUN SIZE] {pair}: using tier nominal {total:,.0f} IDR at price {current_price:,.0f} "
+                f"=> amount={amount:.8f}"
+            )
 
         # =====================================================================
         # QUANT: Bayesian Kelly Position Sizing Override
@@ -690,6 +763,7 @@ async def check_trading_opportunity(bot, pair, signal=None):
                 total *= 0.5
 
         ob = None
+        elite_signal = None
         if Config.SMART_ROUTING_ENABLED:
             try:
                 ob = bot.indodax.get_orderbook(pair, limit=20)
@@ -774,7 +848,7 @@ async def check_trading_opportunity(bot, pair, signal=None):
 
         # Tier 2: Calculate entry zone for limit order (scalping model)
         nearest_support = sr_data.get("nearest_support") if sr_data else None
-        signal_entry_price = signal.get("price", current_price)
+        signal_entry_price = _to_positive_float(signal.get("price")) or current_price
         entry_zone_price = _calculate_entry_zone(current_price, support=nearest_support, signal_price=signal_entry_price)
         price_diff_pct = ((current_price - entry_zone_price) / current_price) * 100 if current_price > 0 else 0
         if price_diff_pct < Config.LIMIT_ORDER_MIN_EDGE_PCT:

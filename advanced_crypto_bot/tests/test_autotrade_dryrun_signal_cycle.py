@@ -1,7 +1,6 @@
-# Tujuan: Regression test AutoTrade DRY RUN BUY→wait→SELL cycle.
+# Tujuan: Regression tests untuk auto-promote dan sizing nominal AutoTrade DRY RUN berdasarkan tier harga pair.
 # Caller: unittest focused autotrade runtime behavior.
-# Dependensi: autotrade.runtime.check_trading_opportunity dengan semua I/O dimock.
-# Side Effects: Tidak ada; DB/Telegram/Indodax dimock in-memory.
+
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
@@ -148,6 +147,324 @@ class TestAutoTradeDryRunSignalCycle(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(db.get_open_trades(123), [])
         self.assertEqual(db.closed_trade_ids, [1])
         bot.price_monitor.remove_price_level.assert_called_once_with(123, 1)
+
+    async def test_watched_buy_signal_auto_promotes_and_saves_dryrun_trade_to_db(self):
+        """Saat /autotrade dryrun aktif, BUY/STRONG_BUY dari pair watchlist
+        harus otomatis masuk auto_trade_pairs dan tersimpan sebagai trade DRY RUN di DB.
+        """
+        db = _FakeDryRunDB()
+        bot = SimpleNamespace(
+            is_trading=True,
+            auto_trade_pairs={},
+            subscribers={123: ["btcidr"]},
+            last_ml_update={},
+            auto_trade_interval_minutes=5,
+            signal_notifications_enabled=False,
+            signal_notification_filter="actionable",
+            db=db,
+            risk_manager=SimpleNamespace(check_daily_loss_limit=Mock(return_value=(True, "ok"))),
+            _check_max_drawdown=Mock(return_value=(True, "ok")),
+            _format_signal_message_html=Mock(return_value="signal text"),
+            app=SimpleNamespace(bot=SimpleNamespace(send_message=AsyncMock())),
+            indodax=SimpleNamespace(
+                get_ticker=Mock(return_value={"last": 100.0, "bid": 110.0}),
+                get_orderbook=Mock(return_value={"bids": [], "asks": []}),
+            ),
+            price_data={},
+            historical_data={},
+            ml_model_v4=None,
+            _quant_kelly_engine=None,
+            _quant_momentum_engine=None,
+            trading_engine=SimpleNamespace(
+                should_execute_trade=Mock(return_value=(True, "ok")),
+                calculate_position_size=Mock(return_value=(10.0, 1000.0)),
+                calculate_stop_loss_take_profit=Mock(return_value={
+                    "stop_loss": 98.0,
+                    "take_profit_1": 104.0,
+                    "take_profit_2": 108.0,
+                    "rr_ratio": 2.0,
+                    "method": "fixed",
+                }),
+            ),
+            price_monitor=SimpleNamespace(set_price_level=Mock(), remove_price_level=Mock()),
+            sr_detector=SimpleNamespace(),
+            _broadcast_to_subscribers=AsyncMock(),
+            _find_liquidity_zones=Mock(return_value=[]),
+            _elite_signal=Mock(return_value=("BUY", 0.8, 1.0)),
+            _fee_aware_net_price=Mock(return_value=(100.0, 0.0, 0.0)),
+        )
+        optimization = SimpleNamespace(
+            should_skip=False,
+            reason="ok",
+            position_multiplier=1.0,
+            stop_loss_multiplier=1.0,
+            tp1_multiplier=1.0,
+            tp2_multiplier=1.0,
+            min_rr_required=1.0,
+            edge_score=10.0,
+        )
+
+        with patch("autotrade.runtime.Config.AUTO_TRADE_DRY_RUN", True), \
+             patch("autotrade.runtime.Config.ADMIN_IDS", [123]), \
+             patch("autotrade.runtime.Config.CORRELATION_AVOIDANCE_ENABLED", False), \
+             patch("autotrade.runtime.Config.RL_ENABLED", False), \
+             patch("autotrade.runtime.Config.SMART_ROUTING_ENABLED", False), \
+             patch("autotrade.runtime.Config.PORTFOLIO_RISK_ADJUSTED", False), \
+             patch("autotrade.runtime.Config.LIMIT_ORDER_MIN_EDGE_PCT", 0.0), \
+             patch("autotrade.runtime.Config.AUTOTRADE_CHASE_THRESHOLD_PCT", 1.5), \
+             patch("autotrade.runtime.Config.TRADING_FEE_RATE", 0.0), \
+             patch("api.indodax_api.IndodaxAPI", Mock(return_value=bot.indodax)), \
+             patch("autotrade.runtime.analyze_market_intelligence", AsyncMock(return_value={"passes_entry_filter": True, "overall_signal": "BULLISH"})), \
+             patch("autotrade.runtime.detect_market_regime", Mock(return_value={"regime": "RANGE", "volatility": 0.01, "is_high_vol": False, "is_trending": False, "trend_direction": "NEUTRAL"})), \
+             patch("autotrade.runtime.get_support_resistance_for_pair", AsyncMock(return_value=None)), \
+             patch("autotrade.runtime.evaluate_autotrade_setup", Mock(return_value=optimization)):
+            await check_trading_opportunity(
+                bot,
+                "btcidr",
+                signal={"pair": "btcidr", "recommendation": "HOLD", "pre_sr_recommendation": "STRONG_BUY", "ml_confidence": 0.8, "price": 100.0, "indicators": {}},
+            )
+
+        self.assertEqual(bot.auto_trade_pairs[123], ["btcidr"])
+        open_trades = db.get_open_trades(123)
+        self.assertEqual(len(open_trades), 1)
+        self.assertEqual(open_trades[0]["signal_source"], "auto")
+        self.assertEqual(open_trades[0]["type"], "BUY")
+        self.assertIn("[DRY RUN]", open_trades[0]["notes"])
+        bot.price_monitor.set_price_level.assert_called_once()
+
+    async def test_low_price_pair_uses_price_times_1000_as_dryrun_nominal(self):
+        db = _FakeDryRunDB()
+        current_price = 370.0
+        bot = SimpleNamespace(
+            is_trading=True,
+            auto_trade_pairs={123: ["pippinidr"]},
+            subscribers={123: ["pippinidr"]},
+            last_ml_update={},
+            auto_trade_interval_minutes=5,
+            signal_notifications_enabled=False,
+            signal_notification_filter="actionable",
+            db=db,
+            risk_manager=SimpleNamespace(check_daily_loss_limit=Mock(return_value=(True, "ok"))),
+            _check_max_drawdown=Mock(return_value=(True, "ok")),
+            _format_signal_message_html=Mock(return_value="signal text"),
+            app=SimpleNamespace(bot=SimpleNamespace(send_message=AsyncMock())),
+            indodax=SimpleNamespace(
+                get_ticker=Mock(return_value={"last": current_price, "bid": current_price}),
+                get_orderbook=Mock(return_value={"bids": [], "asks": []}),
+            ),
+            price_data={},
+            historical_data={},
+            ml_model_v4=None,
+            _quant_kelly_engine=None,
+            _quant_momentum_engine=None,
+            trading_engine=SimpleNamespace(
+                should_execute_trade=Mock(return_value=(True, "ok")),
+                calculate_position_size=Mock(return_value=(1.0, 12345.0)),
+                calculate_stop_loss_take_profit=Mock(return_value={
+                    "stop_loss": current_price - 10,
+                    "take_profit_1": current_price + 20,
+                    "take_profit_2": current_price + 40,
+                    "rr_ratio": 2.0,
+                    "method": "fixed",
+                }),
+            ),
+            price_monitor=SimpleNamespace(set_price_level=Mock(), remove_price_level=Mock()),
+            sr_detector=SimpleNamespace(),
+            _broadcast_to_subscribers=AsyncMock(),
+            _find_liquidity_zones=Mock(return_value=[]),
+            _elite_signal=Mock(return_value=("BUY", 0.8, 1.0)),
+            _fee_aware_net_price=Mock(return_value=(current_price, 0.0, 0.0)),
+        )
+        optimization = SimpleNamespace(
+            should_skip=False,
+            reason="ok",
+            position_multiplier=1.0,
+            stop_loss_multiplier=1.0,
+            tp1_multiplier=1.0,
+            tp2_multiplier=1.0,
+            min_rr_required=1.0,
+            edge_score=10.0,
+        )
+
+        with patch("autotrade.runtime.Config.AUTO_TRADE_DRY_RUN", True), \
+             patch("autotrade.runtime.Config.ADMIN_IDS", [123]), \
+             patch("autotrade.runtime.Config.CORRELATION_AVOIDANCE_ENABLED", False), \
+             patch("autotrade.runtime.Config.RL_ENABLED", False), \
+             patch("autotrade.runtime.Config.SMART_ROUTING_ENABLED", False), \
+             patch("autotrade.runtime.Config.PORTFOLIO_RISK_ADJUSTED", False), \
+             patch("autotrade.runtime.Config.LIMIT_ORDER_MIN_EDGE_PCT", 0.0), \
+             patch("autotrade.runtime.Config.AUTOTRADE_CHASE_THRESHOLD_PCT", 10.0), \
+             patch("autotrade.runtime.Config.TRADING_FEE_RATE", 0.0), \
+             patch("api.indodax_api.IndodaxAPI", Mock(return_value=bot.indodax)), \
+             patch("autotrade.runtime.analyze_market_intelligence", AsyncMock(return_value={"passes_entry_filter": True, "overall_signal": "BULLISH"})), \
+             patch("autotrade.runtime.detect_market_regime", Mock(return_value={"regime": "RANGE", "volatility": 0.01, "is_high_vol": False, "is_trending": False, "trend_direction": "NEUTRAL"})), \
+             patch("autotrade.runtime.get_support_resistance_for_pair", AsyncMock(return_value=None)), \
+             patch("autotrade.runtime.evaluate_autotrade_setup", Mock(return_value=optimization)):
+            await check_trading_opportunity(
+                bot,
+                "pippinidr",
+                signal={"pair": "pippinidr", "recommendation": "STRONG_BUY", "ml_confidence": 0.9, "price": current_price, "indicators": {}},
+            )
+
+        open_trades = db.get_open_trades(123)
+        self.assertEqual(len(open_trades), 1)
+        self.assertEqual(open_trades[0]["total"], 370000.0)
+
+    async def test_mid_price_pair_uses_price_times_100_as_dryrun_nominal(self):
+        db = _FakeDryRunDB()
+        current_price = 25000.0
+        bot = SimpleNamespace(
+            is_trading=True,
+            auto_trade_pairs={123: ["ethidr"]},
+            subscribers={123: ["ethidr"]},
+            last_ml_update={},
+            auto_trade_interval_minutes=5,
+            signal_notifications_enabled=False,
+            signal_notification_filter="actionable",
+            db=db,
+            risk_manager=SimpleNamespace(check_daily_loss_limit=Mock(return_value=(True, "ok"))),
+            _check_max_drawdown=Mock(return_value=(True, "ok")),
+            _format_signal_message_html=Mock(return_value="signal text"),
+            app=SimpleNamespace(bot=SimpleNamespace(send_message=AsyncMock())),
+            indodax=SimpleNamespace(
+                get_ticker=Mock(return_value={"last": current_price, "bid": current_price}),
+                get_orderbook=Mock(return_value={"bids": [], "asks": []}),
+            ),
+            price_data={},
+            historical_data={},
+            ml_model_v4=None,
+            _quant_kelly_engine=None,
+            _quant_momentum_engine=None,
+            trading_engine=SimpleNamespace(
+                should_execute_trade=Mock(return_value=(True, "ok")),
+                calculate_position_size=Mock(return_value=(1.0, 99999.0)),
+                calculate_stop_loss_take_profit=Mock(return_value={
+                    "stop_loss": current_price - 100,
+                    "take_profit_1": current_price + 200,
+                    "take_profit_2": current_price + 400,
+                    "rr_ratio": 2.0,
+                    "method": "fixed",
+                }),
+            ),
+            price_monitor=SimpleNamespace(set_price_level=Mock(), remove_price_level=Mock()),
+            sr_detector=SimpleNamespace(),
+            _broadcast_to_subscribers=AsyncMock(),
+            _find_liquidity_zones=Mock(return_value=[]),
+            _elite_signal=Mock(return_value=("BUY", 0.8, 1.0)),
+            _fee_aware_net_price=Mock(return_value=(current_price, 0.0, 0.0)),
+        )
+        optimization = SimpleNamespace(
+            should_skip=False,
+            reason="ok",
+            position_multiplier=1.0,
+            stop_loss_multiplier=1.0,
+            tp1_multiplier=1.0,
+            tp2_multiplier=1.0,
+            min_rr_required=1.0,
+            edge_score=10.0,
+        )
+
+        with patch("autotrade.runtime.Config.AUTO_TRADE_DRY_RUN", True), \
+             patch("autotrade.runtime.Config.ADMIN_IDS", [123]), \
+             patch("autotrade.runtime.Config.CORRELATION_AVOIDANCE_ENABLED", False), \
+             patch("autotrade.runtime.Config.RL_ENABLED", False), \
+             patch("autotrade.runtime.Config.SMART_ROUTING_ENABLED", False), \
+             patch("autotrade.runtime.Config.PORTFOLIO_RISK_ADJUSTED", False), \
+             patch("autotrade.runtime.Config.LIMIT_ORDER_MIN_EDGE_PCT", 0.0), \
+             patch("autotrade.runtime.Config.AUTOTRADE_CHASE_THRESHOLD_PCT", 10.0), \
+             patch("autotrade.runtime.Config.TRADING_FEE_RATE", 0.0), \
+             patch("api.indodax_api.IndodaxAPI", Mock(return_value=bot.indodax)), \
+             patch("autotrade.runtime.analyze_market_intelligence", AsyncMock(return_value={"passes_entry_filter": True, "overall_signal": "BULLISH"})), \
+             patch("autotrade.runtime.detect_market_regime", Mock(return_value={"regime": "RANGE", "volatility": 0.01, "is_high_vol": False, "is_trending": False, "trend_direction": "NEUTRAL"})), \
+             patch("autotrade.runtime.get_support_resistance_for_pair", AsyncMock(return_value=None)), \
+             patch("autotrade.runtime.evaluate_autotrade_setup", Mock(return_value=optimization)):
+            await check_trading_opportunity(
+                bot,
+                "ethidr",
+                signal={"pair": "ethidr", "recommendation": "BUY", "ml_confidence": 0.9, "price": current_price, "indicators": {}},
+            )
+
+        open_trades = db.get_open_trades(123)
+        self.assertEqual(len(open_trades), 1)
+        self.assertEqual(open_trades[0]["total"], 2500000.0)
+
+    async def test_high_price_pair_uses_price_times_10_as_dryrun_nominal(self):
+        db = _FakeDryRunDB()
+        current_price = 150000.0
+        bot = SimpleNamespace(
+            is_trading=True,
+            auto_trade_pairs={123: ["btcidr"]},
+            subscribers={123: ["btcidr"]},
+            last_ml_update={},
+            auto_trade_interval_minutes=5,
+            signal_notifications_enabled=False,
+            signal_notification_filter="actionable",
+            db=db,
+            risk_manager=SimpleNamespace(check_daily_loss_limit=Mock(return_value=(True, "ok"))),
+            _check_max_drawdown=Mock(return_value=(True, "ok")),
+            _format_signal_message_html=Mock(return_value="signal text"),
+            app=SimpleNamespace(bot=SimpleNamespace(send_message=AsyncMock())),
+            indodax=SimpleNamespace(
+                get_ticker=Mock(return_value={"last": current_price, "bid": current_price}),
+                get_orderbook=Mock(return_value={"bids": [], "asks": []}),
+            ),
+            price_data={},
+            historical_data={},
+            ml_model_v4=None,
+            _quant_kelly_engine=None,
+            _quant_momentum_engine=None,
+            trading_engine=SimpleNamespace(
+                should_execute_trade=Mock(return_value=(True, "ok")),
+                calculate_position_size=Mock(return_value=(1.0, 55555.0)),
+                calculate_stop_loss_take_profit=Mock(return_value={
+                    "stop_loss": current_price - 500,
+                    "take_profit_1": current_price + 1000,
+                    "take_profit_2": current_price + 2000,
+                    "rr_ratio": 2.0,
+                    "method": "fixed",
+                }),
+            ),
+            price_monitor=SimpleNamespace(set_price_level=Mock(), remove_price_level=Mock()),
+            sr_detector=SimpleNamespace(),
+            _broadcast_to_subscribers=AsyncMock(),
+            _find_liquidity_zones=Mock(return_value=[]),
+            _elite_signal=Mock(return_value=("BUY", 0.8, 1.0)),
+            _fee_aware_net_price=Mock(return_value=(current_price, 0.0, 0.0)),
+        )
+        optimization = SimpleNamespace(
+            should_skip=False,
+            reason="ok",
+            position_multiplier=1.0,
+            stop_loss_multiplier=1.0,
+            tp1_multiplier=1.0,
+            tp2_multiplier=1.0,
+            min_rr_required=1.0,
+            edge_score=10.0,
+        )
+
+        with patch("autotrade.runtime.Config.AUTO_TRADE_DRY_RUN", True), \
+             patch("autotrade.runtime.Config.ADMIN_IDS", [123]), \
+             patch("autotrade.runtime.Config.CORRELATION_AVOIDANCE_ENABLED", False), \
+             patch("autotrade.runtime.Config.RL_ENABLED", False), \
+             patch("autotrade.runtime.Config.SMART_ROUTING_ENABLED", False), \
+             patch("autotrade.runtime.Config.PORTFOLIO_RISK_ADJUSTED", False), \
+             patch("autotrade.runtime.Config.LIMIT_ORDER_MIN_EDGE_PCT", 0.0), \
+             patch("autotrade.runtime.Config.AUTOTRADE_CHASE_THRESHOLD_PCT", 10.0), \
+             patch("autotrade.runtime.Config.TRADING_FEE_RATE", 0.0), \
+             patch("api.indodax_api.IndodaxAPI", Mock(return_value=bot.indodax)), \
+             patch("autotrade.runtime.analyze_market_intelligence", AsyncMock(return_value={"passes_entry_filter": True, "overall_signal": "BULLISH"})), \
+             patch("autotrade.runtime.detect_market_regime", Mock(return_value={"regime": "RANGE", "volatility": 0.01, "is_high_vol": False, "is_trending": False, "trend_direction": "NEUTRAL"})), \
+             patch("autotrade.runtime.get_support_resistance_for_pair", AsyncMock(return_value=None)), \
+             patch("autotrade.runtime.evaluate_autotrade_setup", Mock(return_value=optimization)):
+            await check_trading_opportunity(
+                bot,
+                "btcidr",
+                signal={"pair": "btcidr", "recommendation": "BUY", "ml_confidence": 0.9, "price": current_price, "indicators": {}},
+            )
+
+        open_trades = db.get_open_trades(123)
+        self.assertEqual(len(open_trades), 1)
+        self.assertEqual(open_trades[0]["total"], 1500000.0)
 
 
 if __name__ == "__main__":
