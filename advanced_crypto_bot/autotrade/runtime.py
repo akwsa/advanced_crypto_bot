@@ -23,6 +23,48 @@ from signals.signal_pipeline import generate_signal_for_pair
 logger = logging.getLogger("crypto_bot")
 
 
+def _classify_autotrade_block_reason(reason):
+    """Classify a blocked entry reason into a compact diagnostic bucket."""
+    text = str(reason or "").upper()
+    if "V4_FILTER" in text or "BAD_BUY" in text or "BAD_SELL" in text:
+        return "V4_FILTER"
+    if ("R/R AFTER FEES" in text) or ("R/R" in text and "DYNAMIC FLOOR" in text):
+        return "R/R_FLOOR"
+    if "CVAR" in text:
+        return "CVAR"
+    if "CORREL" in text:
+        return "CORRELATION"
+    if "CHASE" in text:
+        return "CHASE_PREVENTION"
+    if "DRAWDOWN" in text:
+        return "DRAWDOWN"
+    if "DAILY LOSS" in text or "MAX_DAILY_LOSS" in text:
+        return "DAILY_LOSS"
+    if "MAKER EDGE" in text or "ENTRY ZONE" in text:
+        return "ENTRY_EDGE"
+    if "PAIR_FILTER" in text or "PROFIT_FACTOR" in text:
+        return "PAIR_FILTER"
+    if "MI FILTER" in text or "MARKET INTELLIGENCE" in text:
+        return "MARKET_INTELLIGENCE"
+    return "OTHER"
+
+
+def _remember_autotrade_block_reason(bot, pair, reason):
+    """Store the latest blocked-entry reason per pair for status diagnostics."""
+    pair_key = _normalize_pair(pair)
+    bucket = _classify_autotrade_block_reason(reason)
+    store = getattr(bot, "_autotrade_block_reasons", None)
+    if store is None:
+        store = {}
+        bot._autotrade_block_reasons = store
+    store[pair_key] = {
+        "pair": str(pair or "").upper(),
+        "reason": str(reason or "").strip(),
+        "bucket": bucket,
+        "timestamp": datetime.now().astimezone() if datetime.now().astimezone else datetime.now(),
+    }
+
+
 # =============================================================================
 # TELEGRAM SIGNAL ALERT COOLDOWNS (Prioritas 1 — 2026-05-22)
 # =============================================================================
@@ -442,6 +484,12 @@ async def check_trading_opportunity(bot, pair, signal=None):
         return
     # Override recommendation with pre-SR for autotrade execution path
     signal["recommendation"] = effective_rec
+    if is_dry_run and signal["recommendation"] == "BUY":
+        logger.debug(f"⏭️ Skipping {pair}: DRY RUN entry only allowed on STRONG_BUY")
+        return
+    if is_dry_run and open_trades_for_pair and signal["recommendation"] in ["BUY", "STRONG_BUY"]:
+        logger.debug(f"⏭️ Skipping {pair}: open DRY RUN position already exists; waiting for SELL")
+        return
     if cooldown_active and signal["recommendation"] not in ["STRONG_SELL", "SELL"]:
         logger.debug(f"⏭️ Skipping {pair}: scan cooldown active and signal is not SELL")
         return
@@ -533,6 +581,7 @@ async def check_trading_opportunity(bot, pair, signal=None):
         should_trade, gate_reason = bot.trading_engine.should_execute_trade(user_id, signal, current_price)
         if not should_trade:
             logger.info(f"🚫 Entry blocked for {pair}: {gate_reason}")
+            _remember_autotrade_block_reason(bot, pair, gate_reason)
             return
 
         market_conditions = await analyze_market_intelligence(bot, pair, current_price)
@@ -716,7 +765,9 @@ async def check_trading_opportunity(bot, pair, signal=None):
                 logger.info(f"🤖 [V4_FILTER] {pair}: {v4_pred} ({v4_conf:.1%})")
 
                 if v4_pred.startswith('BAD'):
-                    logger.info(f"🚫 [V4_FILTER] Entry blocked for {pair}: predicted bad outcome ({v4_pred})")
+                    reason = f"[V4_FILTER] Entry blocked for {pair}: predicted bad outcome ({v4_pred})"
+                    logger.info(f"🚫 {reason}")
+                    _remember_autotrade_block_reason(bot, pair, reason)
                     return
 
                 if v4_pred.startswith('GOOD') and v4_conf >= 0.65:
@@ -808,6 +859,7 @@ async def check_trading_opportunity(bot, pair, signal=None):
         )
         if optimization.should_skip:
             logger.info(f"🚫 Trade blocked for {pair}: {optimization.reason}")
+            _remember_autotrade_block_reason(bot, pair, optimization.reason)
             return
 
         amount *= optimization.position_multiplier
@@ -835,10 +887,12 @@ async def check_trading_opportunity(bot, pair, signal=None):
         potential_loss = (net_entry - effective_sl) / net_entry * 100
         rr_after_fees = potential_profit / potential_loss if potential_loss > 0 else 0
         if rr_after_fees < optimization.min_rr_required:
-            logger.info(
-                f"🚫 Trade blocked for {pair}: optimized R/R after fees too low "
+            reason = (
+                f"optimized R/R after fees too low "
                 f"({rr_after_fees:.2f} < {optimization.min_rr_required:.2f})"
             )
+            logger.info(f"🚫 Trade blocked for {pair}: {reason}")
+            _remember_autotrade_block_reason(bot, pair, reason)
             return
 
         logger.info(
@@ -852,10 +906,12 @@ async def check_trading_opportunity(bot, pair, signal=None):
         entry_zone_price = _calculate_entry_zone(current_price, support=nearest_support, signal_price=signal_entry_price)
         price_diff_pct = ((current_price - entry_zone_price) / current_price) * 100 if current_price > 0 else 0
         if price_diff_pct < Config.LIMIT_ORDER_MIN_EDGE_PCT:
-            logger.info(
-                f"🚫 Entry blocked for {pair}: maker edge too small "
+            reason = (
+                f"maker edge too small "
                 f"({price_diff_pct:.2f}% < {Config.LIMIT_ORDER_MIN_EDGE_PCT:.2f}%)"
             )
+            logger.info(f"🚫 Entry blocked for {pair}: {reason}")
+            _remember_autotrade_block_reason(bot, pair, reason)
             return
         logger.info(
             f"🎯 [ENTRY_ZONE] {pair}: Limit order @ {entry_zone_price:,.0f} "

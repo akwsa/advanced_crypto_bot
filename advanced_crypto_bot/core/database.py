@@ -1348,6 +1348,15 @@ class Database:
                 return result['value'].lower() == 'true'
             return True  # Default to dry-run for safety
 
+    def set_auto_trade_mode(self, is_dry_run):
+        """Persist auto-trade mode (dry-run or real) to database."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT OR REPLACE INTO app_settings (key, value)
+                VALUES ('auto_trade_dry_run', ?)
+            ''', (str(bool(is_dry_run)).lower(),))
+
     def set_signal_notifications_enabled(self, enabled):
         """Persist whether automatic signal notifications are sent to Telegram."""
         with self.get_connection() as conn:

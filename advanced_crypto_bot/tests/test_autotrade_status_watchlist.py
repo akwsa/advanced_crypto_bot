@@ -1,4 +1,4 @@
-# Tujuan: Regression tests untuk /autotrade dryrun dan /autotrade_status.
+# Tujuan: Regression tests untuk /autotrade_status diagnostic reason summary.
 # Caller: unittest/pytest focused Telegram command behavior.
 # Dependensi: bot.AdvancedCryptoBot dengan fake DB/risk manager/update.
 
@@ -78,6 +78,44 @@ class TestAutotradeStatusAndWatchlist(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Pair aktif dari watchlist", sent_text)
         self.assertIn("BTCIDR", sent_text)
         self.assertIn("ETH/IDR", sent_text)
+
+    async def test_autotrade_status_shows_block_reason_summary_when_available(self):
+        bot = self._bot()
+        bot.is_trading = True
+        bot.auto_trade_pairs = {123: ["zkjidr", "jellyjellyidr"]}
+        bot._autotrade_block_reasons = {
+            "zkjidr": {
+                "pair": "ZKJIDR",
+                "bucket": "V4_FILTER",
+                "reason": "[V4_FILTER] Entry blocked for zkjidr: predicted bad outcome (BAD_BUY)",
+                "timestamp": "2026-05-27 11:58:55",
+            },
+            "jellyjellyidr": {
+                "pair": "JELLYJELLYIDR",
+                "bucket": "R/R_FLOOR",
+                "reason": "Trade blocked for jellyjellyidr: R/R after fees below dynamic floor (1.19 < 1.50)",
+                "timestamp": "2026-05-27 12:01:27",
+            },
+            "skyaiidr": {
+                "pair": "SKYAIIDR",
+                "bucket": "CVAR",
+                "reason": "Entry blocked for skyaiidr: CVaR gate: CVaR95=-7.47% < -5.0%",
+                "timestamp": "2026-05-27 12:07:30",
+            },
+        }
+        update = self._update()
+
+        with patch("bot.Config.ADMIN_IDS", [123]), patch("bot.Config.AUTO_TRADE_DRY_RUN", True), patch("bot.Config.MAX_DAILY_LOSS_PCT", 5):
+            await bot.autotrade_status(update, SimpleNamespace(args=[]))
+
+        sent_text = bot._send_message.await_args.args[2]
+        self.assertIn("Ringkasan blokir entry DRY RUN terbaru", sent_text)
+        self.assertIn("V4_FILTER: 1", sent_text)
+        self.assertIn("R/R_FLOOR: 1", sent_text)
+        self.assertIn("CVAR: 1", sent_text)
+        self.assertIn("ZKJIDR", sent_text)
+        self.assertIn("JELLYJELLYIDR", sent_text)
+        self.assertIn("SKYAIIDR", sent_text)
 
 
 if __name__ == "__main__":

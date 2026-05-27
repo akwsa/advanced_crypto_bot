@@ -71,6 +71,37 @@ class PriceMonitor:
             if key in self.trailing_stops:
                 del self.trailing_stops[key]
             logger.info(f"❌ Removed monitoring for trade {trade_id}")
+
+    def rebuild_from_open_trades(self, db, trading_engine):
+        """Rebuild price_levels from open trades in DB so SL/TP monitoring survives restarts."""
+        from core.config import Config
+        count = 0
+        for admin_id in Config.ADMIN_IDS:
+            try:
+                open_trades = db.get_open_trades(admin_id)
+            except Exception as e:
+                logger.warning(f"⚠️ [REBUILD] Failed to load open trades for user {admin_id}: {e}")
+                continue
+            for trade in open_trades:
+                t = dict(trade) if hasattr(trade, 'keys') else trade
+                trade_id = t.get('id')
+                pair = t.get('pair', '')
+                entry_price = float(t.get('price', 0))
+                amount = float(t.get('amount', 0))
+                if entry_price <= 0 or amount <= 0:
+                    continue
+                key = f"{admin_id}_{trade_id}"
+                if key in self.price_levels:
+                    continue  # Already monitored
+                tp_data = trading_engine.calculate_stop_loss_take_profit(entry_price, "BUY")
+                self.set_price_level(
+                    admin_id, trade_id, pair, entry_price,
+                    tp_data["stop_loss"], tp_data["take_profit_1"],
+                    tp_data.get("take_profit_2"), amount
+                )
+                count += 1
+        if count > 0:
+            logger.info(f"🔄 [REBUILD] Restored SL/TP monitoring for {count} open trade(s)")
     
     async def check_price_levels(self, pair, current_price):
         """Check if price hits any SL/TP levels, trailing stop, and drop alerts"""

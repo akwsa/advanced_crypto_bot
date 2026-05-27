@@ -373,7 +373,7 @@ class TestSignalNotificationControls(unittest.IsolatedAsyncioTestCase):
                 "btcidr",
                 signal={
                     "pair": "btcidr",
-                    "recommendation": "BUY",
+                    "recommendation": "STRONG_BUY",
                     "ml_confidence": 0.8,
                     "price": 100,
                 },
@@ -585,7 +585,7 @@ class TestSignalNotificationControls(unittest.IsolatedAsyncioTestCase):
             app=SimpleNamespace(bot=SimpleNamespace(send_message=fake_send_message)),
             risk_manager=risk_manager,
         )
-        signal = {"pair": "btcidr", "recommendation": "BUY", "ml_confidence": 0.8, "price": 100}
+        signal = {"pair": "btcidr", "recommendation": "STRONG_BUY", "ml_confidence": 0.8, "price": 100}
 
         with patch("autotrade.runtime.Config.ADMIN_IDS", [123]):
             await check_trading_opportunity(bot, "BTC_IDR", signal=dict(signal))
@@ -620,12 +620,12 @@ class TestSignalNotificationControls(unittest.IsolatedAsyncioTestCase):
                 "btcidr",
                 signal={
                     "pair": "btcidr",
-                    "recommendation": "BUY",
+                    "recommendation": "STRONG_BUY",
                     "ml_confidence": 0.8,
                     "price": 100,
                 },
             )
-        # actionable allows BUY, so message must be sent
+        # actionable allows STRONG_BUY, so message must be sent
         self.assertEqual(len(sent_messages), 1)
 
 

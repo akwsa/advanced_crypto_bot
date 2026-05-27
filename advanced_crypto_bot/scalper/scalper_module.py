@@ -26,6 +26,7 @@ import numpy as np
 from cache.price_cache import price_cache
 from cache.redis_state_manager import state_manager
 from core.utils import Utils
+from bot_parts.scalper_ai_analysis import build_gemini_style_technical_analysis
 
 logger = logging.getLogger('scalper_module')
 
@@ -4149,8 +4150,12 @@ class ScalperModule:
         if not context.args:
             await update.effective_message.reply_text(
                 "📊 **Pair Analysis**\n"
-                "Format: `/s_analisa <pair>`\n"
-                "Contoh: `/s_analisa bridr`",
+                "Format: `/s_analisa <pair> [timeframe]`\n"
+                "Timeframe: `15m` `1h` `1d` `1W` (default: 15m)\n\n"
+                "Contoh:\n"
+                "• `/s_analisa bridr`\n"
+                "• `/s_analisa btcidr 1h`\n"
+                "• `/s_analisa ethidr 1d`",
                 parse_mode='Markdown'
             )
             return
@@ -4158,37 +4163,57 @@ class ScalperModule:
         pair = context.args[0].lower().strip()
         if not pair.endswith('idr'):
             pair += 'idr'
+
+        # Parse timeframe (default 15m)
+        valid_timeframes = ('1m', '15m', '1h', '1d', '1W')
+        timeframe = '15m'
+        if len(context.args) >= 2:
+            tf_input = context.args[1].strip()
+            if tf_input.upper() == '1W':
+                timeframe = '1W'
+            elif tf_input.lower() in valid_timeframes:
+                timeframe = tf_input.lower()
+            else:
+                await update.effective_message.reply_text(
+                    f"⚠️ Timeframe `{tf_input}` tidak valid.\n"
+                    f"Pilihan: `15m` `1h` `1d` `1W`",
+                    parse_mode='Markdown'
+                )
+                return
         
         # Tampilkan pesan loading
-        msg = await update.effective_message.reply_text(f"⏳ Menganalisa **{pair.upper()}**...", parse_mode='Markdown')
+        msg = await update.effective_message.reply_text(f"⏳ Menganalisa **{pair.upper()}** ({timeframe})...", parse_mode='Markdown')
         
         try:
             # Fetch historical data dari Indodax
-            df = await self._fetch_historical_data(pair)
+            df = await self._fetch_historical_data(pair, timeframe=timeframe)
             
-            if df is None or df.empty:
-                await msg.edit_text(f"❌ Gagal mengambil data historis untuk **{pair.upper()}**", parse_mode='Markdown')
-                return
-            
-            if len(df) < 60:
+            pair_label = pair.upper()
+
+            if df is None:
                 await msg.edit_text(
-                    f"⚠️ Data tidak cukup untuk **{pair.upper()}**\n"
-                    f"Diperlukan minimal 60 candle, tersedia: {len(df)}",
+                    f"❌ Tidak bisa mengambil data historis untuk **{pair_label}**.\n\n"
+                    f"Kemungkinan penyebab:\n"
+                    f"• Pair belum aktif / sangat sepi di Indodax\n"
+                    f"• Format pair tidak dikenali oleh Indodax API\n"
+                    f"• Indodax API sedang bermasalah\n\n"
+                    f"Coba lagi beberapa saat lagi atau pilih pair lain yang volumenya lebih besar.",
+                    parse_mode='Markdown'
+                )
+                return
+
+            min_candles = 20 if timeframe in ('1d', '1W') else 60
+            if df.empty or len(df) < min_candles:
+                await msg.edit_text(
+                    f"⚠️ Data candle untuk **{pair_label}** terlalu tipis untuk analisa timeframe {timeframe}.\n"
+                    f"Diperlukan minimal {min_candles} candle, tersedia: {len(df)}.\n\n"
+                    f"Coba timeframe lebih kecil atau pilih pair lain yang lebih likuid.",
                     parse_mode='Markdown'
                 )
                 return
             
-            # Calculate technical indicators
-            analysis = self._calculate_technical_indicators(df)
-            
-            # Get current price
-            current_price = self._get_price_sync(pair)
-            if current_price is None:
-                current_price = df['close'].iloc[-1]
-            
-            # Format message
-            message = self._format_analysis_message(pair, current_price, analysis)
-            
+            # Tampilkan narasi teknikal gaya Gemini untuk pair yang diminta saja
+            message = build_gemini_style_technical_analysis(pair, df, timeframe=timeframe, ema_periods=(7, 25, 99))
             await msg.edit_text(message, parse_mode='Markdown')
             
         except Exception as e:
@@ -4315,44 +4340,112 @@ class ScalperModule:
                 parse_mode='Markdown'
             )
 
-    async def _fetch_historical_data(self, pair):
-        """Fetch historical data dari Indodax"""
+    async def _fetch_historical_data(self, pair: str, timeframe: str = "15m"):
+        """Fetch historical data dari Indodax dan resample ke timeframe yang diminta.
+
+        Supported timeframes: 1m, 15m, 1h, 1d, 1W.
+
+        Indodax public trades endpoint uses compact lowercase pairs such as
+        ``btcidr``. Telegram users may send ``BTCIDR`` / ``BTC/IDR``. Try the
+        compact form first, then fall back to underscore form for compatibility
+        with other Indodax endpoints or future API variations.
+        """
         try:
-            # Ambil data trade history dari Indodax API
-            url = f"https://indodax.com/api/trades/{pair}"
-            response = requests.get(url, timeout=10, headers={'User-Agent': 'Mozilla/5.0'})
-            
-            if response.status_code != 200:
-                return None
-            
-            trades = response.json()
+            normalized_pair = (pair or "").lower().replace("/", "").replace("-", "").replace("_", "")
+            if normalized_pair.endswith("idr") and len(normalized_pair) > 3:
+                api_pair_underscore = f"{normalized_pair[:-3]}_idr"
+            else:
+                api_pair_underscore = normalized_pair
+
+            candidate_paths = []
+            if normalized_pair:
+                candidate_paths.append(f"https://indodax.com/api/trades/{normalized_pair}")
+            if api_pair_underscore and api_pair_underscore != normalized_pair:
+                candidate_paths.append(f"https://indodax.com/api/trades/{api_pair_underscore}")
+
+            trades = None
+            last_status = None
+            for url in candidate_paths:
+                try:
+                    response = requests.get(url, timeout=10, headers={'User-Agent': 'Mozilla/5.0'})
+                    last_status = response.status_code
+                    if response.status_code != 200:
+                        logger.warning(f"_fetch_historical_data: non-200 status {response.status_code} for {url}")
+                        continue
+
+                    data = response.json()
+                    if isinstance(data, dict) and data.get('error'):
+                        logger.info(f"_fetch_historical_data: API error for {url}: {data.get('error')}")
+                        continue
+                    if not isinstance(data, list) or not data:
+                        logger.info(f"_fetch_historical_data: empty/non-list trades response for {url}")
+                        continue
+
+                    trades = data
+                    break
+                except Exception as inner_e:
+                    logger.error(f"_fetch_historical_data: error calling {url}: {inner_e}")
+                    continue
+
             if not trades:
+                logger.warning(
+                    f"_fetch_historical_data: no trades data for pair={pair} "
+                    f"(normalized={api_pair_underscore}, last_status={last_status})"
+                )
                 return None
-            
+
             # Convert ke DataFrame
             df = pd.DataFrame(trades)
-            df['timestamp'] = pd.to_datetime(df['date'], unit='s')
+            if df.empty:
+                logger.warning(f"_fetch_historical_data: DataFrame empty after conversion for pair={pair}")
+                return None
+
+            required_cols = {'date', 'price', 'amount'}
+            if not required_cols.issubset(df.columns):
+                logger.warning(
+                    f"_fetch_historical_data: missing required columns in trades response "
+                    f"for pair={pair}: {df.columns.tolist()}"
+                )
+                return None
+
+            # Indodax returns unix seconds as strings; convert to numeric first so
+            # pandas parses consistently across versions/environments.
+            df['date'] = pd.to_numeric(df['date'], errors='coerce')
+            df['timestamp'] = pd.to_datetime(df['date'], unit='s', errors='coerce')
+            df = df.dropna(subset=['timestamp'])
             df = df.rename(columns={'price': 'close', 'amount': 'volume'})
-            df['close'] = df['close'].astype(float)
-            df['volume'] = df['volume'].astype(float)
-            
-            # Resample ke candle 1 menit (group by menit)
-            df = df.set_index('timestamp')
-            df = df.resample('1T').agg({
-                'close': 'last',
+            df['close'] = pd.to_numeric(df['close'], errors='coerce')
+            df['volume'] = pd.to_numeric(df['volume'], errors='coerce')
+            df = df.dropna(subset=['close'])
+
+            if df.empty:
+                logger.warning(f"_fetch_historical_data: DataFrame empty after cleaning for pair={pair}")
+                return None
+
+            # Resample ke candle 1 menit (group by menit). Use '1min' for pandas 3 compatibility.
+            df = df.set_index('timestamp').sort_index()
+
+            # Map timeframe to pandas resample rule
+            tf_map = {'1m': '1min', '15m': '15min', '1h': '1h', '1d': '1D', '1W': '1W'}
+            resample_rule = tf_map.get(timeframe, '15min')
+
+            df = df.resample(resample_rule).agg({
+                'close': ['first', 'max', 'min', 'last', 'count'],
                 'volume': 'sum'
-            }).dropna()
-            
-            # Tambahkan high, low, open (gunakan close sebagai placeholder)
-            df['high'] = df['close']
-            df['low'] = df['close']
-            df['open'] = df['close'].shift(1).fillna(df['close'])
-            
+            })
+            df.columns = ['open', 'high', 'low', 'close', '_count', 'volume']
+            df = df.drop(columns=['_count'])
+            df = df.dropna(subset=['close'])
+
+            if df.empty:
+                logger.warning(f"_fetch_historical_data: no {timeframe} candles after resample for pair={pair}")
+                return None
+
             # Reorder columns
             df = df[['open', 'high', 'low', 'close', 'volume']]
-            
+
             return df
-            
+
         except Exception as e:
             logger.error(f"Error fetching historical data for {pair}: {e}")
             return None

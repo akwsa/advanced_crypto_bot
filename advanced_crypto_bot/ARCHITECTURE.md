@@ -74,6 +74,8 @@ Technical Analysis + Machine Learning.
 ### AUTOTRADE (`autotrade/`)
 Auto-trading engine. **DRY RUN only** karena safety policy.
 
+**Auto-Promote:** Watched pairs otomatis masuk `auto_trade_pairs` saat signal BUY/STRONG_BUY terdeteksi (DRY RUN mode). Tidak perlu manual `/add_autotrade`.
+
 | File | Class / Function | Tujuan |
 |------|------------------|--------|
 | `trading_engine.py` | `TradingEngine` | Eksekusi BUY/SELL, calculate SL/TP, duplicate-position guard |

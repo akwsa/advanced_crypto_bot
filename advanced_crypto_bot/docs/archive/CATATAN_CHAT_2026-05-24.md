@@ -231,3 +231,63 @@ PY
 ## Rollback Plan
 
 Revert commit perubahan ini untuk kembali ke logic sebelumnya. Jika ada anomali runtime, jalankan `/s_posisi` setelah memeriksa Indodax `getInfo`/`orderHistory`, dan hentikan real Scalper order flow sampai pair/amount terverifikasi.
+
+---
+
+## Scope — Scalper /s_analisa Historical Data & Gemini-Style Narrative
+
+Memperbaiki command `/s_analisa <PAIR>` agar pair seperti `EDENIDR` tidak lagi gagal dengan pesan generik `Gagal mengambil data historis`, dan output analisa memakai narasi teknikal Indonesia bergaya Gemini untuk pair yang diminta saja.
+
+## Root Cause — Scalper /s_analisa Historical Data & Gemini-Style Narrative
+
+- Endpoint public Indodax trades valid untuk format compact lowercase seperti `edenidr` / `btcidr`; format underscore seperti `eden_idr` / `btc_idr` mengembalikan `invalid_pair` pada endpoint ini.
+- Input Telegram bisa datang sebagai uppercase (`EDENIDR`) atau variasi lain, sehingga perlu normalisasi ke compact lowercase sebelum request.
+- `date` dari response Indodax berupa unix seconds string; perlu dikonversi numeric dulu agar parse timestamp konsisten lintas versi pandas.
+- Resample lama memakai alias `1T`; di environment saat ini alias itu gagal parse, sehingga diganti ke `1min`.
+
+## Files Changed — Scalper /s_analisa Historical Data & Gemini-Style Narrative
+
+- `scalper/scalper_module.py`
+  - `cmd_analisa()` sekarang memakai `build_gemini_style_technical_analysis()` untuk narasi teknikal 15m dengan EMA 7/25/99.
+  - Error historis kosong dibuat lebih informatif: pair sepi/belum aktif, format tidak dikenali, atau API Indodax bermasalah.
+  - `_fetch_historical_data()` menormalisasi pair ke compact lowercase, mencoba compact form dulu, fallback underscore bila perlu, mengabaikan response API error dict, mengonversi timestamp string ke numeric, dan resample candle 1-menit dengan `1min`.
+- `bot_parts/scalper_ai_analysis.py`
+  - Helper pure untuk menghitung swing high/low, EMA, support/resistance, fase tren, dan merender narasi teknikal Indonesia gaya Gemini.
+- `tests/test_scalper_historical_data_fetch.py`
+  - Regression untuk normalisasi `EDENIDR` -> `edenidr`, fallback underscore, response kosong/API error, parsing OHLCV, dan candle output.
+- `tests/test_scalper_ai_analysis.py`
+  - Regression untuk metrik dan format narasi pair-specific.
+
+## Verification — Scalper /s_analisa Historical Data & Gemini-Style Narrative
+
+```bash
+cd /home/officer/advanced_crypto_bot/advanced_crypto_bot
+scripts/test.sh -q tests/test_scalper_historical_data_fetch.py tests/test_scalper_ai_analysis.py tests/test_telegram_ui_formatting.py
+# 17 passed, 2 warnings
+
+python -m py_compile scalper/scalper_module.py bot_parts/scalper_ai_analysis.py tests/test_scalper_historical_data_fetch.py tests/test_scalper_ai_analysis.py
+# OK
+
+python - <<'PY'
+import asyncio
+from scalper.scalper_module import ScalperModule
+async def main():
+    for pair in ['EDENIDR', 'BTCIDR']:
+        df = await ScalperModule._fetch_historical_data(None, pair)
+        print(pair, 'None' if df is None else f'rows={len(df)} last={df.close.iloc[-1]}')
+asyncio.run(main())
+PY
+# EDENIDR rows=148 last=1544.0
+# BTCIDR rows=75 last=1360000000.0
+```
+
+## Safety Impact — Scalper /s_analisa Historical Data & Gemini-Style Narrative
+
+- Tidak mengubah order execution path Indodax, balance sync, sizing, TP/SL trigger, atau real-trading gate.
+- Perubahan hanya pada public market data fetch dan formatting analisa Telegram.
+- Default AutoTrade tetap DRY RUN; Scalper real-order confirmation flow tidak disentuh.
+
+## Rollback Plan — Scalper /s_analisa Historical Data & Gemini-Style Narrative
+
+Revert perubahan `scalper/scalper_module.py`, hapus `bot_parts/scalper_ai_analysis.py`, `tests/test_scalper_ai_analysis.py`, dan `tests/test_scalper_historical_data_fetch.py` untuk kembali ke formatter analisa lama. Jika runtime anomali, nonaktifkan penggunaan `/s_analisa` sementara dan tetap gunakan `/price`/`/signal` untuk observasi market sampai patch dikembalikan.
+

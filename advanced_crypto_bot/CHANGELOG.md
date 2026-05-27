@@ -9,6 +9,83 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed - 2026-05-25 (AutoTrade DRY RUN Auto-Promote & Signal Queue Path)
+- `autotrade/runtime.py`: Auto-promote watched pairs ke `auto_trade_pairs` saat sinyal BUY/STRONG_BUY terdeteksi (DRY RUN mode) baik dari WebSocket maupun signal queue worker.
+- `autotrade/runtime.py`: `check_trading_opportunity()` sekarang menggunakan `pre_sr_recommendation` untuk eksekusi trade dan auto-promote watched pairs yang belum ada di `auto_trade_pairs`.
+- `signals/signal_pipeline.py`: Menyimpan `pre_sr_recommendation` sebelum SR_VALIDATION mengubah `recommendation` akhir.
+- `bot.py`: Memperbaiki state `is_trading` agar tidak di-reset ke `False` setelah `_enable_startup_dryrun_autotrade()`, serta memperjelas handler `/autotrade` dan `/autotrade_status`.
+- `core/database.py`: Menambahkan `set_auto_trade_mode()` untuk menyimpan mode AutoTrade di tabel `app_settings`.
+- `autotrade/price_monitor.py`: Menambahkan `rebuild_from_open_trades()` untuk membangun ulang monitoring SL/TP dari open trades DRY RUN saat startup.
+
+### Added - 2026-05-25 (/s_analisa Timeframe Selection + OHLC Fix)
+- `/s_analisa <pair> [timeframe]` sekarang mendukung pilihan timeframe: `15m`, `1h`, `1d`, `1W` (default: 15m).
+- `_fetch_historical_data()` diperbaiki: resampling sekarang menghasilkan candle OHLC asli (open=first, high=max, low=min, close=last) dan pair dinormalisasi ke compact lowercase (`edenidr`, `btcidr`).
+- Min candles requirement: 20 untuk 1d/1W, 60 untuk timeframe lebih pendek.
+
+### Fixed - 2026-05-25 (PriceMonitor: Rebuild SL/TP from Open Trades on Startup)
+- `autotrade/price_monitor.py`: Tambah method `rebuild_from_open_trades(db, trading_engine)` yang iterasi semua open trades dari DB, recalculate SL/TP via `trading_engine.calculate_stop_loss_take_profit()`, dan panggil `set_price_level()` untuk setiap posisi.
+- `bot.py`: Panggil `self.price_monitor.rebuild_from_open_trades()` saat startup setelah `_enable_startup_dryrun_autotrade()`.
+- **Sebelumnya:** SL/TP monitoring hilang setiap restart — posisi DRY RUN terbuka tidak di-monitor sampai signal baru muncul.
+- **Sekarang:** SL/TP monitoring otomatis di-restore dari open trades di DB saat bot start.
+- Safety: hanya read dari DB + recalculate; tidak mengubah trade data atau execute order.
+
+### Verification - 2026-05-25 (PriceMonitor Rebuild)
+- Syntax: `python -m py_compile autotrade/price_monitor.py bot.py` ✅.
+- Regression: `tests/test_autotrade_dryrun_signal_cycle.py tests/test_dryrun_safety.py` ✅ 3 passed.
+
+### Fixed - 2026-05-25 (AutoTrade DRY RUN: Signal Queue Path + WebSocket Independence)
+- **ROOT CAUSE:** `process_price_update_signal_tasks()` (yang berisi auto-promote logic) hanya dipanggil dari WebSocket price handler. Jika WebSocket tidak aktif/tidak menerima data, fungsi ini TIDAK PERNAH jalan. Signal sebenarnya di-generate oleh **market scan thread** yang push ke signal queue → signal queue worker → `check_trading_opportunity()`. Tapi `check_trading_opportunity()` menolak pair yang belum ada di `auto_trade_pairs`.
+- **FIX:** `check_trading_opportunity()` sekarang auto-promote watched pair ke `auto_trade_pairs` saat dipanggil dalam mode DRY RUN, tanpa bergantung pada WebSocket. Ini memastikan signal queue worker path juga bisa trigger autotrade.
+- Tambah debug log `[AUTO-PROMOTE]` untuk monitoring.
+- Safety: auto-promote hanya di DRY RUN; semua 17 entry gates tetap berlaku.
+
+### Verification - 2026-05-25 (Signal Queue Path + WebSocket Independence)
+- Syntax: `python -m py_compile autotrade/runtime.py` ✅.
+- Regression: `tests/test_autotrade_dryrun_signal_cycle.py tests/test_dryrun_safety.py tests/test_signal_notification_controls.py` ✅ 31 passed.
+
+### Fixed - 2026-05-25 (AutoTrade DRY RUN: is_trading Reset + Missing set_auto_trade_mode)
+- **Bug 1 — `bot.py` line 322:** `self.is_trading = False` di-hardcode SETELAH `_enable_startup_dryrun_autotrade()` (line 286) yang set `is_trading = True`. Akibatnya setiap restart, autotrade selalu PAUSED meskipun startup function sudah enable. Fix: gunakan `if not hasattr(self, 'is_trading')` agar tidak override.
+- **Bug 2 — `core/database.py`:** Method `set_auto_trade_mode()` tidak ada (hanya `get_auto_trade_mode()` yang ada). Setiap kali bot coba persist mode ke DB, error `'Database' object has no attribute 'set_auto_trade_mode'` muncul. Fix: tambah method `set_auto_trade_mode()` yang INSERT OR REPLACE ke `app_settings`.
+- Safety: tidak mengubah logic trading, sizing, atau API key gate.
+
+### Verification - 2026-05-25 (is_trading Reset + Missing set_auto_trade_mode)
+- Syntax: `python -m py_compile bot.py core/database.py` ✅.
+- Regression: `tests/test_autotrade_dryrun_signal_cycle.py tests/test_dryrun_safety.py` ✅ 3 passed.
+
+### Fixed - 2026-05-25 (AutoTrade DRY RUN: SR_VALIDATION Bypass for Trade Execution)
+- **ROOT CAUSE:** `SR_VALIDATION` di signal pipeline mengkonversi SEMUA signal BUY/STRONG_BUY → HOLD karena `SR_NEAR_RESISTANCE_PCT=2.5%` terlalu agresif untuk crypto low-price (contoh: DOGE harga 1811, R1=1812, jarak hanya 0.06%). Akibatnya autotrade tidak pernah execute trade meskipun ML+TA menghasilkan BUY.
+- **FIX 1 — `signals/signal_pipeline.py`:** Simpan `signal['pre_sr_recommendation']` sebelum SR_VALIDATION dijalankan, sehingga recommendation asli (pre-SR) tersedia untuk consumer lain.
+- **FIX 2 — `autotrade/runtime.py` (`process_price_update_signal_tasks`):** Auto-promote sekarang cek `pre_sr_recommendation` (bukan `recommendation` final). Jika pre-SR = BUY/STRONG_BUY → pair dipromosikan ke autotrade.
+- **FIX 3 — `autotrade/runtime.py` (`check_trading_opportunity`):** Override `signal['recommendation']` dengan `pre_sr_recommendation` untuk execution path. Autotrade punya entry gates sendiri (market intelligence, R/R after fees, profit optimizer, chase prevention, correlation check, V4 filter) yang lebih tepat dari SR_VALIDATION untuk keputusan trade.
+- **Alasan desain:** SR_VALIDATION dirancang untuk filter notifikasi Telegram (mengurangi spam BUY yang langsung kena resistance). Tapi untuk autotrade, entry gates yang lebih canggih (17 gates) sudah cukup — SR_VALIDATION justru memblokir semua trade.
+- Safety: SR_VALIDATION tetap aktif untuk notifikasi Telegram; hanya autotrade execution path yang bypass. Semua entry gates autotrade tetap berlaku.
+
+### Verification - 2026-05-25 (AutoTrade DRY RUN: SR_VALIDATION Bypass)
+- Syntax: `python -m py_compile signals/signal_pipeline.py autotrade/runtime.py` ✅.
+- Regression: `tests/test_autotrade_dryrun_signal_cycle.py tests/test_dryrun_safety.py tests/test_signal_notification_controls.py tests/test_near_miss_signals.py` ✅ 34 passed.
+
+### Added - 2026-05-25 (/s_analisa Timeframe Selection + OHLC Fix)
+- `/s_analisa <pair> [timeframe]` sekarang mendukung pilihan timeframe: `15m`, `1h`, `1d`, `1W` (default: 15m).
+- `_fetch_historical_data()` diperbaiki: resampling sekarang menghasilkan candle OHLC asli (open=first, high=max, low=min, close=last) — sebelumnya high/low/open palsu (semua = close).
+- Min candles requirement disesuaikan: 20 untuk 1d/1W, 60 untuk timeframe lebih pendek.
+- Contoh: `/s_analisa btcidr 1h`, `/s_analisa ethidr 1d`.
+
+### Verification - 2026-05-25 (/s_analisa Timeframe Selection + OHLC Fix)
+- Syntax: `python -m py_compile scalper/scalper_module.py` ✅.
+- Regression: `tests/test_scalper_ai_analysis.py` ✅ 2 passed; `tests/test_scalper_dryrun_positions.py` ✅ 35 passed.
+
+### Added - 2026-05-25 (AutoTrade DRY RUN Auto-Promote on BUY Signal)
+- `autotrade/runtime.py`: Watched pairs sekarang otomatis dipromosikan ke `auto_trade_pairs` saat signal BUY/STRONG_BUY terdeteksi (hanya dalam mode DRY RUN). Tidak perlu lagi manual `/add_autotrade` — cukup `/watch` pair, dan saat signal BUY muncul, autotrade langsung dimulai.
+- Fungsi baru `_auto_promote_pair()` menambahkan pair ke `auto_trade_pairs` admin secara otomatis dengan deduplication.
+- `process_price_update_signal_tasks()` dimodifikasi: jika `is_trading=True` dan `AUTO_TRADE_DRY_RUN=True`, signal BUY/STRONG_BUY pada watched pair langsung trigger `check_trading_opportunity()` tanpa perlu pair sudah ada di `auto_trade_pairs` sebelumnya.
+- Setelah pair dipromosikan, tick berikutnya langsung masuk jalur autotrade penuh (monitor SELL, SL/TP, trailing stop).
+- Safety: hanya aktif di mode DRY RUN; semua 17 entry gates tetap berlaku; tidak mengubah real-trading path, API key gate, atau `MAX_DRAWDOWN_PCT`.
+
+### Verification - 2026-05-25 (AutoTrade DRY RUN Auto-Promote on BUY Signal)
+- Regression: `tests/test_autotrade_dryrun_signal_cycle.py` ✅ 1 passed.
+- Related suite: `tests/test_dryrun_safety.py tests/test_signal_notification_controls.py tests/test_near_miss_signals.py tests/test_indodax_api_order_params.py` ✅ 37 passed total.
+- Syntax: `python -m py_compile autotrade/runtime.py` ✅.
+
 ### Fixed - 2026-05-24 (Kiro Claude Scalper Balance Verification & Compact Signal UI)
 - `scalper/scalper_module.py`: verifier posisi REAL sekarang membaca response `IndodaxAPI.get_balance()` dari key `balance` (bukan `funds`), sehingga warning `Could not fetch balance to verify position ...` tidak muncul untuk response valid dan posisi EDEN/PIPPIN bisa diverifikasi dari saldo coin.
 - `signals/signal_formatter.py`: tampilan indikator utama Telegram dibuat lebih compact (`RSI/MACD`, `MA/BB`, `Vol`) agar signal lebih pendek dan mudah dibaca di mobile.

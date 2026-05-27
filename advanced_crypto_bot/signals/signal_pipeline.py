@@ -526,6 +526,9 @@ async def generate_signal_for_pair(bot, pair):
         signal["price_zone"] = "UNKNOWN"
         signal["risk_reward_ratio"] = 0
 
+    # Store pre-SR recommendation so autotrade auto-promote can use it
+    signal["pre_sr_recommendation"] = signal.get("recommendation", "HOLD")
+
     # Final runtime gate for actionable signals (authoritative path).
     try:
         from core.config import Config

@@ -285,6 +285,9 @@ class AdvancedCryptoBot:
         # AutoHunter still do.
         self._enable_startup_dryrun_autotrade()
 
+        # Rebuild SL/TP monitoring for open trades that survived restart
+        self.price_monitor.rebuild_from_open_trades(self.db, self.trading_engine)
+
         # Initialize Smart Hunter Integration
         # Smart/Ultra Hunter must stay dry-run even though Scalper is real-only.
         self.smart_hunter = SmartHunterBotIntegration(
@@ -318,8 +321,9 @@ class AdvancedCryptoBot:
         
         self.ws_connected = False
 
-        # Trading state
-        self.is_trading = False
+        # Trading state (preserve is_trading if already set by _enable_startup_dryrun_autotrade)
+        if not hasattr(self, 'is_trading'):
+            self.is_trading = False
         self.start_time = time.time()
         self.last_ml_update: Dict[str, datetime] = {}
         self.last_price_update: Dict[str, datetime] = {}
@@ -4377,7 +4381,7 @@ class AdvancedCryptoBot:
                 pair_filter += 'IDR'
         text = "❌ Unknown error"
 
-        if Config.DRY_RUN:
+        if Config.AUTO_TRADE_DRY_RUN:
             try:
                 db_balance = self.db.get_balance(user_id)
                 user_name = getattr(user_info, 'first_name', None) or 'User'
@@ -6267,162 +6271,148 @@ market conditions are extremely dangerous.
         await update.message.reply_text(text, parse_mode='Markdown')
 
     async def autotrade(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Toggle auto-trading ON/OFF with status check"""
+        """Toggle auto-trading mode (dryrun/real/off) dan sinkronisasi dengan watchlist.
+
+        Perilaku:
+        - /autotrade dryrun → enable DRY RUN + import semua pair di watchlist
+          admin pemanggil ke auto_trade_pairs (tanpa perlu setting ulang).
+        - /autotrade real   → real mode (tetap dilock ke DRY RUN jika config melarang).
+        - /autotrade off    → matikan auto-trading.
+        """
         if update.effective_user.id not in Config.ADMIN_IDS:
             await self._send_message(update, context, "❌ Admin only!")
             return
 
-        # Check if args provided for mode selection
-        if context.args:
-            mode = context.args[0].lower()
-            if mode in ['dryrun', 'dry_run', 'simulation']:
-                self.is_trading = True
-                self._save_auto_trade_mode(True)
-                logger.info("🟡 Auto-trading ENABLED in DRY RUN mode via /autotrade dryrun")
-                
-                # Count total trades so far
-                user_id = list(self.subscribers.keys())[0] if self.subscribers else 1
-                closed_count = len(self.db.get_trade_history(user_id, limit=10000))
-                open_count = len(self.db.get_open_trades(user_id))
-                all_count = closed_count + open_count
-                
-                text = f"""
-🧪 **AUTO-TRADING: DRY RUN MODE** 🧪
+        args = getattr(context, "args", []) or []
+        mode = (args[0].lower() if args else "").strip()
 
-✅ **Simulation Mode ACTIVE**
+        dry_run_supported = bool(getattr(Config, "AUTO_TRADE_DRY_RUN", True))
+        real_supported = bool(getattr(Config, "AUTO_TRADE_REAL", False))
 
-📊 **Current Status:**
-• Total Trades Executed: `{all_count}`
-• Open Positions: `{open_count}`
-• Closed Trades: `{closed_count}`
-• Mode: SIMULATION (no real money)
+        # Help / usage ketika mode tidak dikenali
+        if mode not in ("dryrun", "dry_run", "simulation", "real", "live", "normal", "off", "disable", "stop"):
+            text = (
+                "⚙️ **Auto-Trade Control**\n\n"
+                "Gunakan perintah:\n"
+                "• `/autotrade dryrun` - Simulasi (DRY RUN), pakai watchlist yang sudah ada\n"
+                "• `/autotrade off`    - Matikan auto-trading\n\n"
+                "Mode REAL trading saat ini dikunci untuk keamanan (hanya Scalper yang boleh memakai uang asli)."
+            )
+            await self._send_message(update, context, text, parse_mode='Markdown')
+            return
 
-🤖 **Bot will simulate:**
-• Scanning watched pairs every 5 minutes
-• Generating BUY/SELL signals (confidence >65%)
-• Applying Stop Loss (-2%) & Take Profit (+5%)
-• Enforcing risk limits (max 5% daily loss)
+        if mode in ['off', 'disable', 'stop']:
+            self.is_trading = False
+            logger.info("🔴 Auto-trading DISABLED via /autotrade off")
+            text = (
+                "⏸️ **AUTO-TRADING DISABLED**\n\n"
+                "Bot tidak akan membuka posisi baru secara otomatis.\n\n"
+                "Gunakan `/autotrade dryrun` untuk mengaktifkan simulasi."
+            )
+            await self._send_message(update, context, text, parse_mode='Markdown')
+            return
 
-💡 Use `/autotrade_status` to see detailed history
-Use `/trades` to view all trade records
-                """
-            elif mode in ['real', 'live', 'normal']:
-                # Security warning: Check if API keys are configured
-                if not Config.IS_API_KEY_CONFIGURED:
-                    api_warning = """
-❌ **INDODAX API KEYS NOT CONFIGURED**
-
-To enable real trading, you must set:
-• INDODAX_API_KEY
-• INDODAX_SECRET_KEY
-
-in your `.env` file.
-
-⚠️ Cannot enable real mode without API keys!
-⏹️ Using Dry-Run mode as default.
-                    """
-                    await self._send_message(update, context, api_warning, parse_mode='Markdown')
-                    return
-
-                self._lock_no_money_automation("/autotrade real blocked")
-                text = """
-🔒 **AUTO-TRADING REAL MODE DILOCK**
-
-AutoTrade tidak boleh memakai uang asli.
-Mode dipaksa tetap: **DRY RUN / NO MONEY**.
-
-✅ Trading uang asli hanya boleh lewat **Scalper** dengan tombol/command:
-• `/s_buy <pair> <price> <idr>`
-• `/s_sell <pair> [price] [amount]`
-
-Gunakan `/autotrade dryrun` untuk simulasi atau `/s_menu` untuk Scalper.
-                """
-            elif mode in ['off', 'disable', 'stop']:
-                self.is_trading = False
-                logger.info("🔴 Auto-trading DISABLED via /autotrade off")
-                text = """
-⏸️ **AUTO-TRADING DISABLED**
-
-📋 **Current Status:**
-• No new auto-trades will execute
-• Existing positions remain active
-• SL/TP monitoring still works
-• Manual trading (`/trade`) still works
-
-💡 **To Resume:**
-Use `/autotrade dryrun` for simulation
-Use `/autotrade real` for real trading
-                """
-            else:
-                text = """
-❓ **Usage:** `/autotrade [mode]`
-
-📋 **Available modes:**
-• `dryrun` - Simulation mode (no real trades)
-• `real` - Live trading (real money)
-• `off` - Disable auto-trading
-
-💡 **Example:**
-`/autotrade dryrun`
-                """
+        # Normalisasi alias ke mode kanonik
+        if mode in ['dryrun', 'dry_run', 'simulation']:
+            if not dry_run_supported:
+                await self._send_message(update, context, "❌ Dry run mode dimatikan di konfigurasi.", parse_mode='Markdown')
+                return
+            is_dry_run = True
         else:
-            # Toggle trading state (legacy behavior)
-            self.is_trading = not self.is_trading
+            # Semua varian 'real' tetap dilock ke DRY RUN untuk keamanan
+            if not real_supported or not getattr(Config, 'IS_API_KEY_CONFIGURED', False):
+                self._lock_no_money_automation("/autotrade real blocked")
+                text = (
+                    "🔒 **AUTO-TRADING REAL MODE DILOCK**\n\n"
+                    "AutoTrade tidak boleh memakai uang asli.\n"
+                    "Mode dipaksa tetap: **DRY RUN / NO MONEY**.\n\n"
+                    "✅ Trading uang asli hanya boleh lewat **Scalper** dengan tombol/command:\n"
+                    "• `/s_buy <pair> <price> <idr>`\n"
+                    "• `/s_sell <pair> [price] [amount]`\n\n"
+                    "Gunakan `/autotrade dryrun` untuk simulasi atau `/s_menu` untuk Scalper."
+                )
+                await self._send_message(update, context, text, parse_mode='Markdown')
+                return
+            is_dry_run = False
 
-            if self.is_trading:
-                dry_run_status = "DRY RUN 🧪" if Config.AUTO_TRADE_DRY_RUN else "REAL ⚠️"
-                logger.info(f"🟢 Auto-trading ENABLED via /autotrade - Mode: {dry_run_status}")
-                mode_text = "🧪 **DRY RUN (Simulation)**" if Config.AUTO_TRADE_DRY_RUN else "⚠️ **REAL Trading**"
-                warning_text = """• ✅ Trades are SIMULATED (no real money)
-• ✅ Perfect for testing and learning
-• ✅ Risk-free strategy validation""" if Config.AUTO_TRADE_DRY_RUN else """• 🚨 Trades use REAL money from Indodax
-• 🚨 Start with small amounts first
-• 🚨 Monitor positions regularly"""
+        # Aktifkan auto-trading
+        self.is_trading = True
+        self._save_auto_trade_mode(is_dry_run)
+        logger.info("🟡 Auto-trading ENABLED in %s mode via /autotrade", 'DRY RUN' if is_dry_run else 'REAL')
 
-                text = f"""
-✅ **AUTO-TRADING ENABLED**
+        # Ambil user_id admin pemanggil dan existing watchlist
+        user_id = update.effective_user.id
+        imported_pairs = []
+        if is_dry_run:
+            existing_watchlist = list(self.subscribers.get(user_id, []) or [])
+            if existing_watchlist:
+                if not hasattr(self, 'auto_trade_pairs') or self.auto_trade_pairs is None:
+                    self.auto_trade_pairs = {}
 
-{mode_text}
+                current = list(self.auto_trade_pairs.get(user_id, []) or [])
+                seen_norm = {self._normalize_pair_key(p) for p in current}
+                for pair in existing_watchlist:
+                    norm = self._normalize_pair_key(pair)
+                    if norm and norm not in seen_norm:
+                        current.append(pair)
+                        seen_norm.add(norm)
+                        imported_pairs.append(pair)
+                if current:
+                    self.auto_trade_pairs[user_id] = current
 
-🤖 **Bot will:**
-• Scan watched pairs every 5 minutes
-• Execute BUY/SELL when signal strength > 65%
-• Apply Stop Loss (-2%) & Take Profit (+5%)
-• Enforce risk limits (max 5% daily loss)
+        # Hitung ringkasan sederhana
+        user_id_for_stats = list(self.subscribers.keys())[0] if self.subscribers else user_id
+        closed_count = len(self.db.get_trade_history(user_id_for_stats, limit=10000))
+        open_count = len(self.db.get_open_trades(user_id_for_stats))
+        all_count = closed_count + open_count
 
-📊 **Requirements:**
-• Must have `/watch` active pairs
-• Need 60+ candles of data
-• Strong signal confidence (>65%)
-
-⚠️ **Risk Warning:**
-{warning_text}
-
-Use `/autotrade` again to DISABLE
-                """
-            else:
-                logger.info("🔴 Auto-trading DISABLED via /autotrade")
-                text = """
-⏸️ **AUTO-TRADING DISABLED**
-
-📋 **Current Status:**
-• No new auto-trades will execute
-• Existing positions remain active
-• SL/TP monitoring still works
-• Manual trading (`/trade`) still works
-
-💡 **To Resume:**
-Use `/autotrade` again to ENABLE
-                """
-
-        await self._send_message(update, context, text, parse_mode='Markdown')
+        if is_dry_run:
+            lines = [
+                "🧪 **AUTO-TRADING: DRY RUN MODE** 🧪",
+                "",
+                "✅ **Simulation Mode ACTIVE**",
+                "",
+                "📊 **Current Status:**",
+                f"• Total Trades Executed: `{all_count}`",
+                f"• Open Positions: `{open_count}`",
+                f"• Closed Trades: `{closed_count}`",
+                "• Mode: SIMULATION (no real money)",
+                "",
+                "🤖 **Bot will simulate:**",
+                "• Scanning watched pairs every 5 minutes",
+                "• Generating BUY/SELL signals (confidence >65%)",
+                "• Applying Stop Loss (-2%) & Take Profit (+5%)",
+                "• Enforcing risk limits (max 5% daily loss)",
+            ]
+            if imported_pairs:
+                pairs_str = ", ".join(sorted({p.upper() for p in imported_pairs}))
+                lines.append("")
+                lines.append("📌 Existing Watchlist Imported:")
+                lines.append(pairs_str)
+            lines.append("")
+            lines.append("💡 Gunakan `/autotrade_status` untuk melihat riwayat harian.")
+            lines.append("Gunakan `/trades` untuk melihat semua trade.")
+            await self._send_message(update, context, "\n".join(lines), parse_mode='Markdown')
+        else:
+            text = (
+                "🟢 Auto-trading ENABLED in REAL mode. Gunakan dengan sangat hati-hati.\n\n"
+                "Pastikan Anda memahami semua risiko dan sudah menguji strategi di DRY RUN."
+            )
+            await self._send_message(update, context, text, parse_mode='Markdown')
 
     async def autotrade_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Show detailed auto-trading status and history"""
-        if update.effective_user.id not in Config.ADMIN_IDS:
-            await self._send_message(update, context, "❌ Admin only!")
-            return
+        """Show auto-trading status dashboard"""
+        try:
+            await self._autotrade_status_impl(update, context)
+        except Exception as e:
+            logger.error(f"autotrade_status error: {e}")
+            try:
+                await self._send_message(update, context, f"❌ Error menampilkan autotrade status: {e}")
+            except Exception:
+                pass
 
+    async def _autotrade_status_impl(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Internal implementation for autotrade_status."""
         user_id = update.effective_user.id
 
         # Get auto-trading stats
@@ -6480,7 +6470,53 @@ Use `/autotrade` again to ENABLE
         # Today's performance
         text += f"📈 **Today's Activity ({today}):**\n"
         text += f"• Total Auto Trades: {len(today_trades)}\n"
-        
+
+        # If auto-trading is ON but there are no auto-trades today, give Markdown-safe guidance
+        if self.is_trading and not today_trades:
+            active_pairs = list(self.auto_trade_pairs.get(user_id, []) or [])
+            if not active_pairs:
+                active_pairs = list(self.subscribers.get(user_id, []) or [])
+            if active_pairs:
+                pairs_str = ", ".join(sorted({str(p).upper() for p in active_pairs}))
+                text += f"\n📌 Pair aktif dari watchlist: {pairs_str}\n"
+            else:
+                text += "\n📌 Pair aktif dari watchlist: belum ada. Tambahkan dengan `/watch btcidr, ethidr`.\n"
+            text += "\n💡 Auto-trading aktif, tapi belum ada trade otomatis hari ini.\n"
+            text += "Kemungkinan penyebab: \n"
+            text += "• Pair yang di-watch belum memberi sinyal BUY/STRONG_BUY yang valid\n"
+            text += "• Gate risk management (drawdown harian, VAR, korelasi) memblokir eksekusi\n"
+            text += "• Data historis belum cukup (butuh puluhan candle per pair)\n\n"
+
+            block_reasons = getattr(self, '_autotrade_block_reasons', {}) or {}
+            if block_reasons:
+                sorted_reasons = sorted(
+                    block_reasons.values(),
+                    key=lambda item: item.get('timestamp') or datetime.min,
+                    reverse=True,
+                )
+                bucket_counts = {}
+                for item in sorted_reasons:
+                    bucket = item.get('bucket') or 'OTHER'
+                    bucket_counts[bucket] = bucket_counts.get(bucket, 0) + 1
+
+                text += "📎 **Ringkasan blokir entry DRY RUN terbaru:**\n"
+                for bucket, count in sorted(bucket_counts.items(), key=lambda kv: (-kv[1], kv[0])):
+                    text += f"• {bucket}: {count}\n"
+
+                text += "\n🧱 **Contoh pair yang terakhir diblokir:**\n"
+                for item in sorted_reasons[:3]:
+                    pair_label = str(item.get('pair') or 'N/A').upper()
+                    bucket = item.get('bucket') or 'OTHER'
+                    reason = str(item.get('reason') or '-').replace('`', "'")
+                    text += f"• {pair_label} [{bucket}] — {reason}\n"
+                text += "\n"
+
+            text += "✅ **Langkah untuk menguji Auto-Trade DRY RUN:**\n"
+            text += "1. Tambah beberapa pair likuid ke watchlist: `/watch btcidr, ethidr`\n"
+            text += "2. Pastikan mode: `/autotrade dryrun` (cek di sini: DRY RUN)\n"
+            text += "3. Biarkan bot berjalan beberapa jam agar pipeline sinyal bekerja\n"
+            text += "4. Lihat kembali `/autotrade_status` dan `/trades` untuk hasil simulasi\n\n"
+
         if dry_run_trades:
             text += f"  - 🧪 Dry Run: {len(dry_run_trades)}\n"
         if real_trades:
@@ -6562,7 +6598,16 @@ Use `/autotrade` again to ENABLE
         text += f"• Total Trades: {metrics.get('total_trades', 0)}\n"
 
         # Last scan time
-        text += f"\n⏱️ **Last Scan:** {self.last_ml_update.get(list(self.subscribers.get(user_id, []))[0] if self.subscribers.get(user_id) else 'N/A', 'N/A')}\n" if self.subscribers.get(user_id) else "\n⏱️ **Last Scan:** N/A\n"
+        try:
+            subs = self.subscribers.get(user_id)
+            if subs:
+                first_pair = list(subs)[0]
+                last_scan = self.last_ml_update.get(first_pair, 'N/A')
+                text += f"\n⏱️ **Last Scan:** {last_scan}\n"
+            else:
+                text += "\n⏱️ **Last Scan:** N/A\n"
+        except Exception:
+            text += "\n⏱️ **Last Scan:** N/A\n"
 
         text += "\n💡 **Commands:**\n"
         text += "• `/autotrade dryrun` - Enable simulation mode\n"
@@ -6571,7 +6616,12 @@ Use `/autotrade` again to ENABLE
         text += "• `/trades` - View all trades\n"
         text += "• `/balance` - Check balance\n"
 
-        await self._send_message(update, context, text, parse_mode='Markdown')
+        try:
+            await self._send_message(update, context, text, parse_mode='Markdown')
+        except Exception:
+            # Fallback: send without Markdown if parsing fails
+            clean_text = text.replace('**', '').replace('`', '').replace('_', '')
+            await self._send_message(update, context, clean_text)
 
     async def set_interval(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Change auto-trade check interval via command: /set_interval <minutes>"""

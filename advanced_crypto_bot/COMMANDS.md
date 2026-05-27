@@ -35,7 +35,7 @@ Semua Telegram command yang tersedia. Format: `/command [arg]`.
 | `/topvolume` | 🟢 | Top 50 pair by volume 24h dari Indodax |
 | `/scan` | 🟢 | Market opportunities (top gainers/losers/trending) |
 
-**Format pair:** `btcidr`, `BTC/IDR`, `BTCIDR` — bot auto-normalize.
+**Format pair:** `btcidr`, `BTC/IDR`, `BTCIDR` — bot auto-normalize. Untuk endpoint public trades `/s_analisa`, bot memakai format compact lowercase Indodax seperti `edenidr`.
 
 ---
 
@@ -118,7 +118,7 @@ Semua Telegram command yang tersedia. Format: `/command [arg]`.
 | `/s_sltp <PAIR> <TP> <SL>` | 🔴💰 | Set/update Take Profit & Stop Loss posisi Scalper; gunakan `-` untuk hapus salah satu level |
 | `/s_cancel <PAIR> [tp|sl|all]` | 🔴💰 | Hapus TP, SL, atau keduanya dari posisi Scalper |
 | `/s_posisi` | 🟢 | Posisi Scalper aktif + ringkasan TP/SL/RR |
-| `/s_analisa <PAIR>` | 🟢 | Analisa cepat pair untuk scalping |
+| `/s_analisa <PAIR>` | 🟢 | Analisa teknikal cepat untuk scalping (narasi gaya Gemini + EMA7/25/99). Timeframe: `/s_analisa btcidr 1h` — pilihan: `15m` `1h` `1d` `1W` (default 15m) |
 
 Contoh SL/TP:
 ```text
