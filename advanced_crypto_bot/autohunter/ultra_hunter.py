@@ -49,6 +49,7 @@ class UltraConservativeHunter:
         self.last_loss_time = None
         self.dry_run = dry_run
         self.db = db
+        self._last_reset = datetime.now().date()
 
         if dry_run:
             logger.info("🧪 Ultra Hunter initialized in DRY RUN mode")
@@ -76,6 +77,27 @@ class UltraConservativeHunter:
         return True
 
     def get_candles(self, pair_id, limit=50):
+        """Get historical OHLCV data for indicators.
+
+        Prefers main_bot.historical_data (proper OHLCV candles from DB/polling).
+        Falls back to Indodax trades API only if main_bot data is unavailable.
+        """
+        # --- PRIMARY: use main bot's proper OHLCV DataFrame ---
+        main_bot = getattr(self, 'main_bot', None)
+        if main_bot and hasattr(main_bot, 'historical_data'):
+            pair_norm = pair_id.replace('_', '').lower()
+            df = main_bot.historical_data.get(pair_norm)
+            if df is not None and not df.empty and len(df) >= 20:
+                subset = df.tail(limit)
+                candles = []
+                for _, row in subset.iterrows():
+                    candles.append({
+                        'price': float(row.get('close', 0)),
+                        'volume': float(row.get('volume', 0)),
+                    })
+                return candles
+
+        # --- FALLBACK: Indodax trades API (less accurate) ---
         try:
             r = self.session.get(f"{INDODAX_API_URL}/api/trades/{pair_id}", timeout=10)
             if r.status_code == 200:
@@ -118,7 +140,10 @@ class UltraConservativeHunter:
         if ema12 is None or ema26 is None:
             return {'bullish': False, 'macd': 0, 'hist': 0, 'fresh': False}
         macd = ema12 - ema26
-        prev_macd = self.calc_ema(prices[:-5], 12) - self.calc_ema(prices[:-5], 26) if len(prices) > 35 else 0
+        # Compare with PREVIOUS candle (not 5 candles ago) for accurate crossover detection
+        prev_ema12 = self.calc_ema(prices[:-1], 12) if len(prices) > 26 else None
+        prev_ema26 = self.calc_ema(prices[:-1], 26) if len(prices) > 26 else None
+        prev_macd = (prev_ema12 - prev_ema26) if (prev_ema12 is not None and prev_ema26 is not None) else 0
         fresh = macd > 0 and prev_macd <= 0
         return {'bullish': macd > 0, 'macd': round(macd, 4), 'hist': round(macd * 0.1, 4), 'fresh': fresh}
 
@@ -394,6 +419,25 @@ class UltraConservativeHunter:
             await self.notify(msg)
             logger.info(f"✅ Closed {pair}: {pnl_idr:,.0f} IDR ({reason})")
 
+    def _reset_daily_counters_if_needed(self, today=None):
+        """Reset daily counters on date rollover.
+
+        Keep `daily_pnl` when positions remain open so the daily loss guard still
+        reflects carry-over exposure from trades opened the previous day.
+        """
+        today = today or datetime.now().date()
+        last_reset = getattr(self, '_last_reset', today)
+        if last_reset == today:
+            return
+
+        self.daily_trades = 0
+        if not self.active_trades:
+            self.daily_pnl = 0
+        else:
+            logger.info("[INFO] Daily reset: keeping daily_pnl (open positions)")
+        self._last_reset = today
+        logger.info("[INFO] Daily reset")
+
     async def run(self):
         logger.info("[START] Ultra Conservative Hunter started")
         self.get_balance()
@@ -401,11 +445,7 @@ class UltraConservativeHunter:
 
         while True:
             try:
-                if datetime.now().date() != getattr(self, '_last_reset', datetime.now().date()):
-                    self.daily_trades = 0
-                    self.daily_pnl = 0
-                    self._last_reset = datetime.now().date()
-                    logger.info("[INFO] Daily reset")
+                self._reset_daily_counters_if_needed(today=datetime.now().date())
 
                 try:
                     url = f"{INDODAX_API_URL}/api/tickers"

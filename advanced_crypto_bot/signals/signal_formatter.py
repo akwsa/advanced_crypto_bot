@@ -91,8 +91,14 @@ def _alert_marker(recommendation):
     return "⬜"
 
 
-def _display_badge(theme):
+def _display_badge(theme, signal=None):
     """Return a readable decision label for Telegram text (UPPER CASE)."""
+    if signal is not None:
+        display_rec = str(signal.get("display_recommendation") or "").upper()
+        if display_rec == "PANTAU":
+            return "PANTAU"
+        if display_rec == "BELI_BERTAHAP":
+            return "BELI BERTAHAP"
     return str(theme.get("badge", "")).upper()
 
 
@@ -205,7 +211,7 @@ def format_signal_message(signal):
     final_gate_line = f"\n\n🛡️ Final Gate: `{final_gate_source}`" if final_gate_source else ""
 
     return f"""{trend_icon} Signal Alert — {alert_marker} {pair.upper()} {alert_marker}
-{_display_badge(theme)} {gain_icon}
+{_display_badge(theme, signal)} {gain_icon}
 💡 Action: {theme['action']}
 📊 {perf_indicator}
 
@@ -332,7 +338,7 @@ def format_signal_message_html(signal):
     # ── End quant section ─────────────────────────────────────────────────
 
     return f"""{signal_emoji} {pair_text}
-Keputusan: {_display_badge(theme)} {gain_icon}
+Keputusan: {_display_badge(theme, signal)} {gain_icon}
 
 Saran: {escape(theme['action'])}
 Harga: <code>{Utils.format_price(price)}</code> IDR

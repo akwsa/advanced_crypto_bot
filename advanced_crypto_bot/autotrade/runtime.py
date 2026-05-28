@@ -198,22 +198,15 @@ def _is_valid_position_size(amount, total):
 
 
 def _calculate_dry_run_total_from_price(price):
-    """Return DRY RUN nominal based on pair price tier.
+    """Return DRY RUN nominal based on pair price.
 
-    Rules:
-    - price < 10,000  => price * 1000
-    - 10,000..100,000 => price * 100
-    - price > 100,000 => price * 10
+    Uses a continuous formula: multiplier = round(1M / price), clamped to [10, 1000].
+    This eliminates the 10x discontinuity at old tier boundaries (10k, 100k).
     """
     price_value = _to_positive_float(price)
     if price_value is None:
         return None
-    if price_value < 10_000:
-        multiplier = 1000
-    elif price_value <= 100_000:
-        multiplier = 100
-    else:
-        multiplier = 10
+    multiplier = max(10, min(1000, round(1_000_000 / max(price_value, 1))))
     return float(price_value * multiplier)
 
 
@@ -484,9 +477,8 @@ async def check_trading_opportunity(bot, pair, signal=None):
         return
     # Override recommendation with pre-SR for autotrade execution path
     signal["recommendation"] = effective_rec
-    if is_dry_run and signal["recommendation"] == "BUY":
-        logger.debug(f"⏭️ Skipping {pair}: DRY RUN entry only allowed on STRONG_BUY")
-        return
+    # NOTE: DRY RUN now allows both BUY and STRONG_BUY for realistic validation.
+    # Previously only STRONG_BUY was allowed, making DRY RUN results misleading.
     if is_dry_run and open_trades_for_pair and signal["recommendation"] in ["BUY", "STRONG_BUY"]:
         logger.debug(f"⏭️ Skipping {pair}: open DRY RUN position already exists; waiting for SELL")
         return
@@ -586,11 +578,13 @@ async def check_trading_opportunity(bot, pair, signal=None):
 
         market_conditions = await analyze_market_intelligence(bot, pair, current_price)
         regime = detect_market_regime(bot, pair)
-        if not market_conditions.get("passes_entry_filter", True) and not is_dry_run:
-            logger.info(f"🚫 Entry blocked for {pair}: MI filter failed (Signal={market_conditions['overall_signal']})")
+        if not market_conditions.get("passes_entry_filter", True):
+            # Apply MI filter consistently in both DRY RUN and real trading
+            # so validation results are representative.
+            log_fn = logger.warning if is_dry_run else logger.info
+            prefix = "🧪 [DRY RUN]" if is_dry_run else "🚫"
+            log_fn(f"{prefix} Entry blocked for {pair}: MI filter failed (Signal={market_conditions['overall_signal']})")
             return
-        elif not market_conditions.get("passes_entry_filter", True):
-            logger.info(f"⚠️ [DRY RUN] MI filter would block {pair} (Signal={market_conditions['overall_signal']}), proceeding anyway")
 
         if regime["is_high_vol"]:
             logger.info(f"⚠️ HIGH VOLATILITY regime detected for {pair} - proceeding with caution")

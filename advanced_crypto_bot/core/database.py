@@ -983,7 +983,14 @@ class Database:
             cursor.execute('''
                 SELECT * FROM pair_performance
                 WHERE total_trades >= ?
-                ORDER BY profit_factor DESC, win_count DESC
+                ORDER BY
+                    CASE
+                        WHEN loss_count = 0 AND total_trades < 10 THEN 1
+                        ELSE 0
+                    END ASC,
+                    profit_factor DESC,
+                    total_trades DESC,
+                    win_count DESC
             ''', (min_trades,))
             return cursor.fetchall()
 

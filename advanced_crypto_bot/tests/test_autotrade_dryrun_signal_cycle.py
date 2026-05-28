@@ -58,7 +58,8 @@ class _FakeDryRunDB:
 
 class TestAutoTradeDryRunSignalCycle(unittest.IsolatedAsyncioTestCase):
     async def test_dryrun_only_strong_buy_opens_and_buy_does_not_open_position(self):
-        """Rule baru DRY RUN: entry hanya dari STRONG_BUY; BUY biasa tidak boleh buka posisi."""
+        """DRY RUN: BUY dan STRONG_BUY keduanya bisa buka posisi (validasi realistis).
+        Dulu BUY diblokir, sekarang diizinkan agar DRY RUN representatif untuk real trading."""
         db = _FakeDryRunDB()
         bot = SimpleNamespace(
             is_trading=True,
@@ -130,7 +131,8 @@ class TestAutoTradeDryRunSignalCycle(unittest.IsolatedAsyncioTestCase):
                 "btcidr",
                 signal={"pair": "btcidr", "recommendation": "BUY", "ml_confidence": 0.8, "price": 100.0, "indicators": {}},
             )
-            self.assertEqual(len(db.get_open_trades(123)), 0)
+            # BUY now opens a position in DRY RUN (was previously blocked)
+            self.assertEqual(len(db.get_open_trades(123)), 1)
 
             await check_trading_opportunity(
                 bot,
@@ -139,6 +141,7 @@ class TestAutoTradeDryRunSignalCycle(unittest.IsolatedAsyncioTestCase):
             )
 
         open_trades = db.get_open_trades(123)
+        # Still only 1 trade — duplicate-position guard blocks the second entry
         self.assertEqual(len(open_trades), 1)
         self.assertEqual(open_trades[0]["type"], "BUY")
 
@@ -474,6 +477,8 @@ class TestAutoTradeDryRunSignalCycle(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(open_trades[0]["total"], 370000.0)
 
     async def test_mid_price_pair_uses_price_times_100_as_dryrun_nominal(self):
+        """Mid-price pair uses continuous formula: round(1M/price), clamped [10,1000].
+        For price=25000: mult=round(1M/25000)=40, total=25000*40=1,000,000."""
         db = _FakeDryRunDB()
         current_price = 25000.0
         bot = SimpleNamespace(
@@ -549,7 +554,7 @@ class TestAutoTradeDryRunSignalCycle(unittest.IsolatedAsyncioTestCase):
 
         open_trades = db.get_open_trades(123)
         self.assertEqual(len(open_trades), 1)
-        self.assertEqual(open_trades[0]["total"], 2500000.0)
+        self.assertEqual(open_trades[0]["total"], 1000000.0)
 
     async def test_high_price_pair_uses_price_times_10_as_dryrun_nominal(self):
         db = _FakeDryRunDB()

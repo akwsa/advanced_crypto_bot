@@ -35,6 +35,22 @@ def test_signal_message_uses_readable_title_case_decision_label():
     assert "<b>" not in text
 
 
+def test_signal_message_prefers_display_recommendation_for_watch_mode_labels():
+    signal = _sample_signal("STRONG_BUY")
+    signal["display_recommendation"] = "PANTAU"
+    text = format_signal_message_html(signal)
+
+    assert "Keputusan: PANTAU" in text
+
+
+def test_signal_message_prefers_display_recommendation_for_staged_buy_labels():
+    signal = _sample_signal("BUY")
+    signal["display_recommendation"] = "BELI_BERTAHAP"
+    text = format_signal_message_html(signal)
+
+    assert "Keputusan: BELI BERTAHAP" in text
+
+
 def test_signal_message_sell_label_is_readable_not_all_caps():
     text = format_signal_message_html(_sample_signal("STRONG_SELL"))
 

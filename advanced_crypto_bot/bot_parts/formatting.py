@@ -7,6 +7,30 @@
 from core.utils import Utils
 
 
+def _safe_float(value, default=0.0):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def signal_display_rank(signal):
+    """Rank signals for Telegram display only; does not affect execution logic."""
+    rec = str(signal.get("recommendation", "HOLD") or "HOLD").upper()
+    rec_priority = {
+        "STRONG_BUY": 4,
+        "STRONG_SELL": 4,
+        "BUY": 3,
+        "SELL": 3,
+        "HOLD": 1,
+    }.get(rec, 0)
+    strength = abs(_safe_float(signal.get("combined_strength"), 0.0))
+    score = _safe_float(signal.get("score"), 0.0)
+    confidence = _safe_float(signal.get("ml_confidence"), 0.0)
+    volume = _safe_float(signal.get("volume") or signal.get("vol_idr"), 0.0)
+    return (rec_priority, strength, score, confidence, volume)
+
+
 def signal_visual(recommendation):
     if recommendation in ["BUY", "STRONG_BUY"]:
         return "🟢", "BUY"
@@ -51,7 +75,7 @@ def format_signal_section_html(title, signals):
         return ""
 
     lines = [f"<b>{title}</b>"]
-    for signal in sorted(signals, key=lambda x: x.get("ml_confidence", 0), reverse=True):
+    for signal in sorted(signals, key=signal_display_rank, reverse=True):
         lines.append(format_signal_scan_line_html(signal))
         lines.append("")
     return "\n".join(lines).rstrip()
@@ -74,11 +98,7 @@ def build_signal_overview_html(
     visible_hold_signals = hold_signals
     hidden_hold_count = 0
     if include_hold and hold_limit is not None and len(hold_signals) > hold_limit:
-        visible_hold_signals = sorted(
-            hold_signals,
-            key=lambda x: x.get("ml_confidence", 0),
-            reverse=True,
-        )[:hold_limit]
+        visible_hold_signals = sorted(hold_signals, key=signal_display_rank, reverse=True)[:hold_limit]
         hidden_hold_count = len(hold_signals) - len(visible_hold_signals)
 
     hold_section = (

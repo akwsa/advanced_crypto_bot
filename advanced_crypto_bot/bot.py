@@ -4772,12 +4772,14 @@ Use `/autotrade real` for actual trading (requires API keys)
                     pair = pair_id.upper().replace('_', '/')
                     price = float(data.get('last', 0))
                     volume = float(data.get('vol_idr', 0))
+                    open_price = float(data.get('open', 0))
                     high = float(data.get('high', 0))
                     low = float(data.get('low', 0))
                     
-                    # Calculate 24h change
-                    if low > 0:
-                        change_24h = ((price - low) / low) * 100
+                    # Calculate change vs opening price so gainers/losers reflect
+                    # actual direction, not distance from intraday low.
+                    if open_price > 0:
+                        change_24h = ((price - open_price) / open_price) * 100
                     else:
                         change_24h = 0
                     
@@ -4837,6 +4839,7 @@ Use `/autotrade real` for actual trading (requires API keys)
                             text += f"• `{o['pair']}` - `{Utils.format_currency(o['volume'])}`\n"
                     
                     text += "\n" + "=" * 40
+                    text += "\n\nℹ️ Change vs open (24h)"
                     text += "\n\n💡 **To Trade:**\n"
                     text += "`/trade BUY <PAIR> <PRICE> <IDR_AMOUNT>`\n"
                     text += "`/trade SELL <PAIR> <PRICE> <COIN_AMOUNT>`\n\n"
