@@ -17,6 +17,10 @@ from signals.signal_rules import (
     min_confidence_for,
     should_block_actionable_on_stale_price,
 )
+from signals.signal_decision_layer import (
+    classify_buy_signal_label,
+    should_reject_duplicate_buy_signal,
+)
 
 logger = logging.getLogger("crypto_bot")
 
@@ -867,8 +871,33 @@ async def generate_signal_for_pair(bot, pair):
         hold_source = ", ".join(hold_flags) if hold_flags else "upstream_signal"
         logger.warning(f"🧭 [HOLD TRACE] {pair}: source={hold_source} | reason={signal.get('reason', 'No reason provided')}")
 
+    display_recommendation = signal.get("recommendation", "HOLD")
+    if display_recommendation in BUY_SIGNALS:
+        display_decision = classify_buy_signal_label(signal)
+        signal["display_recommendation"] = display_decision.label
+        signal["display_reason"] = display_decision.reason
+        signal["reason"] = f"{signal.get('reason', '')} | Decision layer: {display_decision.reason}".strip(" |")
+
+        duplicate_reason = should_reject_duplicate_buy_signal(
+            signal,
+            previous_signal_info,
+            now=datetime.now(),
+        )
+        if duplicate_reason:
+            logger.warning(f"🛡️ [DECISION DUPLICATE] {pair}: {display_decision.label} → HOLD | {duplicate_reason}")
+            signal["duplicate_filtered"] = True
+            signal["duplicate_filtered_reason"] = duplicate_reason
+            signal["display_recommendation"] = "HOLD"
+            _apply_final_rejection(signal, "DECISION_DUPLICATE", duplicate_reason)
+    else:
+        signal["display_recommendation"] = display_recommendation
+
     bot.previous_signals[pair] = {
         "recommendation": signal["recommendation"],
+        "display_recommendation": signal.get("display_recommendation", signal["recommendation"]),
+        "ml_confidence": signal.get("ml_confidence", 0.0),
+        "combined_strength": signal.get("combined_strength", 0.0),
+        "risk_reward_ratio": signal.get("risk_reward_ratio", 0.0),
         "timestamp": datetime.now(),
     }
 
@@ -879,7 +908,7 @@ async def generate_signal_for_pair(bot, pair):
     signal_data = {
         "symbol": pair.upper(),
         "price": str(real_time_price),
-        "rec": signal["recommendation"],
+        "rec": signal.get("display_recommendation", signal["recommendation"]),
         "rsi": str(ta_signals.get("indicators", {}).get("rsi", "—")),
         "macd": str(ta_signals.get("indicators", {}).get("macd_signal", "—")),
         "ma": str(ta_signals.get("indicators", {}).get("ma_trend", "—")),

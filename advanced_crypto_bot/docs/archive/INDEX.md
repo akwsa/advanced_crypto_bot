@@ -1,8 +1,8 @@
 # 📚 DOCUMENTATION INDEX - Advanced Crypto Trading Bot
 
-**Last Updated:** 2026-05-24
+**Last Updated:** 2026-05-27
 **Version:** 1.0
-**Status:** Critical/High bug report verified; runtime fixes, Prioritas 7 refactor notes, dashboard-web Phase 0 audit/heartbeat, 2026-05-22 bot.py pending-order hardening, dashboard chart graphics clean-thin polish, 2026-05-22 Sesi 3 thinnest-continuous chart line iterasi, 2026-05-22 Sesi 4 Prioritas 1 signal entry tuning, 2026-05-22 Sesi 5 Telegram signal action buttons wiring, 2026-05-22 Sesi 6 Telegram signal font/emphasis compact, **2026-05-24 AutoTrade DRY RUN BUY→SELL cycle**, Scalper REAL position entry fix, runtime history reset/retention, dan Kiro Claude Scalper balance/signal UI update documented
+**Status:** Critical/High bug report verified; runtime fixes, Prioritas 7 refactor notes, dashboard-web Phase 0 audit/heartbeat, 2026-05-22 bot.py pending-order hardening, dashboard chart graphics clean-thin polish, 2026-05-22 Sesi 3 thinnest-continuous chart line iterasi, 2026-05-22 Sesi 4 Prioritas 1 signal entry tuning, 2026-05-22 Sesi 5 Telegram signal action buttons wiring, 2026-05-22 Sesi 6 Telegram signal font/emphasis compact, **2026-05-24 AutoTrade DRY RUN BUY→SELL cycle**, 2026-05-27 decision layer BUY (`PANTAU`/`BELI_BERTAHAP`/`BUY`/`STRONG_BUY`) + duplicate suppression, Scalper REAL position entry fix, runtime history reset/retention, dan Kiro Claude Scalper balance/signal UI update documented
 
 ---
 
