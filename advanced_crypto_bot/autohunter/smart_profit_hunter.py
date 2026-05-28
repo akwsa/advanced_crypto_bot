@@ -157,23 +157,45 @@ class SmartProfitHunter:
             return False
     
     def get_candles(self, pair_id, limit=50):
-        """Get historical price data for indicators"""
+        """Get historical OHLCV data for indicators.
+
+        Prefers main_bot.historical_data (proper OHLCV candles from DB/polling).
+        Falls back to Indodax trades API only if main_bot data is unavailable.
+        """
+        # --- PRIMARY: use main bot's proper OHLCV DataFrame ---
+        main_bot = getattr(self, 'main_bot', None)
+        if main_bot and hasattr(main_bot, 'historical_data'):
+            pair_norm = pair_id.replace('_', '').lower()
+            df = main_bot.historical_data.get(pair_norm)
+            if df is not None and not df.empty and len(df) >= 20:
+                subset = df.tail(limit)
+                candles = []
+                for _, row in subset.iterrows():
+                    candles.append({
+                        'open': float(row.get('open', 0)),
+                        'high': float(row.get('high', 0)),
+                        'low': float(row.get('low', 0)),
+                        'price': float(row.get('close', 0)),  # close as primary price
+                        'volume': float(row.get('volume', 0)),
+                        'timestamp': row.get('timestamp', 0),
+                    })
+                return candles
+
+        # --- FALLBACK: Indodax trades API (less accurate) ---
         try:
-            # Use Indodax trades history - remove underscore for this specific endpoint
             clean_pair = pair_id.replace('_', '').lower()
             url = f"{INDODAX_API_URL}/api/trades/{clean_pair}"
             response = self.session.get(url, timeout=10)
-            
+
             if response.status_code == 200:
                 trades = response.json()
                 if isinstance(trades, list):
-                    # Convert to candles (simplified)
                     candles = []
                     for trade in trades[:limit]:
                         candles.append({
                             'price': float(trade.get('price', 0)),
                             'volume': float(trade.get('amount', 0)),
-                            'timestamp': trade.get('date', 0)
+                            'timestamp': trade.get('date', 0),
                         })
                     return candles
             return []
@@ -312,6 +334,53 @@ class SmartProfitHunter:
             'status': status
         }
     
+    def calculate_volume_ratio(self, current_volume, candles):
+        """Calculate current volume relative to average from candle data.
+
+        Returns ratio >= 1.0 means above-average volume.
+        """
+        if not candles or len(candles) < 10:
+            return 1.0
+        volumes = [c.get('volume', 0) for c in candles if c.get('volume', 0) > 0]
+        if len(volumes) < 5:
+            return 1.0
+        avg_vol = sum(volumes[-20:]) / min(len(volumes[-20:]), 20) if volumes[-20:] else 1.0
+        if avg_vol <= 0:
+            return 1.0
+        return round(current_volume / avg_vol, 2)
+
+    def _compute_dynamic_risk_reward(self, entry_price, pair_norm):
+        """Compute risk/reward from S/R levels if available, else from fixed percentages.
+
+        Returns (risk_reward, stop_loss, take_profit).
+        """
+        main_bot = getattr(self, 'main_bot', None)
+        if main_bot and hasattr(main_bot, 'sr_detector') and pair_norm in getattr(main_bot, 'historical_data', {}):
+            df = main_bot.historical_data[pair_norm]
+            if df is not None and not df.empty and len(df) >= 50:
+                try:
+                    sr = main_bot.sr_detector.detect_levels(df)
+                    support = sr.get('nearest_support') or sr.get('support_1', 0)
+                    resistance = sr.get('nearest_resistance') or sr.get('resistance_1', 0)
+                    if support > 0 and resistance > 0 and support < entry_price < resistance:
+                        stop_loss = support * 0.995  # slightly below support
+                        take_profit = resistance * 0.995  # slightly below resistance
+                        risk = entry_price - stop_loss
+                        reward = take_profit - entry_price
+                        if risk > 0 and reward > 0:
+                            rr = round(reward / risk, 2)
+                            return rr, stop_loss, take_profit
+                except Exception as e:
+                    logger.debug(f"S/R lookup failed for {pair_norm}: {e}")
+
+        # Fallback: fixed percentages
+        stop_loss = entry_price * (1 + STOP_LOSS / 100)  # -2%
+        take_profit = entry_price * 1.05  # +5%
+        risk = entry_price - stop_loss
+        reward = take_profit - entry_price
+        rr = round(reward / risk, 2) if risk > 0 else 0
+        return rr, stop_loss, take_profit
+
     def analyze_pair(self, pair_id, tickers_data):
         """Comprehensive pair analysis"""
         pair = pair_id.upper().replace('_', '/')
@@ -400,14 +469,10 @@ class SmartProfitHunter:
             score >= 60  # Minimum score
         )
         
-        # Calculate risk/reward
+        # Calculate risk/reward — dynamic from S/R levels when available
         entry_price = current_price
-        stop_loss = entry_price * (1 + STOP_LOSS/100)
-        take_profit = entry_price * 1.05  # Target +5%
-        
-        risk = entry_price - stop_loss
-        reward = take_profit - entry_price
-        risk_reward = reward / risk if risk > 0 else 0
+        pair_norm = pair_id.replace('_', '').lower()
+        risk_reward, stop_loss, take_profit = self._compute_dynamic_risk_reward(entry_price, pair_norm)
         optimization = evaluate_hunter_setup(
             score=score,
             rsi=rsi,
@@ -876,6 +941,9 @@ class SmartProfitHunter:
         if sell_order_id:
             pnl = (price - trade['entry_price']) * sell_amount
 
+            # FIX: Reduce remaining coin amount to prevent over-selling on close
+            self.active_trades[pair]['coin_amount'] -= sell_amount
+
             if percent == 0.5:
                 self.active_trades[pair]['sold_50'] = True
             elif percent == 0.3:
@@ -883,7 +951,11 @@ class SmartProfitHunter:
             elif percent == 0.2:
                 self.active_trades[pair]['sold_20'] = True
 
+            # FIX: Update daily_pnl and balance with partial sell proceeds
+            self.daily_pnl += pnl
             self.balance_idr += (price * sell_amount)
+
+            remaining = self.active_trades[pair]['coin_amount']
 
             message = f"""
 ✅ **PARTIAL SELL** - {reason}
@@ -894,11 +966,11 @@ class SmartProfitHunter:
 💵 Received: `{price * sell_amount:,.0f}` IDR
 📈 P&L: `{pnl:,.0f}` IDR
 
-Remaining: `{coin_amount - sell_amount:.2f}` coins
+Remaining: `{remaining:.2f}` coins
             """
 
             await self.send_notification(message)
-            logger.info(f"✅ {reason} for {pair}: +{pnl:,.0f} IDR")
+            logger.info(f"✅ {reason} for {pair}: +{pnl:,.0f} IDR (remaining: {remaining:.8f})")
     
     async def close_position(self, pair, trade, price, reason):
         """Close entire position with highest profit notification"""
