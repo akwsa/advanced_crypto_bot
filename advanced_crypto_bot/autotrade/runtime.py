@@ -1097,8 +1097,20 @@ async def analyze_market_intelligence(bot, pair, current_price):
                 result["spoof_detected"] = spoof_detected
                 bids = cleaned_bids if cleaned_bids else raw_bids[:10]
                 asks = cleaned_asks if cleaned_asks else raw_asks[:10]
-                total_bid_volume = sum(bid[0] * bid[1] for bid in bids) if bids else 0
-                total_ask_volume = sum(ask[0] * ask[1] for ask in asks) if asks else 0
+
+                def _orderbook_notional(levels):
+                    total = 0.0
+                    for level in levels or []:
+                        try:
+                            price = float(level[0])
+                            amount = float(level[1])
+                        except (TypeError, ValueError, IndexError):
+                            continue
+                        total += price * amount
+                    return total
+
+                total_bid_volume = _orderbook_notional(bids)
+                total_ask_volume = _orderbook_notional(asks)
                 if total_bid_volume > 0 and total_ask_volume > 0:
                     buy_sell_ratio = total_bid_volume / total_ask_volume
                     result["buy_sell_ratio"] = round(buy_sell_ratio, 2)
