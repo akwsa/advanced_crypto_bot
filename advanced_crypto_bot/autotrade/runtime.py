@@ -583,7 +583,15 @@ async def check_trading_opportunity(bot, pair, signal=None):
             # so validation results are representative.
             log_fn = logger.warning if is_dry_run else logger.info
             prefix = "🧪 [DRY RUN]" if is_dry_run else "🚫"
-            log_fn(f"{prefix} Entry blocked for {pair}: MI filter failed (Signal={market_conditions['overall_signal']})")
+            block_reason = market_conditions.get("block_reason", "")
+            if block_reason == "SPREAD_TOO_WIDE":
+                spread_pct = market_conditions.get("spread_pct", 0)
+                log_fn(
+                    f"{prefix} Entry blocked for {pair}: SPREAD_TOO_WIDE "
+                    f"({spread_pct*100:.3f}% > max {Config.MI_SPREAD_MAX_PCT*100:.1f}%)"
+                )
+            else:
+                log_fn(f"{prefix} Entry blocked for {pair}: MI filter failed (Signal={market_conditions['overall_signal']})")
             return
 
         if regime["is_high_vol"]:
@@ -1119,6 +1127,47 @@ async def analyze_market_intelligence(bot, pair, current_price):
                     elif buy_sell_ratio <= (1 / Config.MI_ORDERBOOK_BULLISH_MIN if Config.MI_ORDERBOOK_BULLISH_MIN > 0 else 0.7):
                         result["orderbook_pressure"] = "BEARISH"
                     logger.info(f"📊 Orderbook pressure for {pair}: {result['orderbook_pressure']} ({buy_sell_ratio:.2f}x)")
+
+                # Spread guard: calculate best bid/ask and spread percentage
+                try:
+                    bid_prices = []
+                    ask_prices = []
+                    for level in bids or []:
+                        try:
+                            bid_prices.append(float(level[0]))
+                        except (TypeError, ValueError, IndexError):
+                            continue
+                    for level in asks or []:
+                        try:
+                            ask_prices.append(float(level[0]))
+                        except (TypeError, ValueError, IndexError):
+                            continue
+                    if bid_prices and ask_prices:
+                        best_bid = max(bid_prices)
+                        best_ask = min(ask_prices)
+                        mid_price = (best_bid + best_ask) / 2
+                        if mid_price > 0:
+                            spread_pct = (best_ask - best_bid) / mid_price
+                            result["best_bid"] = best_bid
+                            result["best_ask"] = best_ask
+                            result["mid_price"] = mid_price
+                            result["spread_pct"] = round(spread_pct, 6)
+                            if spread_pct > Config.MI_SPREAD_MAX_PCT:
+                                result["spread_too_wide"] = True
+                                result["block_reason"] = "SPREAD_TOO_WIDE"
+                                logger.warning(
+                                    f"⚠️ Spread too wide for {pair}: {spread_pct*100:.3f}% "
+                                    f">(max {Config.MI_SPREAD_MAX_PCT*100:.1f}%) "
+                                    f"bid={best_bid:,.0f} ask={best_ask:,.0f}"
+                                )
+                            else:
+                                result["spread_too_wide"] = False
+                                logger.info(
+                                    f"📊 Spread OK for {pair}: {spread_pct*100:.3f}% "
+                                    f"bid={best_bid:,.0f} ask={best_ask:,.0f}"
+                                )
+                except Exception as spread_err:
+                    logger.debug(f"Spread calc skipped for {pair}: {spread_err}")
         except Exception as e:
             logger.warning(f"⚠️ Orderbook analysis failed for {pair}: {e}")
 
@@ -1135,10 +1184,19 @@ async def analyze_market_intelligence(bot, pair, current_price):
         else:
             result["passes_entry_filter"] = True
 
+        # Spread hard gate: override passes_entry_filter if spread too wide
+        if result.get("spread_too_wide"):
+            result["passes_entry_filter"] = False
+
+        spread_info = ""
+        if result.get("spread_pct") is not None:
+            block = " SPREAD_TOO_WIDE" if result.get("spread_too_wide") else ""
+            spread_info = f", Spread={result['spread_pct']*100:.3f}%{block}"
+
         logger.info(
             f"📊 Market intelligence for {pair}: Volume={result['volume_ratio']}x, "
             f"OB={result['orderbook_pressure']}, Signal={result['overall_signal']}, "
-            f"Filter={'PASS' if result['passes_entry_filter'] else 'FAIL'}"
+            f"Filter={'PASS' if result['passes_entry_filter'] else 'FAIL'}{spread_info}"
         )
     except Exception as e:
         logger.error(f"❌ Error in market intelligence analysis for {pair}: {e}")

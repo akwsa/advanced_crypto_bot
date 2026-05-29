@@ -137,6 +137,7 @@ class Config:
     # Market Intelligence Entry Filter
     MI_VOLUME_SPIKE_MIN = 1.3  # Min volume ratio to pass filter
     MI_ORDERBOOK_BULLISH_MIN = 1.2  # Min bid/ask ratio to pass filter
+    MI_SPREAD_MAX_PCT = 0.02  # Max spread % before entry is blocked (2% default)
     MI_REQUIRE_BULLISH_FOR_ENTRY = False  # If True, only enter when MI is BULLISH
     MI_ALLOW_MODERATE_ENTRY = True  # If True, also allow MODERATE MI signal
     
