@@ -18,6 +18,7 @@ import time
 import subprocess
 import requests
 from datetime import datetime, timedelta
+from html import escape as html_escape
 from typing import Dict, List
 
 # Telegram
@@ -1532,35 +1533,76 @@ class AdvancedCryptoBot:
 
 
     def _send_telegram_admins(self, message):
-        """Send message to all admin Telegram IDs (thread-safe)"""
-        import asyncio
-        
-        def _send():
-            try:
-                from telegram import Bot
-                bot = Bot(token=Config.TELEGRAM_BOT_TOKEN)
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
+        """Send message to all admin Telegram IDs using the main Telegram app loop."""
+
+        async def _async_send():
+            bot = getattr(getattr(self, 'app', None), 'bot', None)
+            if bot is None:
+                logger.warning("⚠️ Telegram admin send skipped: app.bot not initialized")
+                return
+            for admin_id in Config.ADMIN_IDS:
                 try:
-                    async def _async_send():
-                        for admin_id in Config.ADMIN_IDS:
-                            try:
-                                await bot.send_message(
-                                    chat_id=admin_id,
-                                    text=message,
-                                    parse_mode='HTML'
-                                )
-                            except Exception as e:
-                                logger.warning(f"⚠️ Failed to send to admin {admin_id}: {e}")
-                    
-                    loop.run_until_complete(_async_send())
-                finally:
-                    loop.close()
-            except Exception as e:
-                logger.error(f"❌ Error sending Telegram message: {e}")
-        
-        thread = threading.Thread(target=_send, daemon=True, name="Telegram-Send")
-        thread.start()
+                    await bot.send_message(
+                        chat_id=admin_id,
+                        text=message,
+                        parse_mode='HTML'
+                    )
+                except Exception as e:
+                    logger.warning(f"⚠️ Failed to send to admin {admin_id}: {e}")
+
+        if not self._run_on_telegram_loop(_async_send()):
+            logger.warning("⚠️ Telegram admin send skipped: Telegram loop unavailable")
+
+    def _run_on_telegram_loop(self, coro):
+        """Schedule a coroutine on the main Telegram/PTB event loop from any thread."""
+        import asyncio
+
+        loop = getattr(self, '_telegram_loop', None)
+        app = getattr(self, 'app', None)
+        if loop is None or app is None:
+            try:
+                coro.close()
+            except Exception:
+                pass
+            return False
+        if hasattr(loop, 'is_closed') and loop.is_closed():
+            try:
+                coro.close()
+            except Exception:
+                pass
+            return False
+        try:
+            asyncio.run_coroutine_threadsafe(coro, loop)
+            return True
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to schedule coroutine on Telegram loop: {e}")
+            try:
+                coro.close()
+            except Exception:
+                pass
+            return False
+
+    @staticmethod
+    def _run_coroutine_in_private_loop(coro):
+        """Run a coroutine in a short-lived private event loop for worker threads."""
+        import asyncio
+
+        loop = asyncio.new_event_loop()
+        try:
+            asyncio.set_event_loop(loop)
+            return loop.run_until_complete(coro)
+        finally:
+            try:
+                pending = asyncio.all_tasks(loop)
+                for task in pending:
+                    task.cancel()
+                if pending:
+                    loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+                loop.run_until_complete(loop.shutdown_asyncgens())
+            except Exception:
+                pass
+            asyncio.set_event_loop(None)
+            loop.close()
 
 
     def _start_auto_retrain_timer(self):
@@ -1697,6 +1739,7 @@ class AdvancedCryptoBot:
     async def _post_init(self, app):
         """Register Telegram's native slash-command menu after app initialization."""
         try:
+            self._telegram_loop = asyncio.get_running_loop()
             commands = [
                 BotCommand(command=command, description=description)
                 for command, description in TELEGRAM_BOT_COMMANDS
@@ -2712,6 +2755,11 @@ class AdvancedCryptoBot:
         edit_error = None
         reply_error = None
 
+        async def _send_html_escaped_fallback(target_message):
+            safe_kwargs = dict(kwargs)
+            safe_text = html_escape(str(text))
+            await target_message.reply_text(safe_text, **safe_kwargs)
+
         if update.callback_query:
             try:
                 await update.callback_query.edit_message_text(text, **kwargs)
@@ -2724,6 +2772,9 @@ class AdvancedCryptoBot:
                     return
                 except Exception as e2:
                     reply_error = str(e2)
+                    if kwargs.get('parse_mode') == 'HTML' and 'parse entities' in reply_error.lower():
+                        await _send_html_escaped_fallback(update.callback_query.message)
+                        return
 
         # Command or fallback path
         try:
@@ -2734,6 +2785,13 @@ class AdvancedCryptoBot:
                 await update.effective_message.reply_text(text, **kwargs)
                 return
         except Exception as e:
+            if kwargs.get('parse_mode') == 'HTML' and 'parse entities' in str(e).lower():
+                if update.message:
+                    await _send_html_escaped_fallback(update.message)
+                    return
+                elif update.effective_message:
+                    await _send_html_escaped_fallback(update.effective_message)
+                    return
             logger.error(f"_send_message failed (edit={edit_error}, reply={reply_error}, fallback={e})")
             raise
 
@@ -3353,13 +3411,8 @@ class AdvancedCryptoBot:
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
         def _generate_single_signal(pair):
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
-                signal = loop.run_until_complete(self._generate_signal_for_pair(pair))
-                return pair, signal
-            finally:
-                loop.close()
+            signal = self._run_coroutine_in_private_loop(self._generate_signal_for_pair(pair))
+            return pair, signal
 
         def _scan_parallel():
             results = []
@@ -3904,13 +3957,8 @@ class AdvancedCryptoBot:
         
         def _generate_single_signal(pair):
             """Generate signal for single pair (runs in thread)"""
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
-                signal = loop.run_until_complete(self._generate_signal_for_pair(pair))
-                return pair, signal
-            finally:
-                loop.close()
+            signal = self._run_coroutine_in_private_loop(self._generate_signal_for_pair(pair))
+            return pair, signal
         
         def _generate_signals_in_background():
             """Generate signals in background thread with parallel processing"""
@@ -4167,13 +4215,8 @@ class AdvancedCryptoBot:
         from concurrent.futures import ThreadPoolExecutor, as_completed
         
         def _generate_single_signal(pair):
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
-                signal = loop.run_until_complete(self._generate_signal_for_pair(pair))
-                return pair, signal
-            finally:
-                loop.close()
+            signal = self._run_coroutine_in_private_loop(self._generate_signal_for_pair(pair))
+            return pair, signal
         
         def _scan_buysell_parallel():
             buy_results = []
@@ -8993,16 +9036,9 @@ Max recommended: 30%
                 import threading
                 def _execute_bg():
                     try:
-                        # Create NEW event loop for this thread
-                        import asyncio
-                        loop = asyncio.new_event_loop()
-                        asyncio.set_event_loop(loop)
-
-                        # Run the async trade function
-                        result_text = loop.run_until_complete(
+                        result_text = self._run_coroutine_in_private_loop(
                             self.execute_manual_trade(user_id, order_data)
                         )
-                        loop.close()
 
                         # Send result via direct HTTP API (no event loop needed)
                         import requests
