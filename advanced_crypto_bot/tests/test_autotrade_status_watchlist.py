@@ -58,6 +58,28 @@ class TestAutotradeStatusAndWatchlist(unittest.IsolatedAsyncioTestCase):
         self.assertIn("BTCIDR", sent)
         self.assertIn("ETH/IDR", sent)
 
+    async def test_autotrade_dryrun_imports_only_watchlist_pairs_above_1b_volume(self):
+        bot = self._bot()
+        bot.subscribers = {123: ["btcidr", "ethidr", "dogeidr"]}
+        bot.indodax = SimpleNamespace(
+            get_all_tickers=Mock(return_value=[
+                {"pair": "btcidr", "volume": 5_000_000_000, "last": 1},
+                {"pair": "ethidr", "volume": 1_500_000_000, "last": 1},
+                {"pair": "dogeidr", "volume": 999_999_999, "last": 1},
+            ])
+        )
+        update = self._update()
+
+        with patch("bot.Config.ADMIN_IDS", [123]), patch("bot.Config.AUTO_TRADE_DRY_RUN", True):
+            await bot.autotrade(update, SimpleNamespace(args=["dryrun"]))
+
+        self.assertTrue(bot.is_trading)
+        self.assertEqual(bot.auto_trade_pairs[123], ["btcidr", "ethidr"])
+        sent = bot._send_message.await_args.args[2]
+        self.assertIn("BTCIDR", sent)
+        self.assertIn("ETHIDR", sent)
+        self.assertNotIn("DOGEIDR", sent)
+
     async def test_autotrade_status_no_trade_message_is_valid_markdown_and_no_literal_slashes(self):
         bot = self._bot()
         bot.is_trading = True

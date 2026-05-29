@@ -275,6 +275,41 @@ class ScalperModule:
             pair_clean += "idr"
         return pair_clean
 
+    def _select_top_volume_pairs(self, tickers, limit: int = 50, min_volume_idr: float = 500_000_000):
+        """Return official IDR pairs sorted by highest IDR volume above threshold."""
+        selected = []
+        for ticker in tickers or []:
+            if not isinstance(ticker, dict):
+                continue
+            pair = str(ticker.get("pair") or "").lower().strip().replace("/", "").replace("_", "")
+            if not pair.endswith("idr"):
+                continue
+            try:
+                volume_idr = float(ticker.get("volume", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            if volume_idr <= float(min_volume_idr):
+                continue
+            selected.append({"pair": pair, "volume": volume_idr})
+
+        selected.sort(key=lambda item: item["volume"], reverse=True)
+        return selected[:limit]
+
+    def _refresh_pairs_from_top_volume(self, limit: int = 50, min_volume_idr: float = 500_000_000):
+        """Refresh scalper monitoring pairs from Indodax top-volume IDR tickers."""
+        if not self.indodax or not hasattr(self.indodax, "get_all_tickers"):
+            return []
+        selected = self._select_top_volume_pairs(
+            self.indodax.get_all_tickers(),
+            limit=limit,
+            min_volume_idr=min_volume_idr,
+        )
+        pairs = [item["pair"] for item in selected]
+        if pairs:
+            self.pairs = pairs
+            ScalperConfig.save_pairs(self.pairs)
+        return pairs
+
     def _ordered_scalper_pairs(self, include_positions=True):
         """Return a stable pair order shared by list text and action buttons."""
         pairs = []
@@ -3778,8 +3813,18 @@ class ScalperModule:
         
         # Execute reset
         self._reset_position_state()
+        refreshed_pairs = []
+        try:
+            refreshed_pairs = self._refresh_pairs_from_top_volume(limit=50, min_volume_idr=500_000_000)
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to refresh scalper pairs during reset: {e}")
         
         reset_msg = f"⚠️ **RESET SELESAI**\n\n🗑️ {count} posisi dihapus\n💰 Saldo: {self.balance:,.0f}"
+        if refreshed_pairs:
+            preview = ", ".join(pair.upper() for pair in refreshed_pairs[:10])
+            if len(refreshed_pairs) > 10:
+                preview += f", +{len(refreshed_pairs) - 10} lainnya"
+            reset_msg += f"\n📊 Pair aktif: {len(refreshed_pairs)} top-volume IDR (>500M)\n{preview}"
         
         if indodax_orders:
             reset_msg += f"\n\n⚠️ **PERHATIAN:** {len(indodax_orders)} order masih ada di Indodax!\nGunakan `/s_sync` untuk sync ulang."

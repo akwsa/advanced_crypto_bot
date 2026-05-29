@@ -34,12 +34,13 @@ class _FakeStateManager:
 
 
 class _FakeIndodax:
-    def __init__(self, idr_balance=123_456, balances=None, balance_hold=None, open_orders=None, trade_history=None):
+    def __init__(self, idr_balance=123_456, balances=None, balance_hold=None, open_orders=None, trade_history=None, tickers=None):
         self.idr_balance = idr_balance
         self.balances = dict(balances or {})
         self.balance_hold = dict(balance_hold or {})
         self.open_orders = open_orders if open_orders is not None else []
         self.trade_history = dict(trade_history or {})
+        self.tickers = list(tickers or [])
         self.orders = []
 
     def get_balance(self):
@@ -58,6 +59,9 @@ class _FakeIndodax:
         if normalized and not normalized.endswith("idr"):
             normalized += "idr"
         return self.trade_history.get(normalized, [])
+
+    def get_all_tickers(self):
+        return list(self.tickers)
 
     def create_order(self, pair, order_type, price, amount):
         normalized = str(pair or "").lower().replace("/", "").replace("_", "")
@@ -936,6 +940,30 @@ class TestScalperDryRunPositions(unittest.IsolatedAsyncioTestCase):
         saved = json.loads(self.positions_file.read_text(encoding="utf-8"))
         self.assertEqual(saved["positions"], {})
         self.assertEqual(saved["notified_drops"], {})
+
+    async def test_reset_confirm_refreshes_pairs_to_top_volume_and_persists(self):
+        scalper = self._scalper(indodax=_FakeIndodax(tickers=[
+            {"pair": "ethidr", "volume": 2_000_000_000, "last": 1},
+            {"pair": "dogeidr", "volume": 999_999_999, "last": 1},
+            {"pair": "btcidr", "volume": 5_000_000_000, "last": 1},
+            {"pair": "pepeusdt", "volume": 9_000_000_000, "last": 1},
+            {"pair": "tinyidr", "volume": 499_999_999, "last": 1},
+        ]))
+        scalper.pairs = ["hypeidr"]
+
+        update = self._update()
+        with patch.object(ScalperConfig, "save_pairs") as save_pairs:
+            await scalper.cmd_reset(update, SimpleNamespace(args=["confirm"]))
+
+        self.assertEqual(scalper.pairs, ["btcidr", "ethidr", "dogeidr"])
+        save_pairs.assert_called_once_with(["btcidr", "ethidr", "dogeidr"])
+        reply = update.effective_message.replies[-1][0]
+        self.assertIn("Pair aktif", reply)
+        self.assertIn("BTCIDR", reply)
+        self.assertIn("ETHIDR", reply)
+        self.assertIn("DOGEIDR", reply)
+        self.assertNotIn("PEPEUSDT", reply)
+        self.assertNotIn("TINYIDR", reply)
 
     async def test_sell_removes_position_even_when_state_manager_can_repopulate(self):
         scalper = self._scalper()

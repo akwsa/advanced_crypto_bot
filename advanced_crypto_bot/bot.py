@@ -499,6 +499,29 @@ class AdvancedCryptoBot:
         """Normalize pair names for runtime state comparisons."""
         return str(pair or "").lower().replace("/", "").replace("_", "")
 
+    def _select_top_volume_pairs(self, tickers, limit: int = 50, min_volume_idr: float = 500_000_000):
+        """Return highest-volume official IDR tickers above the configured minimum volume."""
+        selected = []
+        for ticker in tickers or []:
+            if not isinstance(ticker, dict):
+                continue
+            pair_key = self._normalize_pair_key(ticker.get("pair"))
+            if not pair_key.endswith("idr"):
+                continue
+            try:
+                volume_idr = float(ticker.get("volume", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            if volume_idr <= float(min_volume_idr):
+                continue
+            normalized_ticker = dict(ticker)
+            normalized_ticker["pair"] = pair_key
+            normalized_ticker["volume"] = volume_idr
+            selected.append(normalized_ticker)
+
+        selected.sort(key=lambda x: float(x.get("volume", 0) or 0), reverse=True)
+        return selected[:limit]
+
     async def register_access(self, update, context):
         """Register a Telegram user with the configured invite code."""
         user = getattr(update, "effective_user", None)
@@ -5435,11 +5458,18 @@ Reply `STOP` to cancel monitoring
                 )
                 return
 
-            # Sort by volume (descending) - highest first
-            all_tickers.sort(key=lambda x: x['volume'], reverse=True)
+            top_50 = self._select_top_volume_pairs(
+                all_tickers,
+                limit=50,
+                min_volume_idr=500_000_000,
+            )
 
-            # Take top 50
-            top_50 = all_tickers[:50]
+            if not top_50:
+                await msg.edit_text(
+                    "❌ **Tidak ada pair IDR volume tinggi yang tersedia**\n\n"
+                    "Belum ada pair dengan volume > 500M IDR pada snapshot saat ini."
+                )
+                return
 
             # Build message - use plain text to avoid markdown/HTML parsing issues
             timestamp = datetime.now().strftime('%H:%M:%S')
@@ -6391,6 +6421,20 @@ market conditions are extremely dangerous.
         imported_pairs = []
         if is_dry_run:
             existing_watchlist = list(self.subscribers.get(user_id, []) or [])
+            eligible_watchlist_pairs = set()
+            if existing_watchlist and getattr(self, 'indodax', None):
+                try:
+                    eligible_watchlist_pairs = {
+                        item["pair"]
+                        for item in self._select_top_volume_pairs(
+                            self.indodax.get_all_tickers(),
+                            limit=500,
+                            min_volume_idr=1_000_000_000,
+                        )
+                    }
+                except Exception as e:
+                    logger.warning(f"⚠️ Failed to build dry-run eligible watchlist from top volume: {e}")
+
             if existing_watchlist:
                 if not hasattr(self, 'auto_trade_pairs') or self.auto_trade_pairs is None:
                     self.auto_trade_pairs = {}
@@ -6399,6 +6443,8 @@ market conditions are extremely dangerous.
                 seen_norm = {self._normalize_pair_key(p) for p in current}
                 for pair in existing_watchlist:
                     norm = self._normalize_pair_key(pair)
+                    if eligible_watchlist_pairs and norm not in eligible_watchlist_pairs:
+                        continue
                     if norm and norm not in seen_norm:
                         current.append(pair)
                         seen_norm.add(norm)
