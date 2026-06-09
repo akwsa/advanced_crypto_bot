@@ -16,10 +16,16 @@ import os
 import threading
 import time
 import subprocess
+import warnings
 import requests
 from datetime import datetime, timedelta
 from html import escape as html_escape
+
+from core.telegram_html import sanitize_telegram_html, escape_telegram_html
 from typing import Dict, List
+
+# Suppress sklearn internal parallel warning (floods terminal)
+warnings.filterwarnings('ignore', message=r'.*sklearn\.utils\.parallel\.delayed.*')
 
 # Telegram
 from telegram import BotCommand, Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, ReplyKeyboardRemove
@@ -521,6 +527,97 @@ class AdvancedCryptoBot:
 
         selected.sort(key=lambda x: float(x.get("volume", 0) or 0), reverse=True)
         return selected[:limit]
+
+    async def _refresh_watchlist_from_top_volume(
+        self,
+        user_id: int,
+        limit: int = 33,
+        min_volume_idr: float = 500_000_000,
+    ):
+        """Refresh user's watchlist: fetch top-volume IDR pairs from Indodax,
+        deactivate pairs below threshold, activate top pairs.
+        
+        Called by:
+        - /refresh_watchlist Telegram command (manual refresh)
+        - _enable_startup_dryrun_autotrade (auto-refresh on bot restart)
+        - autotrade() dryrun activation
+        
+        Returns dict with summary: {active_count, new_pairs, deactivated_count, top_pairs}
+        """
+        result = {
+            "active_count": 0,
+            "new_pairs": [],
+            "deactivated_count": 0,
+            "top_pairs": [],
+            "error": None,
+        }
+        
+        if not getattr(self, "indodax", None):
+            result["error"] = "Indodax API client tidak tersedia"
+            return result
+        
+        try:
+            # 1. Fetch real-time ticker data dari Indodax
+            tickers = self.indodax.get_all_tickers()
+            if not tickers:
+                result["error"] = "Gagal fetch data dari Indodax (response kosong)"
+                return result
+            
+            # 2. Select top N pairs by IDR volume above threshold
+            selected = self._select_top_volume_pairs(
+                tickers,
+                limit=limit,
+                min_volume_idr=min_volume_idr,
+            )
+            
+            top_pairs = [item["pair"] for item in selected]
+            top_volumes = {item["pair"]: item["volume"] for item in selected}
+            
+            # 3. Get current active pairs before refresh
+            old_pairs = set(self.db.get_watchlist(user_id))
+            new_pair_set = set(top_pairs)
+            
+            # 4. Bulk upsert: deactivate all old, activate new top pairs
+            deactivated, activated = self.db.bulk_upsert_watchlist(user_id, top_pairs)
+            
+            # 5. Determine truly new pairs (weren't in old watchlist)
+            truly_new = [p for p in top_pairs if p not in old_pairs]
+            
+            # 6. Sync subscribers list (in-memory) for consistency
+            if user_id not in self.subscribers:
+                self.subscribers[user_id] = []
+            self.subscribers[user_id] = list(top_pairs)
+            
+            # 7. Auto-sync ke auto_trade_pairs jika autotrade sedang aktif
+            if self.is_trading and hasattr(self, "auto_trade_pairs") and self.auto_trade_pairs is not None:
+                self.auto_trade_pairs[user_id] = list(top_pairs)
+                logger.info(
+                    "🔄 Auto-trade pairs synced after watchlist refresh: %d pairs",
+                    len(top_pairs),
+                )
+            
+            result.update({
+                "active_count": activated,
+                "new_pairs": truly_new,
+                "deactivated_count": deactivated,
+                "top_pairs": top_pairs,
+                "top_volumes": top_volumes,
+            })
+            
+            logger.info(
+                "🔄 Watchlist refreshed for user %d: %d active (was %d), %d new, "
+                "%d deactivated. Top pair: %s (Vol: %.0f IDR)",
+                user_id, activated, deactivated, len(truly_new),
+                deactivated - activated if deactivated > activated else 0,
+                top_pairs[0] if top_pairs else "N/A",
+                top_volumes.get(top_pairs[0], 0) if top_pairs else 0,
+            )
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to refresh watchlist for user {user_id}: {e}")
+            result["error"] = str(e)
+        
+        return result
 
     async def register_access(self, update, context):
         """Register a Telegram user with the configured invite code."""
@@ -1102,8 +1199,24 @@ class AdvancedCryptoBot:
                         # FIX #5: os._exit(3) — sys.exit dari daemon thread hanya
                         # matikan thread itu, bukan proses utama. os._exit langsung
                         # terminate proses sehingga systemd/docker bisa restart.
+                        # Bug HIGH #6 (audit 2026-06-07): WAL checkpoint sebelum
+                        # os._exit untuk meminimalkan SQLite corruption window.
                         thread_logger.info("🔄 Requesting graceful restart...")
                         self._shutdown(timeout=5)
+                        # Force WAL checkpoint pada semua DB sebelum hard exit.
+                        # _shutdown sudah panggil db.close() per thread, tapi WAL
+                        # frames bisa tetap tertinggal kalau writer thread tidak
+                        # sempat checkpoint. PRAGMA wal_checkpoint(TRUNCATE) bersih.
+                        try:
+                            if hasattr(self, 'db') and self.db and hasattr(self.db, 'checkpoint_wal'):
+                                self.db.checkpoint_wal(mode="TRUNCATE")
+                        except Exception as ckpt_err:
+                            thread_logger.warning(f"⚠️ Trading DB checkpoint failed: {ckpt_err}")
+                        try:
+                            if hasattr(self, '_signal_db') and self._signal_db and hasattr(self._signal_db, 'checkpoint_wal'):
+                                self._signal_db.checkpoint_wal(mode="TRUNCATE")
+                        except Exception as ckpt_err:
+                            thread_logger.warning(f"⚠️ Signal DB checkpoint failed: {ckpt_err}")
                         import os as _os
                         _os._exit(3)  # Exit code 3 = restart requested
 
@@ -1771,6 +1884,33 @@ class AdvancedCryptoBot:
             logger.info("📋 Telegram bot commands menu registered")
         except Exception as e:
             logger.warning(f"⚠️ Could not register Telegram bot commands: {e}")
+        
+        # Auto-refresh watchlist untuk semua admin users saat startup
+        # Ini memastikan watchlist selalu up-to-date dengan volume real-time Indodax
+        if self.is_trading:
+            for admin_id in Config.ADMIN_IDS:
+                try:
+                    result = await self._refresh_watchlist_from_top_volume(
+                        user_id=admin_id,
+                        limit=33,
+                        min_volume_idr=500_000_000,
+                    )
+                    if result.get("error"):
+                        logger.warning(
+                            "⚠️ Startup watchlist refresh failed for admin %d: %s",
+                            admin_id, result["error"],
+                        )
+                    else:
+                        logger.info(
+                            "✅ Startup watchlist auto-refreshed for admin %d: "
+                            "%d pairs active",
+                            admin_id, result["active_count"],
+                        )
+                except Exception as e:
+                    logger.warning(
+                        "⚠️ Startup watchlist refresh error for admin %d: %s",
+                        admin_id, e,
+                    )
     
     def _init_websocket(self):
         """Initialize WebSocket connection to Indodax (DISABLED - Indodax public channels not working)"""
@@ -2774,14 +2914,36 @@ class AdvancedCryptoBot:
 
     async def _send_message(self, update, context, text, **kwargs):
         """Helper to send message for both command and callback query.
-        Logs all failures so bugs are visible in logs."""
+        Logs all failures so bugs are visible in logs.
+
+        For parse_mode='HTML', sanitize text proactively to prevent
+        Telegram 'Can't parse entities' errors caused by stray <, >, & or
+        non-whitelisted tags in dynamic content (Bug Critical #4 — audit
+        2026-06-07).
+        """
         edit_error = None
         reply_error = None
 
+        # Proactive HTML sanitization: pre-clean text so Telegram doesn't
+        # reject the message in the first place. Preserves whitelisted tags
+        # (b/i/u/code/pre/a/etc), escapes everything else.
+        if kwargs.get('parse_mode') == 'HTML' and text:
+            text = sanitize_telegram_html(str(text))
+
         async def _send_html_escaped_fallback(target_message):
-            safe_kwargs = dict(kwargs)
+            # FIX: Strip parse_mode! After html_escape the text is plain.
+            # Keeping parse_mode='HTML' causes a second parse failure.
+            safe_kwargs = {k: v for k, v in kwargs.items()
+                           if k not in ('parse_mode',)}
             safe_text = html_escape(str(text))
-            await target_message.reply_text(safe_text, **safe_kwargs)
+            try:
+                await target_message.reply_text(safe_text, **safe_kwargs)
+            except Exception:
+                # Last resort: bare text with zero kwargs
+                try:
+                    await target_message.reply_text(safe_text)
+                except Exception as bare_err:
+                    logger.warning("_send_message bare fallback failed: %s", bare_err)
 
         if update.callback_query:
             try:
@@ -2808,15 +2970,34 @@ class AdvancedCryptoBot:
                 await update.effective_message.reply_text(text, **kwargs)
                 return
         except Exception as e:
-            if kwargs.get('parse_mode') == 'HTML' and 'parse entities' in str(e).lower():
-                if update.message:
-                    await _send_html_escaped_fallback(update.message)
-                    return
-                elif update.effective_message:
-                    await _send_html_escaped_fallback(update.effective_message)
-                    return
-            logger.error(f"_send_message failed (edit={edit_error}, reply={reply_error}, fallback={e})")
-            raise
+            # Unconditional HTML fallback: any error with parse_mode='HTML'
+            # triggers html_escape retry (not just 'parse entities').
+            # Also handles event-loop mismatch by detecting the error pattern.
+            err_str = str(e).lower()
+            is_html = kwargs.get('parse_mode') == 'HTML'
+            is_loop_err = 'different event loop' in err_str or 'different loop' in err_str
+            target = update.message or update.effective_message
+
+            if is_html and target:
+                await _send_html_escaped_fallback(target)
+                return
+            elif is_loop_err and target:
+                # Event loop mismatch — reschedule on main Telegram loop
+                try:
+                    import asyncio as _asyncio
+                    loop_ref = getattr(self, '_telegram_loop', None)
+                    if loop_ref and not loop_ref.is_closed():
+                        _asyncio.run_coroutine_threadsafe(
+                            target.reply_text(html_escape(str(text))),
+                            loop_ref
+                        )
+                        return
+                except Exception:
+                    pass
+
+            logger.warning("_send_message failed (edit=%s, reply=%s, fallback=%s)",
+                           edit_error, reply_error, str(e)[:120])
+            return
 
         if edit_error or reply_error:
             logger.warning(f"_send_message fallback used: edit_err={edit_error}, reply_err={reply_error}")
@@ -3129,6 +3310,76 @@ class AdvancedCryptoBot:
                 parse_mode='Markdown'
             )
             return
+
+    async def refresh_watchlist(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Refresh watchlist: ambil top 33 pair volume tertinggi dari Indodax.
+        
+        Pair dengan volume < 500M IDR dinonaktifkan.
+        Hanya pair dengan volume besar & likuiditas tinggi yang masuk autotrade dryrun.
+        
+        Usage: /refresh_watchlist
+        Admin only. Langsung update database + sync ke auto_trade_pairs.
+        """
+        user_id = update.effective_user.id
+        
+        if user_id not in Config.ADMIN_IDS:
+            await self._send_message(update, context, "❌ Admin only!")
+            return
+        
+        # Kirim status "loading"
+        status_msg = await self._send_message(
+            update, context,
+            "🔄 **Refresh Watchlist...**\n\n"
+            "Mengambil data volume real-time dari Indodax...",
+            parse_mode='Markdown',
+        )
+        
+        # Jalankan refresh
+        result = await self._refresh_watchlist_from_top_volume(
+            user_id=user_id,
+            limit=33,
+            min_volume_idr=500_000_000,
+        )
+        
+        if result.get("error"):
+            await self._send_message(
+                update, context,
+                f"❌ **Refresh Gagal**\n\n{result['error']}",
+                parse_mode='Markdown',
+            )
+            return
+        
+        # Build response
+        active = result["active_count"]
+        deactivated = result["deactivated_count"]
+        new_pairs = result["new_pairs"]
+        top_pairs = result["top_pairs"]
+        volumes = result.get("top_volumes", {})
+        
+        # Top 5 preview dengan volume
+        top_preview_lines = []
+        for pair in top_pairs[:5]:
+            vol = volumes.get(pair, 0)
+            vol_str = f"{vol:,.0f}" if vol else "?"
+            top_preview_lines.append(f"• `{pair.upper()}` — Vol: {vol_str} IDR")
+        
+        more_count = len(top_pairs) - 5 if len(top_pairs) > 5 else 0
+        more_line = f"\n... dan {more_count} pair lainnya" if more_count > 0 else ""
+        
+        text = (
+            f"✅ **WATCHLIST REFRESHED** ✅\n\n"
+            f"📊 **Ringkasan:**\n"
+            f"• Pair aktif: **{active}** (dari total {len(top_pairs)})\n"
+            f"• Pair dinonaktifkan: **{deactivated - active}** (volume < 500M)\n"
+            f"• Pair baru: **{len(new_pairs)}**\n\n"
+            f"🏆 **Top Volume:**\n"
+            + "\n".join(top_preview_lines) + more_line + "\n\n"
+            f"⚡ Auto-sync ke autotrade: **{'✅ ON' if self.is_trading else '⏸️ OFF'}**\n\n"
+            f"Gunakan `/autotrade dryrun` untuk mulai simulasi\n"
+            f"Gunakan `/autotrade_status` untuk lihat status"
+        )
+        
+        await self._send_message(update, context, text, parse_mode='Markdown')
 
     async def price(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Quick price check for a pair"""
@@ -6420,7 +6671,28 @@ market conditions are extremely dangerous.
         user_id = update.effective_user.id
         imported_pairs = []
         if is_dry_run:
+            # Refresh watchlist dari Indodax sebelum import — ambil top 33 volume > 500M
+            refresh_result = None
+            if getattr(self, 'indodax', None):
+                try:
+                    refresh_result = await self._refresh_watchlist_from_top_volume(
+                        user_id=user_id,
+                        limit=33,
+                        min_volume_idr=500_000_000,
+                    )
+                    logger.info(
+                        "🔄 Watchlist refreshed during autotrade dryrun: %d pairs active",
+                        refresh_result.get("active_count", 0) if refresh_result else 0,
+                    )
+                except Exception as e:
+                    logger.warning(f"⚠️ Watchlist refresh failed during autotrade dryrun: {e}")
+            
+            # Ambil watchlist yang sudah di-refresh (dari DB)
             existing_watchlist = list(self.subscribers.get(user_id, []) or [])
+            if not existing_watchlist:
+                existing_watchlist = self.db.get_watchlist(user_id)
+            
+            # Build eligible set: hanya pair dari top volume (threshold 500M)
             eligible_watchlist_pairs = set()
             if existing_watchlist and getattr(self, 'indodax', None):
                 try:
@@ -6429,7 +6701,7 @@ market conditions are extremely dangerous.
                         for item in self._select_top_volume_pairs(
                             self.indodax.get_all_tickers(),
                             limit=500,
-                            min_volume_idr=1_000_000_000,
+                            min_volume_idr=500_000_000,
                         )
                     }
                 except Exception as e:
@@ -8105,10 +8377,12 @@ It uses its own analysis (RSI, MACD, Volume, MA, Bollinger).
                 )
                 logger.error(f"[CIRCUIT_BREAKER] {msg}")
                 # Notify admins asynchronously
+                # Sanitize HTML to prevent parse-entity errors (Bug Critical #4).
+                msg_safe = sanitize_telegram_html(msg)
                 for admin_id in Config.ADMIN_IDS:
                     try:
                         asyncio.create_task(
-                            self.app.bot.send_message(chat_id=admin_id, text=msg, parse_mode='HTML')
+                            self.app.bot.send_message(chat_id=admin_id, text=msg_safe, parse_mode='HTML')
                         )
                     except Exception:
                         pass

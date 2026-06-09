@@ -180,8 +180,11 @@ class TestCheckTradingOpportunityAttachesButtons(unittest.IsolatedAsyncioTestCas
             "price": 1_200_000_000,
         }
 
+        # Use a production-shaped admin ID (>= 100_000) so the Bug #8 admin guard
+        # in runtime.py doesn't reject the test fixture as a non-production user.
+        admin_id = 256024600
         with patch("autotrade.runtime.Config") as cfg:
-            cfg.ADMIN_IDS = [42]
+            cfg.ADMIN_IDS = [admin_id]
             cfg.AUTO_TRADE_DRY_RUN = True
             cfg.CORRELATION_GROUPS = {}
             cfg.TELEGRAM_BOT_TOKEN = "test-token"
@@ -189,10 +192,10 @@ class TestCheckTradingOpportunityAttachesButtons(unittest.IsolatedAsyncioTestCas
             await check_trading_opportunity(bot, "btcidr", signal=signal)
 
         bot.app.bot.send_message.assert_awaited()
-        # Cari panggilan yang ke admin chat_id=42 (notifikasi signal)
+        # Cari panggilan yang ke admin chat_id (notifikasi signal)
         notif_calls = [
             call for call in bot.app.bot.send_message.await_args_list
-            if call.kwargs.get("chat_id") == 42
+            if call.kwargs.get("chat_id") == admin_id
         ]
         self.assertTrue(notif_calls, "send_message harus dipanggil untuk admin notif")
         first = notif_calls[0]

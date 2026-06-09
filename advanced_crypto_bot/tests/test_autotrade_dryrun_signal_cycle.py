@@ -63,8 +63,8 @@ class TestAutoTradeDryRunSignalCycle(unittest.IsolatedAsyncioTestCase):
         db = _FakeDryRunDB()
         bot = SimpleNamespace(
             is_trading=True,
-            auto_trade_pairs={123: ["btcidr"]},
-            subscribers={123: ["btcidr"]},
+            auto_trade_pairs={123: ["testidr"]},
+            subscribers={123: ["testidr"]},
             last_ml_update={},
             auto_trade_interval_minutes=5,
             signal_notifications_enabled=False,
@@ -128,16 +128,16 @@ class TestAutoTradeDryRunSignalCycle(unittest.IsolatedAsyncioTestCase):
              patch("autotrade.runtime.evaluate_autotrade_setup", Mock(return_value=optimization)):
             await check_trading_opportunity(
                 bot,
-                "btcidr",
-                signal={"pair": "btcidr", "recommendation": "BUY", "ml_confidence": 0.8, "price": 100.0, "indicators": {}},
+                "testidr",
+                signal={"pair": "testidr", "recommendation": "BUY", "ml_confidence": 0.8, "price": 100.0, "indicators": {}},
             )
             # BUY now opens a position in DRY RUN (was previously blocked)
             self.assertEqual(len(db.get_open_trades(123)), 1)
 
             await check_trading_opportunity(
                 bot,
-                "btcidr",
-                signal={"pair": "btcidr", "recommendation": "STRONG_BUY", "ml_confidence": 0.8, "price": 100.0, "indicators": {}},
+                "testidr",
+                signal={"pair": "testidr", "recommendation": "STRONG_BUY", "ml_confidence": 0.8, "price": 100.0, "indicators": {}},
             )
 
         open_trades = db.get_open_trades(123)
@@ -150,8 +150,8 @@ class TestAutoTradeDryRunSignalCycle(unittest.IsolatedAsyncioTestCase):
         db = _FakeDryRunDB()
         bot = SimpleNamespace(
             is_trading=True,
-            auto_trade_pairs={123: ["btcidr"]},
-            subscribers={123: ["btcidr"]},
+            auto_trade_pairs={123: ["testidr"]},
+            subscribers={123: ["testidr"]},
             last_ml_update={},
             auto_trade_interval_minutes=5,
             signal_notifications_enabled=False,
@@ -216,8 +216,8 @@ class TestAutoTradeDryRunSignalCycle(unittest.IsolatedAsyncioTestCase):
             for _ in range(2):
                 await check_trading_opportunity(
                     bot,
-                    "btcidr",
-                    signal={"pair": "btcidr", "recommendation": "STRONG_BUY", "ml_confidence": 0.8, "price": 100.0, "indicators": {}},
+                    "testidr",
+                    signal={"pair": "testidr", "recommendation": "STRONG_BUY", "ml_confidence": 0.8, "price": 100.0, "indicators": {}},
                 )
 
         open_trades = db.get_open_trades(123)
@@ -230,8 +230,8 @@ class TestAutoTradeDryRunSignalCycle(unittest.IsolatedAsyncioTestCase):
         db = _FakeDryRunDB()
         bot = SimpleNamespace(
             is_trading=True,
-            auto_trade_pairs={123: ["btcidr"]},
-            subscribers={123: ["btcidr"]},
+            auto_trade_pairs={123: ["testidr"]},
+            subscribers={123: ["testidr"]},
             last_ml_update={},
             auto_trade_interval_minutes=5,
             signal_notifications_enabled=False,
@@ -299,15 +299,15 @@ class TestAutoTradeDryRunSignalCycle(unittest.IsolatedAsyncioTestCase):
              patch("autotrade.runtime.evaluate_autotrade_setup", Mock(return_value=optimization)):
             await check_trading_opportunity(
                 bot,
-                "btcidr",
-                signal={"pair": "btcidr", "recommendation": "STRONG_BUY", "ml_confidence": 0.8, "price": 100.0, "indicators": {}},
+                "testidr",
+                signal={"pair": "testidr", "recommendation": "STRONG_BUY", "ml_confidence": 0.8, "price": 100.0, "indicators": {}},
             )
             self.assertEqual(len(db.get_open_trades(123)), 1)
 
             await check_trading_opportunity(
                 bot,
-                "btcidr",
-                signal={"pair": "btcidr", "recommendation": "SELL", "ml_confidence": 0.8, "price": 110.0, "indicators": {}},
+                "testidr",
+                signal={"pair": "testidr", "recommendation": "SELL", "ml_confidence": 0.8, "price": 110.0, "indicators": {}},
             )
 
         self.assertEqual(db.get_open_trades(123), [])
@@ -322,7 +322,7 @@ class TestAutoTradeDryRunSignalCycle(unittest.IsolatedAsyncioTestCase):
         bot = SimpleNamespace(
             is_trading=True,
             auto_trade_pairs={},
-            subscribers={123: ["btcidr"]},
+            subscribers={123: ["testidr"]},
             last_ml_update={},
             auto_trade_interval_minutes=5,
             signal_notifications_enabled=False,
@@ -386,11 +386,11 @@ class TestAutoTradeDryRunSignalCycle(unittest.IsolatedAsyncioTestCase):
              patch("autotrade.runtime.evaluate_autotrade_setup", Mock(return_value=optimization)):
             await check_trading_opportunity(
                 bot,
-                "btcidr",
-                signal={"pair": "btcidr", "recommendation": "HOLD", "pre_sr_recommendation": "STRONG_BUY", "ml_confidence": 0.8, "price": 100.0, "indicators": {}},
+                "testidr",
+                signal={"pair": "testidr", "recommendation": "HOLD", "pre_sr_recommendation": "STRONG_BUY", "ml_confidence": 0.8, "price": 100.0, "indicators": {}},
             )
 
-        self.assertEqual(bot.auto_trade_pairs[123], ["btcidr"])
+        self.assertEqual(bot.auto_trade_pairs[123], ["testidr"])
         open_trades = db.get_open_trades(123)
         self.assertEqual(len(open_trades), 1)
         self.assertEqual(open_trades[0]["signal_source"], "auto")
@@ -483,8 +483,8 @@ class TestAutoTradeDryRunSignalCycle(unittest.IsolatedAsyncioTestCase):
         current_price = 25000.0
         bot = SimpleNamespace(
             is_trading=True,
-            auto_trade_pairs={123: ["ethidr"]},
-            subscribers={123: ["ethidr"]},
+            auto_trade_pairs={123: ["midpriceidr"]},
+            subscribers={123: ["midpriceidr"]},
             last_ml_update={},
             auto_trade_interval_minutes=5,
             signal_notifications_enabled=False,
@@ -548,8 +548,8 @@ class TestAutoTradeDryRunSignalCycle(unittest.IsolatedAsyncioTestCase):
              patch("autotrade.runtime.evaluate_autotrade_setup", Mock(return_value=optimization)):
             await check_trading_opportunity(
                 bot,
-                "ethidr",
-                signal={"pair": "ethidr", "recommendation": "STRONG_BUY", "ml_confidence": 0.9, "price": current_price, "indicators": {}},
+                "midpriceidr",
+                signal={"pair": "midpriceidr", "recommendation": "STRONG_BUY", "ml_confidence": 0.9, "price": current_price, "indicators": {}},
             )
 
         open_trades = db.get_open_trades(123)
@@ -561,8 +561,8 @@ class TestAutoTradeDryRunSignalCycle(unittest.IsolatedAsyncioTestCase):
         current_price = 150000.0
         bot = SimpleNamespace(
             is_trading=True,
-            auto_trade_pairs={123: ["btcidr"]},
-            subscribers={123: ["btcidr"]},
+            auto_trade_pairs={123: ["testidr"]},
+            subscribers={123: ["testidr"]},
             last_ml_update={},
             auto_trade_interval_minutes=5,
             signal_notifications_enabled=False,
@@ -626,8 +626,8 @@ class TestAutoTradeDryRunSignalCycle(unittest.IsolatedAsyncioTestCase):
              patch("autotrade.runtime.evaluate_autotrade_setup", Mock(return_value=optimization)):
             await check_trading_opportunity(
                 bot,
-                "btcidr",
-                signal={"pair": "btcidr", "recommendation": "STRONG_BUY", "ml_confidence": 0.9, "price": current_price, "indicators": {}},
+                "testidr",
+                signal={"pair": "testidr", "recommendation": "STRONG_BUY", "ml_confidence": 0.9, "price": current_price, "indicators": {}},
             )
 
         open_trades = db.get_open_trades(123)

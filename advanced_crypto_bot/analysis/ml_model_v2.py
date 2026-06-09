@@ -694,9 +694,19 @@ class MLTradingModelV2:
             else:
                 return False, 0.5, 'HOLD'
 
+        # Restore trained feature names (prepare_features overwrites self.feature_names)
+        _trained = getattr(self, '_trained_feature_names', None)
+        if _trained is not None:
+            self.feature_names = _trained
+
         try:
-            X_latest = features[self.feature_names].iloc[-1:].values
-            X_latest_scaled = self.scaler.transform(X_latest)
+            # Align features to what the model/scaler expects — fill missing with 0
+            import numpy as np
+            X_aligned = np.zeros((1, len(self.feature_names)))
+            for i, col in enumerate(self.feature_names):
+                if col in features.columns:
+                    X_aligned[0, i] = features[col].iloc[-1]
+            X_latest_scaled = self.scaler.transform(X_aligned)
         except Exception as e:
             print(f"⚠️ Feature scaling error: {e}")
             if use_multi_class:
@@ -844,6 +854,7 @@ class MLTradingModelV2:
             self.model = data['model']
             self.scaler = data['scaler']
             self.feature_names = data['feature_names']
+            self._trained_feature_names = data['feature_names']  # Preserve for inference alignment
             self.last_trained = data['last_trained']
             self.last_accuracy = data.get('last_accuracy')
             self.last_precision = data.get('last_precision')
@@ -854,6 +865,25 @@ class MLTradingModelV2:
             self.training_history = data.get('training_history', [])
 
             self._is_fitted = self.last_trained is not None
+
+            # Integrity guard: scaler.n_features_in_ harus selaras dengan feature_names.
+            # Mismatch berarti model rusak (mis. setelah refactor prepare_features yang
+            # menambah kolom tanpa retrain). Tanpa guard ini predict() akan silent fallback
+            # ke (False, 0.5, 'HOLD') untuk SEMUA pair (lihat audit 2026-06-09).
+            try:
+                scaler_n = getattr(self.scaler, 'n_features_in_', None)
+                names_n = len(self.feature_names) if self.feature_names else 0
+                if scaler_n is not None and names_n and scaler_n != names_n:
+                    print(
+                        f"⚠️ Model V2 INTEGRITY MISMATCH: scaler expects {scaler_n} features "
+                        f"but feature_names has {names_n}. Predict will fail silently to HOLD. "
+                        f"Forcing _is_fitted=False — please retrain via "
+                        f"scripts/retrain_ml_v2_v4_once.py."
+                    )
+                    self._is_fitted = False
+            except Exception as guard_err:
+                print(f"⚠️ Model V2 integrity check failed: {guard_err}")
+
             print(f"📂 Model V2 loaded from {self.model_path} (trained: {self.last_trained})")
             return True
         except Exception as e:
