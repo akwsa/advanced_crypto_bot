@@ -34,13 +34,46 @@ Target akhir: Bot bisa menghasilkan profit konsisten 5-15%/bulan di real trading
 ### PHASE 1: STABILISASI & KUALITAS SINYAL (Minggu Ini)
 > Goal: Sinyal seimbang dan error-free selama 5 hari berturut-turut
 
-- [ ] Fix `set_auto_trade_mode()` AttributeError — error aktif 13+/hari
-- [ ] Retrain ML model dengan `class_weight='balanced'` — BUY target 12-18%
-- [ ] Database indexes + WAL checkpoint — performance & safety
-- [ ] Threading lock di notification — eliminasi duplicate 2-3x
-- [ ] Monitor distribusi sinyal 5 hari — validasi keseimbangan
-- [ ] Fix Auto-sync `'str' object has no attribute 'get'` ✅ (done 2026-05-24)
-- [ ] Fix balance verification key `funds` → `balance` ✅ (done 2026-05-24)
+- [x] Fix `set_auto_trade_mode()` AttributeError ✅ (verified 2026-06-09 — method ada di `database.py:1449`, log 0 error)
+- [x] Retrain ML model dengan `class_weight='balanced'` ✅ (done 2026-06-09 — V2 corrupt scaler 47 vs features 58, retrain ulang acc 62.6%)
+- [x] Database indexes + WAL checkpoint ✅ (verified 2026-06-09 — indexes lengkap di `database.py:442-447` + `signal_db.py:137-149`, WAL+checkpoint method tersedia)
+- [x] Threading lock di notification ✅ (verified 2026-06-09 — `signal_queue` cooldown dedup di `bot.py:1316-1319`, log 0 duplikasi)
+- [ ] Monitor distribusi sinyal 5 hari — validasi keseimbangan (perlu observasi setelah ML restored)
+- [x] Fix Auto-sync `'str' object has no attribute 'get'` ✅ (done 2026-05-24)
+- [x] Fix balance verification key `funds` → `balance` ✅ (done 2026-05-24)
+
+#### Backlog dari Audit 2026-06-07 (Critical → harus fix sebelum DRY RUN data dianggap valid)
+
+> Sumber: [`docs/archive/audit-autotrade-dryrun-profit-2026-06-07.md`](docs/archive/audit-autotrade-dryrun-profit-2026-06-07.md)
+
+| # | Severity | Bug | File | Estimasi |
+|---|----------|-----|------|----------|
+| 1 | ✅ FIXED | ~~BTC price=100 IDR (data palsu dari API/cache)~~ — absolute price floor guard di `_is_price_sane_for_pair()` (BTC ≥100M, ETH ≥1M, BNB ≥100K, SOL ≥50K) | `runtime.py:189-219` | done 2026-06-08 |
+| 2 | ✅ FIXED | ~~Amount inflasi 3x (SIZE→FILL mismatch)~~ — FILL reconciliation guard: DRY RUN cap (`DRY_RUN_MAX_TOTAL_IDR=2M`) + recompute `amount = total / entry_zone_price` di FILL boundary | `runtime.py:1016-1056` | done 2026-06-08 |
+| 3 | ✅ FIXED | ~~Asyncio event loop mismatch~~ — cross-loop guard di `_get_cached_signal()` cek `task.get_loop() is asyncio.get_running_loop()` | `runtime.py:213-256` | done 2026-06-08 |
+| 4 | ✅ FIXED | ~~HTML parse error 29x/jam — dynamic text tidak di-escape~~ — `core/telegram_html.py` sanitizer whitelist tag + proactive sanitize di `_send_message()` & `runtime.py` | `bot.py:2898+`, `autotrade/runtime.py:543+`, `core/telegram_html.py` | done 2026-06-08 |
+| 5 | ✅ FIXED | ~~Trade review duplikat 4-8x per trade~~ — idempotency guard `SELECT 1 FROM trade_reviews WHERE trade_id = ?` di `create_trade_review()` skip kalau review existing | `database.py:1031-1049` | done 2026-06-08 |
+| 6 | ✅ FIXED | ~~`os._exit(3)` tanpa cleanup~~ — `_shutdown(timeout=5)` + WAL `checkpoint_wal(TRUNCATE)` pada trading.db & signals.db sebelum hard exit | `bot.py:1199-1221` | done 2026-06-08 |
+| 7 | ✅ FIXED | ~~TA Strength bias ke ±0.10 (67% sample)~~ — continuous tilt: RSI map [30..70]→[+0.5..-0.5], MACD base±0.3+histogram-tilt±0.4, MA distance-from-SMA20 tilt, BB %B-position tilt, Volume pct-change tilt | `analysis/technical_analysis.py:320-435` | done 2026-06-08 |
+| 8 | ✅ FIXED | ~~Signal alert bocor ke test user ID (42, 123)~~ — `_filter_admin_ids()` di `core/config.py` reject hardcoded test IDs + log warning | `core/config.py:79-117` | done 2026-06-08 |
+| 9 | ✅ FIXED | ~~Signal counter tidak increment (#1 terus)~~ — `cursor.lastrowid` dari `INSERT INTO signals` jalan, log saat ini menunjukkan ID berurutan #73646→#74326 (457 unique IDs) | `signal_db.py:170-217` | done 2026-06-08 |
+| 10 | ✅ FIXED | ~~`_quant_cache` module-level dict tidak pernah di-clear~~ — diganti `_OrderedDict` LRU dengan `QUANT_CACHE_MAX_PAIRS` cap, eviction otomatis via `popitem(last=False)` | `signal_pipeline.py:32-66` | done 2026-06-08 |
+
+**Catatan:**
+- Bug #5-#10 sebagian dari **test data contamination** (user ID 42/123 = test fixture, bukan production). Perlu verifikasi ulang di log production murni.
+- Bug #6 (TA Strength ±0.10) kemungkinan **normal untuk market sideways** — perlu validasi saat market trending.
+- Total estimasi fix: **~6-9 jam** untuk semua item.
+- **Prioritas:** Fix #1 (price guard) dan #3 (asyncio loop) dulu karena paling fatal dan paling cepat.
+
+**Status:** Temuan dicatat, belum diperbaiki. Data DRY RUN saat ini memiliki noise dari bug #1 dan #2 — perlu cleanup DB sebelum evaluasi final.
+
+#### Test Suite Status (2026-06-07)
+```
+Full suite: 411 passed, 46 failed (pre-existing), 10 warnings
+- Core autotrade tests: ✅ ALL PASS (10+61 = 71 tests)
+- 46 failures: test_scalper_auto_tpsl.py (28) + test_scalping_indicator_features.py (17) + test_performance_backfill.py (1)
+  → Semua pre-existing (fitur scalper/indikator yang belum implemented), bukan regresi dari perubahan Kiro/Deepseek
+```
 
 **Kriteria Lulus Phase 1:**
 - Zero critical error di log selama 48 jam
