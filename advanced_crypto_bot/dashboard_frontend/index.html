@@ -3,161 +3,106 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Advanced Crypto Bot Dashboard</title>
+  <title>Crypto Trading Dashboard</title>
   <link rel="stylesheet" href="./styles.css" />
-  <script src="https://s3.tradingview.com/tv.js"></script>
   <script src="https://unpkg.com/lightweight-charts@4.2.3/dist/lightweight-charts.standalone.production.js"></script>
 </head>
 <body>
-  <header class="topbar">
-    <div>
-      <p class="eyebrow">Advanced Crypto Bot</p>
-      <h1>Trading Dashboard</h1>
-    </div>
-    <div id="safety-banner" class="safety-banner">DRY RUN LOCKED</div>
-  </header>
-
-  <main class="layout">
-    <section class="panel pairs-panel">
+  <div class="dashboard">
+    <!-- LEFT PANEL: Watchlist -->
+    <aside class="panel-left">
       <div class="panel-header">
-        <div>
-          <h2>Top Volume Indodax</h2>
-          <p class="panel-subtitle">Semua market IDR Indodax dengan Volume > 500.000.000 IDR ditampilkan, tanpa batas 33 pair.</p>
-        </div>
-        <span id="pairs-count" class="badge">0 pair</span>
+        <h2>📋 Watchlist</h2>
+        <span id="pairs-count" class="badge">0</span>
       </div>
-      <div id="pairs-list" class="pair-grid">
-        <div class="skeleton">Loading Top Volume Indodax...</div>
+      <div class="search-box">
+        <input type="text" id="pair-search" placeholder="Cari pair..." />
       </div>
-    </section>
+      <ul id="pairs-list" class="pairs-list">
+        <li class="loading">Loading...</li>
+      </ul>
+      <div class="panel-footer">
+        <span id="mode-badge" class="mode-badge dryrun">DRY RUN</span>
+        <span id="last-update" class="last-update">—</span>
+      </div>
+    </aside>
 
-    <section class="panel positions-panel">
-      <div class="panel-header">
-        <h2>Open Positions / Pair Terisi</h2>
-        <span id="positions-count" class="badge">0 posisi</span>
-      </div>
-      <div class="positions-layout">
-        <div class="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Pair</th>
-                <th>Type</th>
-                <th>Entry</th>
-                <th>Amount</th>
-                <th>Total</th>
-                <th>Mode</th>
-              </tr>
-            </thead>
-            <tbody id="positions-table">
-              <tr><td colspan="6">Loading open positions...</td></tr>
-            </tbody>
-          </table>
-        </div>
-        <div class="chart-card">
-          <div class="chart-header">
-            <div>
-              <p class="eyebrow">Pair Aktif Terpilih</p>
-              <h3 id="chart-title">Pilih pair aktif</h3>
+    <!-- RIGHT PANEL -->
+    <main class="panel-right">
+      <!-- TOP: Chart -->
+      <section class="chart-section">
+        <div class="chart-header">
+          <div class="chart-title-group">
+            <h2 id="chart-pair">Pilih pair dari watchlist</h2>
+            <span id="chart-price" class="chart-price">—</span>
+            <span id="chart-change" class="chart-change neutral">—</span>
+          </div>
+          <div class="chart-controls">
+            <div id="chart-timeframes" class="timeframes">
+              <button class="tf-btn" data-tf="60" data-limit="120">1m</button>
+              <button class="tf-btn" data-tf="300" data-limit="200">5m</button>
+              <button class="tf-btn active" data-tf="900" data-limit="200">15m</button>
+              <button class="tf-btn" data-tf="3600" data-limit="200">1h</button>
+              <button class="tf-btn" data-tf="14400" data-limit="200">4h</button>
+              <button class="tf-btn" data-tf="86400" data-limit="200">1D</button>
             </div>
-            <div class="chart-controls">
-              <label for="chart-model-select">Model grafik</label>
-              <select id="chart-model-select" class="chart-model-select">
-                <option value="clear-candles" selected>Candle Jelas</option>
-                <option value="bold-line">Garis Tegas</option>
-                <option value="area-trend">Area Trend</option>
-                <option value="tradingview">TradingView</option>
-              </select>
-              <span id="chart-symbol" class="badge">INDODAX</span>
-            </div>
-          </div>
-          <div id="chart-timeframes" class="chart-timeframes" aria-label="Timeframe chart">
-            <button class="timeframe-button" type="button" data-timeframe="1m" data-limit="120">1m</button>
-            <button class="timeframe-button active" type="button" data-timeframe="5m" data-limit="240">5m</button>
-            <button class="timeframe-button" type="button" data-timeframe="15m" data-limit="360">15m</button>
-            <button class="timeframe-button" type="button" data-timeframe="30m" data-limit="500">30m</button>
-            <button class="timeframe-button" type="button" data-timeframe="1h" data-limit="720">1h</button>
-            <button class="timeframe-button" type="button" data-timeframe="4h" data-limit="1000">4h</button>
-            <button class="timeframe-button" type="button" data-timeframe="1D" data-limit="1000">1D</button>
-            <button class="timeframe-button" type="button" data-timeframe="1Week" data-limit="1000">1Week</button>
-          </div>
-          <div id="tradingview-chart" class="tradingview-chart"></div>
-          <div id="bot-overlay" class="bot-overlay">
-            <article><span>Entry</span><strong id="overlay-entry">-</strong></article>
-            <article><span>SL</span><strong id="overlay-sl">-</strong></article>
-            <article><span>TP</span><strong id="overlay-tp">-</strong></article>
-            <article><span>Signal</span><strong id="overlay-signal">-</strong></article>
-            <article><span>Confidence</span><strong id="overlay-confidence">-</strong></article>
-            <article><span>PnL</span><strong id="overlay-pnl">-</strong></article>
-          </div>
-          <div class="trade-action-row" aria-label="Visual only buy sell buttons">
-            <button class="action-buy" type="button" disabled>READ-ONLY BUY</button>
-            <button class="action-sell" type="button" disabled>READ-ONLY SELL</button>
+            <select id="chart-type" class="chart-type-select">
+              <option value="candle" selected>Candle</option>
+              <option value="line">Line</option>
+              <option value="area">Area</option>
+            </select>
           </div>
         </div>
-      </div>
-    </section>
-
-    <section class="panel signals-panel">
-      <div class="panel-header">
-        <h2>Latest Signals</h2>
-        <span id="signals-count" class="badge">0 sinyal</span>
-      </div>
-      <div id="signals-list" class="signal-list">
-        <div class="skeleton">Loading latest signals...</div>
-      </div>
-    </section>
-
-    <section class="panel trades-panel">
-      <div class="panel-header">
-        <h2>Trade History</h2>
-        <span id="trades-count" class="badge">0 trade</span>
-      </div>
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Pair</th>
-              <th>Type</th>
-              <th>Status</th>
-              <th>Entry</th>
-              <th>Total</th>
-              <th>P/L</th>
-            </tr>
-          </thead>
-          <tbody id="trades-table">
-            <tr><td colspan="6">Loading trade history...</td></tr>
-          </tbody>
-        </table>
-      </div>
-    </section>
-
-    <section class="dashboard-status-footer" aria-label="Compact dashboard status">
-      <section class="panel safety-panel compact-status-panel">
-        <div class="panel-header compact-status-header">
-          <h2>Safety Status</h2>
-          <button id="refresh-button" type="button">Refresh</button>
-        </div>
-        <div id="safety-status" class="status-grid compact-status-grid">
-          <div class="skeleton">Loading safety status...</div>
-        </div>
+        <div id="chart-container" class="chart-container"></div>
       </section>
 
-      <section class="panel health-panel compact-status-panel">
-        <div class="panel-header compact-status-header">
-          <h2>Health / Data Sources</h2>
-          <span id="health-freshness" class="badge">unknown</span>
-        </div>
-        <div id="health-status" class="status-grid compact-status-grid">
-          <div class="skeleton">Loading health status...</div>
+      <!-- BOTTOM: Pair Detail -->
+      <section class="detail-section">
+        <div class="detail-grid" id="detail-grid">
+          <div class="detail-card">
+            <span class="detail-label">ML Confidence</span>
+            <span class="detail-value" id="d-confidence">—</span>
+          </div>
+          <div class="detail-card">
+            <span class="detail-label">Signal</span>
+            <span class="detail-value" id="d-signal">—</span>
+          </div>
+          <div class="detail-card">
+            <span class="detail-label">Combined Strength</span>
+            <span class="detail-value" id="d-strength">—</span>
+          </div>
+          <div class="detail-card">
+            <span class="detail-label">Volatilitas</span>
+            <span class="detail-value" id="d-volatility">—</span>
+          </div>
+          <div class="detail-card">
+            <span class="detail-label">Volume 24h</span>
+            <span class="detail-value" id="d-volume">—</span>
+          </div>
+          <div class="detail-card">
+            <span class="detail-label">Support</span>
+            <span class="detail-value" id="d-support">—</span>
+          </div>
+          <div class="detail-card">
+            <span class="detail-label">Resistance</span>
+            <span class="detail-value" id="d-resistance">—</span>
+          </div>
+          <div class="detail-card">
+            <span class="detail-label">Risk/Reward</span>
+            <span class="detail-value" id="d-rr">—</span>
+          </div>
+          <div class="detail-card">
+            <span class="detail-label">Position</span>
+            <span class="detail-value" id="d-position">—</span>
+          </div>
+          <div class="detail-card">
+            <span class="detail-label">P&L</span>
+            <span class="detail-value" id="d-pnl">—</span>
+          </div>
         </div>
       </section>
-    </section>
-  </main>
-
-  <footer>
-    Phase 1 read-only. Tidak ada tombol eksekusi trade, hunter control, atau real trading toggle.
-  </footer>
+    </main>
+  </div>
 
   <script src="./app.js"></script>
 </body>
