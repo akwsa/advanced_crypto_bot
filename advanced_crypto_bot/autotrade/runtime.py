@@ -468,9 +468,18 @@ async def check_trading_opportunity(bot, pair, signal=None):
     signal.setdefault("pair", pair)
     signal.setdefault("indicators", {})
     signal.setdefault("reason", "Signal alert generated from auto-trade queue")
-    # For autotrade, use pre-SR recommendation if available. SR_VALIDATION is
-    # designed for Telegram notification filtering; autotrade has its own entry
-    # gates (market intelligence, R/R, profit optimizer) that are more appropriate.
+    # For autotrade, use pre-pipeline-filter recommendation if available.
+    # `pre_sr_recommendation` is snapshot BEFORE Quality Engine V3 + SR
+    # Validation run (signal_pipeline.py ~line 399). Both filters are
+    # designed for Telegram notification filtering (avoid spam, enforce
+    # confluence rules). Autotrade has 17 of its own entry gates (market
+    # intelligence, V4 filter, chase prevention, correlation, R/R after
+    # fees, profit optimizer) that are more appropriate for execution.
+    #
+    # Without this bypass, e.g. STRONG_BUY signals with confluence=2 are
+    # downgraded to HOLD by Quality Engine ("STRONG_BUY requirements not
+    # met"), and autotrade then skips them as "Weak signal". Result: 0
+    # entries despite strong ML+TA agreement.
     effective_rec = signal.get("pre_sr_recommendation") or signal["recommendation"]
     if effective_rec not in ["STRONG_BUY", "BUY", "STRONG_SELL", "SELL"]:
         # Promoted DEBUG → INFO supaya setiap scan yang berakhir tanpa entry

@@ -397,6 +397,19 @@ async def generate_signal_for_pair(bot, pair):
         if position_multiplier < 1.0:
             logger.info(f"📊 [{pair}] Regime: {regime}, Position size: {position_multiplier*100:.0f}%")
 
+    # Snapshot recommendation BEFORE Quality Engine + SR Validation run.
+    # Autotrade execution path uses this to bypass the filter pipeline:
+    # - Quality Engine V3 + SR Validation are designed for Telegram
+    #   notification filtering (avoid spam, enforce confluence rules).
+    # - Autotrade has its own 17 entry gates (MI, V4, chase prevention,
+    #   correlation, R/R-after-fees, profit optimizer, etc.) that are
+    #   more appropriate for execution decisions.
+    # Field name kept as `pre_sr_recommendation` for backward compat with
+    # autotrade/runtime.py:514 (renaming would touch multiple call sites).
+    # Regime filter (above) intentionally NOT bypassed — it represents
+    # genuine "market unsafe to trade" verdict, not a filter heuristic.
+    signal["pre_sr_recommendation"] = signal.get("recommendation", "HOLD")
+
     quality_signal = bot.signal_quality_engine.generate_signal(
         pair=pair,
         ta_signals=ta_signals,
@@ -530,8 +543,11 @@ async def generate_signal_for_pair(bot, pair):
         signal["price_zone"] = "UNKNOWN"
         signal["risk_reward_ratio"] = 0
 
-    # Store pre-SR recommendation so autotrade auto-promote can use it
-    signal["pre_sr_recommendation"] = signal.get("recommendation", "HOLD")
+    # NOTE: signal["pre_sr_recommendation"] sudah di-snapshot di atas
+    # (sebelum Quality Engine, line ~399). Itu adalah recommendation yang
+    # autotrade pakai untuk bypass Quality Engine + SR Validation.
+    # Field di sini sengaja TIDAK di-overwrite supaya autotrade dapat
+    # melihat keadaan pre-filter, bukan post-Quality-Engine.
 
     # Final runtime gate for actionable signals (authoritative path).
     try:

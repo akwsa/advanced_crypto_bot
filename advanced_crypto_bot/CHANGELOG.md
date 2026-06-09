@@ -9,6 +9,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed - 2026-06-09 (Autotrade DRY RUN follow-up: STRONG_BUY masih 0 entry)
+**Konteks:** Setelah fix B+C+A di-deploy (commit 2197c3a + merge 5dc1c05), bot di VM masih 0 entry walau muncul banyak STRONG_BUY (homeidr 8x, portalidr 7x, saharaidr 6x, twelveidr 5x, pippinidr 5x, fartcoinidr 5x, dst). Investigasi log menunjukkan 109 dari 165 scan ber-status `⏸️ Skipping homeidr: Weak signal (HOLD)` walau ML+TA sebelumnya jelas STRONG_BUY.
+
+**Root cause: `pre_sr_recommendation` di-snapshot SETELAH Quality Engine, bukan SEBELUM.**
+
+Trace dari log VM (homeidr, 12:32:22 UTC):
+```
+📊 [FINAL] Signal for homeidr: STRONG_BUY (no stabilization)
+📊 [CONFLUENCE] homeidr: Score=2, ML=STRONG_BUY, TA=0.13
+🛡️ [QUALITY ENGINE] homeidr: STRONG_BUY → HOLD | Reason: STRONG_BUY requirements not met
+🟡 [BUY TRACE] homeidr | requested=STRONG_BUY | final=HOLD | confluence=2
+🧪 DRY RUN Scanning homeidr...
+⏸️ Skipping homeidr: Weak signal (HOLD)   ← autotrade lihat HOLD, bukan STRONG_BUY
+```
+
+`signals/signal_pipeline.py:534` (sebelum fix):
+```python
+# Quality Engine jalan dulu (line ~400) → bisa downgrade STRONG_BUY ke HOLD
+quality_signal = bot.signal_quality_engine.generate_signal(...)
+if quality_signal.get("type") == "HOLD":
+    signal["recommendation"] = "HOLD"  # downgrade
+
+# ... S/R detection ...
+
+# pre_sr_recommendation di-snapshot SETELAH Quality Engine sudah downgrade
+signal["pre_sr_recommendation"] = signal.get("recommendation", "HOLD")
+```
+
+`autotrade/runtime.py:471` (tidak berubah, sudah benar dari fix 2026-05-25):
+```python
+effective_rec = signal.get("pre_sr_recommendation") or signal["recommendation"]
+if effective_rec not in ["STRONG_BUY", "BUY", "STRONG_SELL", "SELL"]:
+    logger.info(f"⏸️ Skipping {pair}: Weak signal ({effective_rec})")
+    return
+```
+
+Jadi autotrade lihat `pre_sr_recommendation = HOLD` (sudah ter-downgrade Quality Engine), bukan STRONG_BUY asli dari ML+TA. Bypass yang diintroduce 2026-05-25 cuma bypass SR Validation, **tidak** bypass Quality Engine.
+
+**Fix — `signals/signal_pipeline.py`:**
+- Pindah snapshot `signal["pre_sr_recommendation"]` ke SEBELUM `bot.signal_quality_engine.generate_signal()` dipanggil (line ~399).
+- Hapus assignment ganda di line ~534 (dulu sebelum SR Validation), ganti jadi NOTE comment.
+- Field name `pre_sr_recommendation` dipertahankan untuk backward compat dengan `autotrade/runtime.py` (rename akan touch beberapa call site dengan resiko miss).
+- Regime filter (above) sengaja TIDAK dibypass — itu verdict "market unsafe to trade", bukan filter heuristic.
+
+**Files changed:**
+- `signals/signal_pipeline.py` — pindah snapshot + ganti komentar.
+- `autotrade/runtime.py` — update komentar untuk reflect bypass Quality Engine + SR Validation (no logic change).
+- `tests/test_pre_sr_recommendation_bypasses_quality_engine.py` — file baru, 3 test.
+
+**Trading/safety risk:** RENDAH.
+- Tidak ada perubahan path execution real trade.
+- Quality Engine + SR Validation tetap aktif untuk filter notif Telegram (signal["recommendation"] tetap di-overwrite ke HOLD oleh kedua filter).
+- Hanya autotrade yang sekarang bisa lihat recommendation original (pre-filter).
+- 17 entry gate autotrade lain (MI filter, V4, chase, correlation, R/R after fees, profit optimizer) tetap aktif dan punya kewenangan terakhir untuk block entry.
+
+**Rollback plan:** Revert commit di branch `fix/autotrade-dryrun-no-entry-vm-20260609`. Bot di VM bisa di-restart cepat — no schema/data migration.
+
 ### Fixed - 2026-06-09 (Autotrade DRY RUN: 0 entry dalam 58 menit di Google VM)
 **Konteks:** Bot di-deploy ke Google VM (`instance-20260609-044439`, asia-east2-c, IP 34.92.30.121). Setelah berjalan ~58 menit (10:14–11:12 UTC), tidak ada entry DRY RUN sama sekali walaupun 1,103 BUY signal di-generate. Investigasi log mengidentifikasi tiga penyebab terpisah; ketiganya diperbaiki di patch ini.
 
