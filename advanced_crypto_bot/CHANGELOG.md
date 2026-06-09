@@ -9,6 +9,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed - 2026-06-09 (Autotrade DRY RUN follow-up #2: MI filter terlalu strict)
+**Konteks:** Setelah fix `pre_sr_recommendation` (commit 1b92bb6) di-deploy, autotrade SUDAH lulus filter pipeline (Quality Engine + SR Validation di-bypass via pre_sr_recommendation snapshot pre-filter). Tapi di sample 2 menit di VM, **26 dari 48 scan (54%) di-block oleh Market Intelligence filter** dengan reason `Signal=NEUTRAL`, walau pre_sr_recommendation = STRONG_BUY.
+
+**Trace VM (homeidr, 14:03:34 UTC):**
+```
+[FINAL]   Signal: STRONG_BUY (no stabilization)
+[QE]      STRONG_BUY → BUY (graceful downgrade, confluence=3)
+[SR]      BUY → HOLD (price=593, R1=595)
+[DRY RUN] Scanning homeidr...   ← lulus filter pipeline
+[DRY RUN] Entry blocked: MI filter failed (Signal=NEUTRAL)   ← ter-block di sini
+```
+
+**Root cause: MI threshold terlalu tinggi untuk pair low-cap Indodax.**
+
+`autotrade/runtime.py::analyze_market_intelligence()`:
+```python
+volume_spike    = (volume_ratio    >= MI_VOLUME_SPIKE_MIN     = 1.3x)
+orderbook_bull  = (bid_volume / ask_volume >= MI_ORDERBOOK_BULLISH_MIN = 1.2)
+
+bullish_count = volume_spike + orderbook_bull
+if bullish_count == 2: → BULLISH
+elif == 1:             → MODERATE
+else:                  → NEUTRAL  ← block
+
+passes_entry_filter = (overall_signal in [BULLISH, MODERATE])
+```
+
+Realitas pair low-cap di Indodax (homeidr, pippinidr, dlcidr, dst):
+- Volume harian fluktuatif tapi rata-rata stabil; spike 1.3× (volume 30% di atas rata-rata) butuh news event atau pump signal — jarang terjadi spontan
+- Orderbook depth tipis; bid/ask ratio fluktuasi kisaran 0.95-1.15 untuk pair sideways. Ratio 1.2 (bid pressure 20% lebih kuat) butuh momentum yang signifikan
+- Jadi 54% scan dapat NEUTRAL karena salah satu atau dua faktor itu tidak meet threshold
+
+**Fix — `core/config.py`:**
+- `MI_VOLUME_SPIKE_MIN`: 1.3 → 1.1 (volume sedikit di atas avg cukup; pair yang volumenya turun dari rata-rata tetap di-filter)
+- `MI_ORDERBOOK_BULLISH_MIN`: 1.2 → 1.05 (bid pressure 5% cukup untuk MODERATE; pair seimbang/bearish tetap NEUTRAL)
+
+Estimasi efek: dari 26 NEUTRAL di sample → ~15 jadi MODERATE/BULLISH (lulus filter), ~11 tetap NEUTRAL (proteksi minimum tetap). Belum tentu jadi entry semua karena ada gate berikutnya (V4_FILTER, R/R-after-fees, profit optimizer, chase prevention) — tapi pipeline tidak macet di MI.
+
+**Files changed:**
+- `core/config.py` — 2 angka threshold + komentar lengkap dengan reasoning.
+- `tests/test_mi_threshold_tuning.py` — file baru, 5 test (2 pin threshold value + 3 behavioral test untuk moderate/neutral).
+
+**Tests:** 15/15 pass (incl. orderbook MI regression suite).
+
+**Trading/safety risk:** RENDAH-MEDIUM.
+- Tidak ada perubahan logic flow.
+- Filter MI tetap aktif — pair benar-benar sideways/bearish heavy tetap di-block (test `test_mi_truly_neutral_pair_still_blocked` lock-in behavior ini).
+- Spread hard gate (NO_BID_LIQUIDITY, SPREAD_TOO_WIDE) tidak terpengaruh.
+- 16 entry gate autotrade lain (V4_FILTER, chase prevention, correlation, R/R, profit optimizer, dll) tetap aktif sebagai second-line defense.
+- Bila threshold baru terlalu permisif dan menyebabkan entry low-quality, monitoring 1-2 jam akan kelihatan dan bisa di-revert ke nilai antara (mis. 1.15 / 1.10).
+
+**Rollback plan:** Edit `core/config.py` line 138-139 kembali ke 1.3 / 1.2, atau revert single commit. Bot di VM bisa di-restart cepat — no schema/data migration.
+
 ### Fixed - 2026-06-09 (Autotrade DRY RUN follow-up: STRONG_BUY masih 0 entry)
 **Konteks:** Setelah fix B+C+A di-deploy (commit 2197c3a + merge 5dc1c05), bot di VM masih 0 entry walau muncul banyak STRONG_BUY (homeidr 8x, portalidr 7x, saharaidr 6x, twelveidr 5x, pippinidr 5x, fartcoinidr 5x, dst). Investigasi log menunjukkan 109 dari 165 scan ber-status `⏸️ Skipping homeidr: Weak signal (HOLD)` walau ML+TA sebelumnya jelas STRONG_BUY.
 

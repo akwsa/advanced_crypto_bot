@@ -135,8 +135,8 @@ class Config:
     REGIME_TREND_THRESHOLD = 0.01  # Trend if change > 1%
     
     # Market Intelligence Entry Filter
-    MI_VOLUME_SPIKE_MIN = 1.3  # Min volume ratio to pass filter
-    MI_ORDERBOOK_BULLISH_MIN = 1.2  # Min bid/ask ratio to pass filter
+    MI_VOLUME_SPIKE_MIN = 1.1  # Min volume ratio to pass filter (2026-06-09: relaxed 1.3→1.1; 26/48 scan di VM (54%) di-block MI=NEUTRAL meskipun signal STRONG_BUY. Threshold 1.3x terlalu tinggi untuk pair low-cap Indodax — volume spike 30% jarang terjadi tanpa news event. 1.1x masih filter pair yang volumenya turun dari rata-rata, tetap proteksi tapi tidak block entry yang valid).
+    MI_ORDERBOOK_BULLISH_MIN = 1.05  # Min bid/ask ratio to pass filter (2026-06-09: relaxed 1.2→1.05; pair sideways konsolidasi normal ratio 0.95-1.10. Threshold 1.2 minta bid pressure 20% lebih kuat dari ask — terlalu strict untuk pair low-cap. 1.05 = bid pressure 5% cukup untuk MODERATE, masih filter pair benar-benar bearish/sideways heavy).
     MI_SPREAD_MAX_PCT = 0.02  # Max spread % before entry is blocked (2% default)
     MI_REQUIRE_BULLISH_FOR_ENTRY = False  # If True, only enter when MI is BULLISH
     MI_ALLOW_MODERATE_ENTRY = True  # If True, also allow MODERATE MI signal
