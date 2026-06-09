@@ -558,7 +558,11 @@ async def generate_signal_for_pair(bot, pair):
                 sr_confidence = float(signal.get("ml_confidence") or ml_confidence or 0)
                 sr_confluence = int(signal.get("confluence", 0) or 0)
 
-                if recommendation in BUY_SIGNALS and resistance_1 > 0:
+                if recommendation in BUY_SIGNALS and resistance_1 > 0 and real_time_price > 0:
+                    # Guard: S/R validation hanya valid bila R1 dan harga
+                    # real-time keduanya valid. Sebelum guard ini, pair dengan
+                    # data orderbook corrupt (R1=0, price=0) tetap masuk
+                    # validation dan auto-reject karena `0 >= 0 * (1 - X)`.
                     if real_time_price >= resistance_1 * (1 - near_resistance_pct / 100):
                         reject_reason = (
                             f"BUY at/near resistance "

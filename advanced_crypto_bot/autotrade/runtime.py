@@ -473,20 +473,23 @@ async def check_trading_opportunity(bot, pair, signal=None):
     # gates (market intelligence, R/R, profit optimizer) that are more appropriate.
     effective_rec = signal.get("pre_sr_recommendation") or signal["recommendation"]
     if effective_rec not in ["STRONG_BUY", "BUY", "STRONG_SELL", "SELL"]:
-        logger.debug(f"⏸️ Skipping {pair}: Weak signal ({effective_rec})")
+        # Promoted DEBUG → INFO supaya setiap scan yang berakhir tanpa entry
+        # tetap punya audit trail. Sebelum patch ini, ~73% scan DRY RUN
+        # berakhir silent karena log skip-nya di level DEBUG.
+        logger.info(f"⏸️ Skipping {pair}: Weak signal ({effective_rec})")
         return
     # Override recommendation with pre-SR for autotrade execution path
     signal["recommendation"] = effective_rec
     # NOTE: DRY RUN now allows both BUY and STRONG_BUY for realistic validation.
     # Previously only STRONG_BUY was allowed, making DRY RUN results misleading.
     if is_dry_run and open_trades_for_pair and signal["recommendation"] in ["BUY", "STRONG_BUY"]:
-        logger.debug(f"⏭️ Skipping {pair}: open DRY RUN position already exists; waiting for SELL")
+        logger.info(f"⏭️ Skipping {pair}: open DRY RUN position already exists; waiting for SELL")
         return
     if cooldown_active and signal["recommendation"] not in ["STRONG_SELL", "SELL"]:
-        logger.debug(f"⏭️ Skipping {pair}: scan cooldown active and signal is not SELL")
+        logger.info(f"⏭️ Skipping {pair}: scan cooldown active and signal is not SELL")
         return
     if cooldown_active:
-        logger.debug(f"⏭️ Bypassing auto-trade scan cooldown for {pair}: open position needs SELL monitoring")
+        logger.info(f"⏭️ Bypassing auto-trade scan cooldown for {pair}: open position needs SELL monitoring")
     with _get_runtime_state_lock(bot):
         last_ml_update = getattr(bot, "last_ml_update", {})
         last_ml_update[pair_key] = now
@@ -589,6 +592,16 @@ async def check_trading_opportunity(bot, pair, signal=None):
                 log_fn(
                     f"{prefix} Entry blocked for {pair}: SPREAD_TOO_WIDE "
                     f"({spread_pct*100:.3f}% > max {Config.MI_SPREAD_MAX_PCT*100:.1f}%)"
+                )
+            elif block_reason == "NO_BID_LIQUIDITY":
+                # Pair illiquid (bid side empty / harga 0). Lebih tepat di-skip
+                # daripada menunggu spread menyempit. Diagnosa harus jelas:
+                # ini BUKAN spread terlalu lebar, ini ketiadaan likuiditas.
+                best_bid = market_conditions.get("best_bid", 0) or 0
+                best_ask = market_conditions.get("best_ask", 0) or 0
+                log_fn(
+                    f"{prefix} Entry blocked for {pair}: NO_BID_LIQUIDITY "
+                    f"(bid={best_bid:,.0f} ask={best_ask:,.0f}; pair illiquid)"
                 )
             else:
                 log_fn(f"{prefix} Entry blocked for {pair}: MI filter failed (Signal={market_conditions['overall_signal']})")
@@ -1129,20 +1142,55 @@ async def analyze_market_intelligence(bot, pair, current_price):
                     logger.info(f"📊 Orderbook pressure for {pair}: {result['orderbook_pressure']} ({buy_sell_ratio:.2f}x)")
 
                 # Spread guard: calculate best bid/ask and spread percentage
+                #
+                # Indodax kadang mengembalikan level dengan harga 0 (atau bid
+                # kosong sama sekali) untuk pair low-cap / illiquid. Bila itu
+                # tidak difilter, `max(bid_prices)` jadi 0 → spread terhitung
+                # 100%/200%, dan bot meng-attribute ini ke SPREAD_TOO_WIDE.
+                # Itu menyesatkan: penyebabnya bukan spread lebar, melainkan
+                # tidak ada bid liquidity sama sekali. Kita pisahkan dua kasus:
+                #  (a) NO_BID_LIQUIDITY  — bid kosong / semua harga ≤ 0
+                #  (b) SPREAD_TOO_WIDE   — kedua sisi ada, gap > batas
                 try:
                     bid_prices = []
                     ask_prices = []
                     for level in bids or []:
                         try:
-                            bid_prices.append(float(level[0]))
+                            price = float(level[0])
                         except (TypeError, ValueError, IndexError):
                             continue
+                        if price > 0:  # filter level harga ≤ 0 (sentinel)
+                            bid_prices.append(price)
                     for level in asks or []:
                         try:
-                            ask_prices.append(float(level[0]))
+                            price = float(level[0])
                         except (TypeError, ValueError, IndexError):
                             continue
-                    if bid_prices and ask_prices:
+                        if price > 0:
+                            ask_prices.append(price)
+
+                    has_bid = bool(bid_prices)
+                    has_ask = bool(ask_prices)
+
+                    if not has_bid or not has_ask:
+                        # Liquidity hilang di salah satu sisi. Block entry tapi
+                        # dengan label yang akurat — bukan "spread terlalu
+                        # lebar". Skipping pair lebih tepat dari menunggu spread
+                        # menyempit (bid kosong tidak akan menyempit).
+                        if has_ask:
+                            result["best_ask"] = min(ask_prices)
+                        if has_bid:
+                            result["best_bid"] = max(bid_prices)
+                        result["spread_too_wide"] = True
+                        result["block_reason"] = "NO_BID_LIQUIDITY"
+                        bid_repr = f"{min(bid_prices):,.0f}" if has_bid else "EMPTY"
+                        ask_repr = f"{min(ask_prices):,.0f}" if has_ask else "EMPTY"
+                        logger.warning(
+                            f"⚠️ No bid/ask liquidity for {pair}: "
+                            f"bid={bid_repr} ask={ask_repr} "
+                            f"(orderbook one-sided; pair illiquid)"
+                        )
+                    else:
                         best_bid = max(bid_prices)
                         best_ask = min(ask_prices)
                         mid_price = (best_bid + best_ask) / 2

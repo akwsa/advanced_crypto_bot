@@ -9,6 +9,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed - 2026-06-09 (Autotrade DRY RUN: 0 entry dalam 58 menit di Google VM)
+**Konteks:** Bot di-deploy ke Google VM (`instance-20260609-044439`, asia-east2-c, IP 34.92.30.121). Setelah berjalan ~58 menit (10:14–11:12 UTC), tidak ada entry DRY RUN sama sekali walaupun 1,103 BUY signal di-generate. Investigasi log mengidentifikasi tiga penyebab terpisah; ketiganya diperbaiki di patch ini.
+
+**Root cause #1 — `bid=0` di orderbook Indodax untuk pair illiquid (B):**
+- Pair low-cap (`dlcidr`, `homeidr`, `pippinidr`, `saharaidr`, `whitewhaleidr`, `zerebroidr`, ...) mengembalikan level orderbook dengan `[0, "amount"]` di sisi bid.
+- `analyze_market_intelligence()` (autotrade/runtime.py) tidak memfilter level dengan `price ≤ 0`, sehingga `max(bid_prices) = 0`. Spread terhitung `(ask - 0) / (ask/2) = 200%`.
+- Akibat: 117 entry block dengan label `SPREAD_TOO_WIDE` yang sebenarnya adalah masalah likuiditas, bukan spread lebar.
+
+**Fix #1 — `autotrade/runtime.py::analyze_market_intelligence()`:**
+- Filter level orderbook dengan `price > 0` (skip baik harga 0 maupun negatif).
+- Jika setelah filter sisi bid atau ask kosong, label `block_reason = "NO_BID_LIQUIDITY"` (bukan `SPREAD_TOO_WIDE`).
+- `passes_entry_filter = False` untuk kedua kasus, log warning eksplisit `⚠️ No bid/ask liquidity for {pair}: bid=EMPTY ask=...`.
+- Cabang `if block_reason == "NO_BID_LIQUIDITY"` ditambah di entry-blocked path untuk pesan log eksplisit `🧪 [DRY RUN] Entry blocked for {pair}: NO_BID_LIQUIDITY (bid=... ask=...; pair illiquid)`.
+
+**Root cause #2 — Silent scans tanpa audit trail (C):**
+- 557 dari 767 DRY RUN scan tidak menghasilkan entry maupun reject log apapun.
+- Penyebab: 4 skip path (`Weak signal`, `open DRY RUN position already exists`, `scan cooldown active`, `Bypassing auto-trade scan cooldown`) dilog di level `DEBUG`. Production logger di INFO → semua silent.
+
+**Fix #2 — `autotrade/runtime.py::check_trading_opportunity()`:**
+- Promote 4 skip path dari `logger.debug()` → `logger.info()`.
+- Setiap scan sekarang punya satu dari empat outcome yang terlihat di log: weak signal, open position pending SELL, scan cooldown, atau full evaluation. Operator bisa langsung membaca distribusi alasan tanpa harus enable debug logging.
+
+**Root cause #3 — `SR_NEAR_RESISTANCE_PCT = 2.5` terlalu agresif untuk pair low-cap (A):**
+- 851 dari 1,103 BUY (77%) di-downgrade ke HOLD oleh `SR_VALIDATION` di signal pipeline.
+- Untuk pair low-cap dengan harga IDR <500, jarak 0.13–0.5% di bawah R1 sangat normal (bukan "at resistance").
+- Catatan: autotrade execution path **sudah** bypass S/R via `pre_sr_recommendation` (Fix 2026-05-25), jadi threshold ini sekarang murni mengontrol filter notifikasi Telegram. Tapi 77% reject rate menyebabkan operator kehilangan visibility ke setup bagus.
+- Ditemukan juga: pair dengan orderbook corrupt (`pepeidr: S1=0 R1=0 price=0`) tetap masuk SR validation dan auto-reject karena `0 >= 0 * (1 - 0.025) = 0` selalu True.
+
+**Fix #3 — `core/config.py` + `signals/signal_pipeline.py`:**
+- `Config.SR_NEAR_RESISTANCE_PCT`: 2.5 → 1.0 (BUY hanya di-reject bila harga ≥ R1 × 0.99).
+- `signals/signal_pipeline.py`: tambah guard `real_time_price > 0` di check resistance, supaya pair dengan data corrupt (R1=0 atau harga=0) tidak masuk validation. Sebelum guard, ekspresi `0 >= 0 * 0.99` selalu True dan menghasilkan reject palsu.
+- Threshold lain tidak diubah (`SR_NEAR_SUPPORT_PCT=2.5`, `SR_MIN_RR_RATIO=1.2`, `SR_MIN_SL_PCT=0.08`).
+
+**Files changed:**
+- `autotrade/runtime.py` — spread guard rewrite + NO_BID_LIQUIDITY branch + skip-path log promotion.
+- `signals/signal_pipeline.py` — guard `real_time_price > 0` di S/R BUY check.
+- `core/config.py` — `SR_NEAR_RESISTANCE_PCT` 2.5 → 1.0 (komentar in-line dengan justifikasi numerik).
+- `tests/test_orderbook_market_intelligence.py` — 5 test regresi baru: zero-price bids, empty bids, empty asks, negative prices, mixed valid/zero.
+- `tests/test_sr_validation_corrupt_guard.py` — file baru, 4 test pinning thresholds 2026-06-09.
+
+**Trading/safety risk:** RENDAH.
+- Tidak ada perubahan path execution real trade (`AUTO_TRADE_DRY_RUN` tetap default).
+- Logika gate autotrade utama (TradingEngine.should_execute_trade, MI filter, V4 filter, chase prevention, correlation check) tidak disentuh.
+- Threshold S/R dilonggarkan tapi pair illiquid sekarang justru di-block lebih awal di NO_BID_LIQUIDITY (kompensasi).
+- Verifikasi: 61 target test passing pre-deploy.
+
+**Rollback plan:** Revert commit di branch `fix/autotrade-dryrun-no-entry-vm-20260609`. Restart bot di VM via `tmux attach -t bot` → `Ctrl+C` → `python bot.py`. State runtime (open positions, signal cache) di-rebuild otomatis dari `data/trading.db`.
+
 ### Fixed - 2026-05-25 (AutoTrade DRY RUN Auto-Promote & Signal Queue Path)
 - `autotrade/runtime.py`: Auto-promote watched pairs ke `auto_trade_pairs` saat sinyal BUY/STRONG_BUY terdeteksi (DRY RUN mode) baik dari WebSocket maupun signal queue worker.
 - `autotrade/runtime.py`: `check_trading_opportunity()` sekarang menggunakan `pre_sr_recommendation` untuk eksekusi trade dan auto-promote watched pairs yang belum ada di `auto_trade_pairs`.

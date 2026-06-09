@@ -120,3 +120,96 @@ async def test_analyze_market_intelligence_spread_result_includes_bid_ask_mid():
     assert result["best_ask"] == 102.0
     assert result["mid_price"] == 101.0
     assert abs(result["spread_pct"] - (2.0 / 101.0)) < 0.001
+
+
+# ---------------------------------------------------------------------------
+# Regression: Indodax orderbook returning bid prices == 0 must NOT be reported
+# as SPREAD_TOO_WIDE. Root cause (2026-06-09): low-cap pairs (dlcidr, homeidr,
+# zerebroidr, ...) returned bid levels with price=0, so max(bid_prices)=0 and
+# spread became 200%. The block_reason was misleading.
+# Fix: filter level prices ≤ 0; when one side becomes empty, label
+# block_reason="NO_BID_LIQUIDITY" instead of SPREAD_TOO_WIDE.
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_analyze_market_intelligence_zero_bid_price_labeled_no_bid_liquidity():
+    """Bid level with price=0 should produce NO_BID_LIQUIDITY, not SPREAD_TOO_WIDE."""
+    bot = _FakeBot(
+        {
+            "bids": [["0", "100.0"]],            # price=0 → filtered out
+            "asks": [["412", "2.0"], ["413", "1.0"]],
+        }
+    )
+
+    result = await analyze_market_intelligence(bot, "pippinidr", current_price=412.0)
+
+    assert result["spread_too_wide"] is True
+    assert result["block_reason"] == "NO_BID_LIQUIDITY"
+    assert result["passes_entry_filter"] is False
+    # spread_pct should NOT be reported as 200%; it should be missing/None
+    assert "spread_pct" not in result or result.get("spread_pct") in (None, 0)
+
+
+@pytest.mark.asyncio
+async def test_analyze_market_intelligence_empty_bids_labeled_no_bid_liquidity():
+    """Completely empty bids list should produce NO_BID_LIQUIDITY."""
+    bot = _FakeBot(
+        {
+            "bids": [],
+            "asks": [["1000", "5.0"]],
+        }
+    )
+
+    result = await analyze_market_intelligence(bot, "homeidr", current_price=1000.0)
+
+    assert result["block_reason"] == "NO_BID_LIQUIDITY"
+    assert result["passes_entry_filter"] is False
+
+
+@pytest.mark.asyncio
+async def test_analyze_market_intelligence_empty_asks_labeled_no_bid_liquidity():
+    """Completely empty asks should also be flagged (same one-sided liquidity issue)."""
+    bot = _FakeBot(
+        {
+            "bids": [["100", "5.0"]],
+            "asks": [],
+        }
+    )
+
+    result = await analyze_market_intelligence(bot, "saharaidr", current_price=100.0)
+
+    assert result["block_reason"] == "NO_BID_LIQUIDITY"
+    assert result["passes_entry_filter"] is False
+
+
+@pytest.mark.asyncio
+async def test_analyze_market_intelligence_negative_bid_price_filtered():
+    """Defensive: negative price (corrupt API data) must also be filtered."""
+    bot = _FakeBot(
+        {
+            "bids": [["-1", "100.0"], ["0", "50.0"]],  # both invalid
+            "asks": [["500", "2.0"]],
+        }
+    )
+
+    result = await analyze_market_intelligence(bot, "junkidr", current_price=500.0)
+
+    assert result["block_reason"] == "NO_BID_LIQUIDITY"
+    assert result["passes_entry_filter"] is False
+
+
+@pytest.mark.asyncio
+async def test_analyze_market_intelligence_mixed_zero_and_valid_bids_uses_valid():
+    """If some bid levels have price=0 but others are valid, use the valid ones."""
+    bot = _FakeBot(
+        {
+            "bids": [["0", "100.0"], ["95", "5.0"], ["94", "3.0"]],  # 0 filtered, 95 used
+            "asks": [["96", "2.0"], ["97", "1.0"]],
+        }
+    )
+
+    result = await analyze_market_intelligence(bot, "btcidr", current_price=95.5)
+
+    # Should compute normal spread, not be blocked by NO_BID_LIQUIDITY
+    assert result.get("block_reason") != "NO_BID_LIQUIDITY"
+    assert result["best_bid"] == 95.0
+    assert result["best_ask"] == 96.0

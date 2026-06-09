@@ -197,7 +197,7 @@ class Config:
     SR_MIN_RR_RATIO = 1.2  # Minimum risk/reward ratio for signal validation (Prioritas 1 2026-05-22: relaxed 1.5→1.2 supaya RR moderate setup tidak di-downgrade ke HOLD)
     SR_MIN_SL_PCT = 0.08  # Minimum stop loss distance (%) — relaxed to allow more signals
     SR_NEAR_SUPPORT_PCT = 2.5  # Reject BUY if price within N% of support
-    SR_NEAR_RESISTANCE_PCT = 2.5  # Reject SELL if price within N% of resistance
+    SR_NEAR_RESISTANCE_PCT = 1.0  # Reject SELL if price within N% of resistance (2026-06-09: relaxed 2.5→1.0; 851/1103 BUY (77%) di-downgrade jadi HOLD oleh threshold lama untuk pair low-cap di mana 0.5%-2% di bawah R1 sudah dianggap "at resistance". Autotrade bypass via pre_sr_recommendation, threshold ini sekarang murni untuk filter notif Telegram.)
     ENABLE_SR_VALIDATION = True  # Enable/disable S/R validation gate
 
     # Entry Quality
