@@ -324,49 +324,97 @@ class TechnicalAnalysis:
         # NEW: Sum of weighted scores / number of indicators
         # Each indicator: -1 (strong bearish), -0.5 (bearish), 0 (neutral), +0.5 (bullish), +1 (strong bullish)
         # =====================================================================
+        #
+        # Bug HIGH #7 (audit 2026-06-07): TA Strength bias ±0.10
+        # Root cause: MACD selalu BULLISH/BEARISH (±0.5) saat tidak ada cross, dan
+        # 4 indikator lain biasanya NEUTRAL di pasar sideways → strength = ±0.5/5
+        # = ±0.10 → 67% sample stuck di ±0.10. Decision layer & quality engine tidak
+        # bisa membedakan setup bagus vs buruk.
+        #
+        # Fix: tambah komponen kontinu (tilt) untuk RSI/MACD/MA/BB/Volume sehingga
+        # nilai TA Strength jadi continuous di rentang [-1, +1], bukan terkonsentrasi
+        # di kelipatan 0.20 (=1/5).
+        # =====================================================================
         indicator_scores = []
 
         # RSI: -1 (oversold→bullish), +1 (overbought→bearish), wait no...
         # RSI oversold = bullish opportunity → +1
         # RSI overbought = bearish risk → -1
         rsi_signal = signals['indicators'].get('rsi', 'NEUTRAL')
+        rsi_value = float(latest.get('rsi', 50.0))
+        if pd.isna(rsi_value):
+            rsi_value = 50.0
         if rsi_signal == 'OVERSOLD':
             indicator_scores.append(1.0)    # Oversold → bullish
         elif rsi_signal == 'OVERBOUGHT':
             indicator_scores.append(-1.0)   # Overbought → bearish
         else:
-            indicator_scores.append(0.0)    # NEUTRAL
+            # Continuous tilt: RSI 50 = neutral, 30 = mild bullish, 70 = mild bearish.
+            # Map [30, 70] linearly to [+0.5, -0.5] so the score reflects how close
+            # we are to the threshold. Clamp to [-0.5, +0.5] for non-extreme region.
+            tilt = (50.0 - rsi_value) / 40.0  # 30→+0.5, 70→-0.5, 50→0
+            indicator_scores.append(max(-0.5, min(0.5, tilt)))
 
         # MACD: +1 (bullish), -1 (bearish), ±0.5 (cross)
         macd_signal = signals['indicators'].get('macd', 'NEUTRAL')
+        macd_hist_val = float(latest.get('macd_hist', 0.0) or 0.0)
+        close_val = float(latest['close'])
+        # Histogram magnitude relative to price gives continuous strength
+        # Use a scaling factor that maps typical hist magnitudes (~0.1% of price)
+        # to the [0, 0.5] range so it's meaningful but doesn't dominate.
+        macd_tilt = 0.0
+        if close_val > 0 and not pd.isna(macd_hist_val):
+            # Scale histogram by 1000/close so magnitude lives in a usable range.
+            # Typical macd_hist for crypto IDR pairs: 0.01-1.0% of close.
+            macd_tilt = max(-0.4, min(0.4, macd_hist_val / close_val * 200.0))
+
         if macd_signal == 'BULLISH_CROSS':
             indicator_scores.append(1.0)
         elif macd_signal == 'BEARISH_CROSS':
             indicator_scores.append(-1.0)
         elif macd_signal == 'BULLISH':
-            indicator_scores.append(0.5)
+            # Base 0.3 + continuous histogram tilt → varies in [0.0, 0.7]
+            indicator_scores.append(0.3 + max(0.0, macd_tilt))
         elif macd_signal == 'BEARISH':
-            indicator_scores.append(-0.5)
+            # Base -0.3 + continuous histogram tilt → varies in [-0.7, 0.0]
+            indicator_scores.append(-0.3 + min(0.0, macd_tilt))
         else:
             indicator_scores.append(0.0)
 
         # MA Trend: +1 (bullish alignment), -1 (bearish alignment)
         ma_signal = signals['indicators'].get('ma_trend', 'NEUTRAL')
+        sma_20 = float(latest.get('sma_20', close_val) or close_val)
+        # Continuous: distance from SMA20 as percentage, clipped.
+        ma_tilt = 0.0
+        if sma_20 > 0 and not pd.isna(sma_20):
+            ma_tilt = max(-0.5, min(0.5, (close_val - sma_20) / sma_20 * 25.0))
         if ma_signal == 'BULLISH':
             indicator_scores.append(1.0)
         elif ma_signal == 'BEARISH':
             indicator_scores.append(-1.0)
         else:
-            indicator_scores.append(0.0)
+            # NEUTRAL: use proximity to SMA20 as soft tilt
+            indicator_scores.append(ma_tilt)
 
         # Bollinger Bands: +1 (oversold at lower band), -1 (overbought at upper band)
         bb_signal = signals['indicators'].get('bb', 'NEUTRAL')
+        bb_upper = float(latest.get('bb_upper', close_val) or close_val)
+        bb_lower = float(latest.get('bb_lower', close_val) or close_val)
+        bb_middle = float(latest.get('bb_middle', close_val) or close_val)
+        # %B-style position within bands: -1 at lower, 0 at middle, +1 at upper
+        bb_tilt = 0.0
+        bb_range = bb_upper - bb_lower
+        if bb_range > 0:
+            # Position relative to middle, scaled into [-0.5, +0.5] for non-extreme cases.
+            # Note inverted sign: closer to LOWER → bullish (+), closer to UPPER → bearish (-)
+            pos = (close_val - bb_middle) / (bb_range / 2.0)
+            bb_tilt = max(-0.5, min(0.5, -pos * 0.5))
         if bb_signal == 'OVERSOLD':
             indicator_scores.append(1.0)
         elif bb_signal == 'OVERBOUGHT':
             indicator_scores.append(-1.0)
         else:
-            indicator_scores.append(0.0)
+            indicator_scores.append(bb_tilt)
 
         # Volume: directional confirmation
         vol_signal = signals['indicators'].get('volume', 'NORMAL')
@@ -376,7 +424,12 @@ class TechnicalAnalysis:
             else:
                 indicator_scores.append(-0.5)  # High volume + price down = bearish
         else:
-            indicator_scores.append(0.0)        # Normal volume = no confirmation
+            # Continuous tilt from price change vs prev (small influence even at normal vol)
+            try:
+                pct = (close_val - float(prev['close'])) / float(prev['close']) if float(prev['close']) > 0 else 0
+                indicator_scores.append(max(-0.2, min(0.2, pct * 5.0)))
+            except (TypeError, ZeroDivisionError, ValueError):
+                indicator_scores.append(0.0)
 
         # Calculate weighted average strength (-1.0 to +1.0)
         num_indicators = len(indicator_scores)

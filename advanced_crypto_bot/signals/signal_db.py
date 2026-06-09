@@ -62,6 +62,24 @@ class SignalDatabase:
         finally:
             if conn is not None:
                 conn.close()
+
+    def checkpoint_wal(self, mode: str = "PASSIVE") -> bool:
+        """
+        Force WAL checkpoint to flush WAL frames into the main DB file.
+        Bug HIGH #6 (audit 2026-06-07): panggil sebelum hard exit untuk
+        meminimalkan corruption risk dari `os._exit(3)` di health monitor.
+        """
+        try:
+            conn = sqlite3.connect(self.db_path, timeout=5.0)
+            try:
+                row = conn.execute(f"PRAGMA wal_checkpoint({mode})").fetchone()
+                logger.info(f"💾 WAL checkpoint ({mode}) for {self.db_path}: {row}")
+                return True
+            finally:
+                conn.close()
+        except Exception as e:
+            logger.warning(f"⚠️ WAL checkpoint failed for {self.db_path}: {e}")
+            return False
     
     @contextmanager
     def get_connection(self, autocommit: bool = False):

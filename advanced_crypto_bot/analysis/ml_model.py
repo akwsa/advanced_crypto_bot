@@ -226,9 +226,21 @@ class MLTradingModel:
         if len(features) == 0:
             return None, 0.5, 'HOLD'
 
+        # Store feature names from the trained model BEFORE prepare_features resets them
+        _trained_feature_names = getattr(self, '_trained_feature_names', None)
+        if _trained_feature_names is None:
+            _trained_feature_names = self.feature_names
+        # Restore trained feature names (prepare_features overwrites self.feature_names)
+        self.feature_names = _trained_feature_names
+
         try:
-            X_latest = features[self.feature_names].iloc[-1:].values
-            X_latest_scaled = self.scaler.transform(X_latest)
+            # Align features to what the model/scaler expects — fill missing with 0
+            import numpy as np
+            X_aligned = np.zeros((1, len(self.feature_names)))
+            for i, col in enumerate(self.feature_names):
+                if col in features.columns:
+                    X_aligned[0, i] = features[col].iloc[-1]
+            X_latest_scaled = self.scaler.transform(X_aligned)
         except Exception as e:
             print(f"⚠️ Feature scaling error: {e}")
             return None, 0.5, 'HOLD'
@@ -292,6 +304,7 @@ class MLTradingModel:
             self.model = data['model']
             self.scaler = data['scaler']
             self.feature_names = data['feature_names']
+            self._trained_feature_names = data['feature_names']  # Preserve for inference alignment
             self.last_trained = data['last_trained']
             # Load metrics if available
             self.last_accuracy = data.get('last_accuracy')

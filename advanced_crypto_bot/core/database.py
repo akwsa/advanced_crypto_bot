@@ -75,6 +75,36 @@ class Database:
             self._local.connection.close()
             self._local.connection = None
 
+    def checkpoint_wal(self, mode: str = "PASSIVE") -> bool:
+        """
+        Force WAL checkpoint to flush all WAL frames into the main DB file.
+
+        Bug HIGH #6 (audit 2026-06-07): `os._exit(3)` di health monitor
+        skip cleanup → WAL bisa tertinggal frame yang belum di-checkpoint.
+        Walau SQLite recovery biasanya menanganinya saat next open, panggil
+        ini sebelum hard exit untuk meminimalkan window corruption risk.
+
+        Modes (per SQLite docs):
+        - PASSIVE: tidak block writer, mungkin tidak full-checkpoint.
+        - FULL: tunggu sampai semua frame ter-checkpoint.
+        - RESTART: FULL + restart WAL file dari awal.
+        - TRUNCATE: RESTART + truncate WAL file ke 0 byte.
+
+        Returns True on success, False on error.
+        """
+        try:
+            conn = sqlite3.connect(self.db_path, timeout=5.0, check_same_thread=False)
+            try:
+                # PRAGMA wal_checkpoint returns (busy, log, checkpointed)
+                row = conn.execute(f"PRAGMA wal_checkpoint({mode})").fetchone()
+                logger.info(f"💾 WAL checkpoint ({mode}) for {self.db_path}: {row}")
+                return True
+            finally:
+                conn.close()
+        except Exception as e:
+            logger.warning(f"⚠️ WAL checkpoint failed for {self.db_path}: {e}")
+            return False
+
     def _vacuum_database(self):
         """Run VACUUM outside transaction using a dedicated autocommit connection.
         FIX: Tidak pakai self._lock — VACUUM butuh exclusive DB lock sendiri,
@@ -1001,9 +1031,22 @@ class Database:
     def create_trade_review(self, conn, trade, exit_price, pnl_pct, exit_reason=None):
         """Create automatic trade review when a trade is closed.
         Requires an active connection (conn) because it's called inside close_trade.
+
+        Bug HIGH #5 (audit 2026-06-07): trade review duplikat 4-8x per trade.
+        Walau tabel pakai PRIMARY KEY trade_id + INSERT OR REPLACE (jadi tidak
+        ada row duplicate), method ini bisa dipanggil multi kali untuk trade
+        yang sama (partial→full close, retry, dll) → CPU waste + log noise +
+        adaptive learning bisa pakai data yang berbeda dari panggilan terakhir.
+        Idempotency guard: skip kalau review sudah ada untuk trade_id ini.
         """
         try:
             cursor = conn.cursor()
+            trade_id = trade['id']
+            # Idempotency: cek review existing dulu
+            cursor.execute('SELECT 1 FROM trade_reviews WHERE trade_id = ? LIMIT 1', (trade_id,))
+            if cursor.fetchone() is not None:
+                logger.debug(f"⏭️ Trade review already exists for trade {trade_id}, skipping (idempotent)")
+                return
             pair = trade['pair']
             entry_price = float(trade['price'] or 0)
             opened_at = trade['opened_at']
@@ -1294,6 +1337,54 @@ class Database:
                 WHERE user_id = ? AND is_active = 1
             ''', (user_id,))
             return cursor.fetchone()['cnt']
+
+    def set_watchlist_active(self, user_id: int, pair: str, is_active: bool = True):
+        """Set active/inactive status for a pair in user's watchlist."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                UPDATE watchlist SET is_active = ?
+                WHERE user_id = ? AND pair = ?
+            ''', (1 if is_active else 0, user_id, pair.lower().strip()))
+            return cursor.rowcount > 0
+
+    def bulk_upsert_watchlist(self, user_id: int, pairs: list):
+        """Bulk insert/update active pairs for a user, deactivating all others first.
+        
+        This is atomic: all existing pairs for this user are set inactive,
+        then the provided pairs are upserted with is_active=1.
+        Returns (deactivated_count, activated_count).
+        """
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            # Count and deactivate all current active pairs
+            cursor.execute('''
+                SELECT COUNT(*) as cnt FROM watchlist
+                WHERE user_id = ? AND is_active = 1
+            ''', (user_id,))
+            deactivated = cursor.fetchone()['cnt']
+            
+            cursor.execute('''
+                UPDATE watchlist SET is_active = 0
+                WHERE user_id = ?
+            ''', (user_id,))
+            
+            # Upsert new pairs as active
+            activated = 0
+            for pair in pairs:
+                pair_clean = pair.lower().strip()
+                cursor.execute('''
+                    INSERT INTO watchlist (user_id, pair, is_active)
+                    VALUES (?, ?, 1)
+                    ON CONFLICT(user_id, pair) DO UPDATE SET is_active = 1
+                ''', (user_id, pair_clean))
+                activated += 1
+            
+            logger.info(
+                "🔄 Watchlist bulk refresh: %d deactivated, %d activated for user %d",
+                deactivated, activated, user_id
+            )
+            return deactivated, activated
 
     # Auto-trade mode persistence
     def upsert_telegram_user(self, user_id: int, username: str = None, first_name: str = None, role: str = 'user', is_active: int = 1, invite_code: str = None, blocked_reason: str = None):

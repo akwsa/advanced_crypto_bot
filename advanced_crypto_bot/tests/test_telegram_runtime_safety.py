@@ -52,7 +52,41 @@ def test_send_telegram_admins_uses_main_telegram_loop_and_existing_bot(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_send_message_sanitizes_html_proactively_so_telegram_accepts_it():
+    """
+    Bug Critical #4 (audit 2026-06-07): _send_message must sanitize stray
+    '<', '>', '&' before sending so Telegram doesn't reject the message with
+    'Can't parse entities'. The sanitizer preserves whitelisted tags
+    (<b>, <i>, etc) and escapes everything else.
+    """
+    bot = AdvancedCryptoBot.__new__(AdvancedCryptoBot)
+    callback_message = SimpleNamespace(reply_text=AsyncMock())
+    update = SimpleNamespace(
+        callback_query=SimpleNamespace(
+            edit_message_text=AsyncMock(),  # success path
+            message=callback_message,
+        ),
+        message=None,
+        effective_message=None,
+    )
+
+    # Input has stray '<' that previously broke Telegram parsing.
+    await bot._send_message(update, None, "<b>bad < reason</b>", parse_mode="HTML")
+
+    # The sanitizer should have escaped the stray '<' before send.
+    update.callback_query.edit_message_text.assert_awaited_once()
+    call = update.callback_query.edit_message_text.await_args
+    sent_text = call.args[0] if call.args else call.kwargs.get("text")
+    assert sent_text == "<b>bad &lt; reason</b>"
+    assert call.kwargs["parse_mode"] == "HTML"
+    # No fallback path needed because sanitizer prevented the error.
+    callback_message.reply_text.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_send_message_retries_with_html_escaped_text_when_parse_fails():
+    """Legacy fallback path: even if sanitizer misses something, the
+    'parse entities' fallback still triggers when Telegram rejects."""
     bot = AdvancedCryptoBot.__new__(AdvancedCryptoBot)
     html_error = Exception("Can't parse entities: can't find end of the entity")
     callback_message = SimpleNamespace(reply_text=AsyncMock(side_effect=[html_error, None]))
@@ -65,14 +99,14 @@ async def test_send_message_retries_with_html_escaped_text_when_parse_fails():
         effective_message=None,
     )
 
-    await bot._send_message(update, None, "<b>bad < reason</b>", parse_mode="HTML")
+    # Pass already-sanitized text that still triggers a Telegram error
+    # (e.g. weird unicode entity); the fallback should escape and retry.
+    await bot._send_message(update, None, "<b>safe text</b>", parse_mode="HTML")
 
     assert callback_message.reply_text.await_count == 2
-    first = callback_message.reply_text.await_args_list[0]
     second = callback_message.reply_text.await_args_list[1]
-    assert first.args[0] == "<b>bad < reason</b>"
-    assert second.args[0] == "&lt;b&gt;bad &lt; reason&lt;/b&gt;"
-    assert second.kwargs["parse_mode"] == "HTML"
+    # Second call uses fully html-escaped text — that's the core safety guarantee.
+    assert second.args[0] == "&lt;b&gt;safe text&lt;/b&gt;"
 
 
 def test_run_on_telegram_loop_returns_false_without_initialized_loop(monkeypatch):

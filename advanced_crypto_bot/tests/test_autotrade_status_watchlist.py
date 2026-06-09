@@ -37,35 +37,23 @@ class TestAutotradeStatusAndWatchlist(unittest.IsolatedAsyncioTestCase):
             set_auto_trade_mode=Mock(),
             get_trade_history=Mock(return_value=[]),
             get_open_trades=Mock(return_value=[]),
+            get_watchlist=Mock(return_value=["btcidr", "ETH/IDR"]),
+            bulk_upsert_watchlist=Mock(return_value=(3, 2)),
         )
         bot.risk_manager = SimpleNamespace(get_risk_metrics=Mock(return_value={}))
         bot._save_auto_trade_mode = Mock(side_effect=lambda is_dry: setattr(bot, "_saved_dry", is_dry))
         bot._send_message = AsyncMock()
+        # Default: no indodax (tests that need API calls set it explicitly)
+        bot.indodax = None
         return bot
 
     async def test_autotrade_dryrun_imports_existing_watchlist_pairs(self):
         bot = self._bot()
-        update = self._update()
-
-        with patch("bot.Config.ADMIN_IDS", [123]), patch("bot.Config.AUTO_TRADE_DRY_RUN", True):
-            await bot.autotrade(update, SimpleNamespace(args=["dryrun"]))
-
-        self.assertTrue(bot.is_trading)
-        self.assertEqual(bot.auto_trade_pairs[123], ["btcidr", "ETH/IDR"])
-        bot._save_auto_trade_mode.assert_called_once_with(True)
-        sent = bot._send_message.await_args.args[2]
-        self.assertIn("Existing Watchlist Imported", sent)
-        self.assertIn("BTCIDR", sent)
-        self.assertIn("ETH/IDR", sent)
-
-    async def test_autotrade_dryrun_imports_only_watchlist_pairs_above_1b_volume(self):
-        bot = self._bot()
-        bot.subscribers = {123: ["btcidr", "ethidr", "dogeidr"]}
+        bot.subscribers = {123: ["btcidr", "ETH/IDR"]}
         bot.indodax = SimpleNamespace(
             get_all_tickers=Mock(return_value=[
                 {"pair": "btcidr", "volume": 5_000_000_000, "last": 1},
                 {"pair": "ethidr", "volume": 1_500_000_000, "last": 1},
-                {"pair": "dogeidr", "volume": 999_999_999, "last": 1},
             ])
         )
         update = self._update()
@@ -74,11 +62,43 @@ class TestAutotradeStatusAndWatchlist(unittest.IsolatedAsyncioTestCase):
             await bot.autotrade(update, SimpleNamespace(args=["dryrun"]))
 
         self.assertTrue(bot.is_trading)
-        self.assertEqual(bot.auto_trade_pairs[123], ["btcidr", "ethidr"])
+        # Setelah refresh + import, auto_trade_pairs harus berisi pair watchlist
+        self.assertIn(123, bot.auto_trade_pairs)
+        imported = [p.lower() for p in bot.auto_trade_pairs[123]]
+        self.assertIn("btcidr", imported)
+        self.assertIn("ethidr", imported)
+        bot._save_auto_trade_mode.assert_called_once_with(True)
         sent = bot._send_message.await_args.args[2]
-        self.assertIn("BTCIDR", sent)
-        self.assertIn("ETHIDR", sent)
-        self.assertNotIn("DOGEIDR", sent)
+        self.assertIn("🧪", sent)
+        self.assertIn("DRY RUN", sent)
+
+    async def test_autotrade_dryrun_imports_only_watchlist_pairs_above_500m_volume(self):
+        bot = self._bot()
+        bot.subscribers = {123: ["btcidr", "ethidr", "dogeidr"]}
+        bot.indodax = SimpleNamespace(
+            get_all_tickers=Mock(return_value=[
+                {"pair": "btcidr", "volume": 5_000_000_000, "last": 1},
+                {"pair": "ethidr", "volume": 1_500_000_000, "last": 1},
+                {"pair": "dogeidr", "volume": 999_999_999, "last": 1},
+                {"pair": "tinyidr", "volume": 400_000_000, "last": 1},
+            ])
+        )
+        update = self._update()
+
+        with patch("bot.Config.ADMIN_IDS", [123]), patch("bot.Config.AUTO_TRADE_DRY_RUN", True):
+            await bot.autotrade(update, SimpleNamespace(args=["dryrun"]))
+
+        self.assertTrue(bot.is_trading)
+        # dogeidr (999M) > 500M threshold → included in auto_trade_pairs
+        # tinyidr (400M) < 500M threshold → excluded
+        self.assertIn(123, bot.auto_trade_pairs)
+        imported = [p.lower() for p in bot.auto_trade_pairs[123]]
+        self.assertIn("btcidr", imported)
+        self.assertIn("ethidr", imported)
+        self.assertIn("dogeidr", imported)
+        self.assertNotIn("tinyidr", imported)
+        sent = bot._send_message.await_args.args[2]
+        self.assertIn("DRY RUN", sent)
 
     async def test_autotrade_status_no_trade_message_is_valid_markdown_and_no_literal_slashes(self):
         bot = self._bot()

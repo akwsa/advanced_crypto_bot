@@ -159,6 +159,7 @@ def register_bot_handlers(bot):
         ("unwatch", bot.unwatch),
         ("list", bot.list_watch),
         ("clear_watchlist", bot.clear_watchlist),
+        ("refresh_watchlist", bot.refresh_watchlist),
         ("cleanup_signals", bot.cleanup_signals),
         ("backfill_performance", bot.backfill_performance),
         ("reset_skip", bot.reset_skip),

@@ -92,3 +92,9 @@ advanced_crypto_bot/signals/*.backup*
 advanced_crypto_bot/deprecated.archived/
 advanced_crypto_bot/_archive/
 advanced_crypto_bot/tmp/
+
+# Vendored external project (separate codebase, not part of bot)
+advanced_crypto_bot/Meridian-main/
+
+# Local audit/notes outside bot directory (workspace-level only)
+/audit_autotrade_*.md

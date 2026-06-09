@@ -149,6 +149,25 @@ def _simple_strength_label(strength):
     return "netral"
 
 
+def _format_volume_compact(value):
+    """Format volume IDR menjadi compact: 2.5M, 1.2B, 500K, dsb."""
+    if value is None or value == 0:
+        return "—"  # Tampilkan "—" agar user tahu volume tidak tersedia
+    value = float(value)
+    if value <= 0:
+        return "—"
+    if value >= 1_000_000_000:
+        v = value / 1_000_000_000
+        return f"Rp{v:.1f}B".replace(".0B", "B")
+    if value >= 1_000_000:
+        v = value / 1_000_000
+        return f"Rp{v:.1f}M".replace(".0M", "M")
+    if value >= 1_000:
+        v = value / 1_000
+        return f"Rp{v:.0f}K"
+    return f"Rp{value:,.0f}"
+
+
 def _safe_text(value):
     if value is None:
         return "N/A"
@@ -208,9 +227,10 @@ def format_signal_message(signal):
     else:
         perf_indicator = f"➡️ Netral"
 
-    final_gate_line = f"\n\n🛡️ Final Gate: `{final_gate_source}`" if final_gate_source else ""
+    volume_label = _format_volume_compact(signal.get("volume_24h"))
 
     return f"""{trend_icon} Signal Alert — {alert_marker} {pair.upper()} {alert_marker}
+Vol: {volume_label}
 {_display_badge(theme, signal)} {gain_icon}
 💡 Action: {theme['action']}
 📊 {perf_indicator}
@@ -231,7 +251,7 @@ def format_signal_message(signal):
 {sr_section}
 
 📝 Analysis:
-_{reason}_{final_gate_line}
+_{reason}_
 ⏰ `{timestamp.strftime('%H:%M:%S')}`
         """
 
@@ -305,13 +325,9 @@ def format_signal_message_html(signal):
         perf_indicator = f"➡️ Netral"
 
     pair_text = _safe_text(pair.upper())
+    volume_label = _format_volume_compact(signal.get("volume_24h"))
+    volume_suffix = f"  Vol: {volume_label}"
     reason_text = _safe_text(reason)
-    final_gate_text = _safe_text(final_gate_source) if final_gate_source else ""
-    final_gate_line = (
-        f"\n\n🛡️ Filter akhir: <code>{final_gate_text}</code>"
-        if final_gate_source
-        else ""
-    )
     strength_label = _simple_strength_label(combined_strength)
 
     # ── Quant section (GARCH / VaR / ARIMA) ──────────────────────────────
@@ -337,7 +353,7 @@ def format_signal_message_html(signal):
             quant_section = "\n\n📐 Quant Analysis\n" + "\n".join(parts)
     # ── End quant section ─────────────────────────────────────────────────
 
-    return f"""{signal_emoji} {pair_text}
+    return f"""{signal_emoji} {pair_text}{volume_suffix}
 Keputusan: {_display_badge(theme, signal)} {gain_icon}
 
 Saran: {escape(theme['action'])}
@@ -355,7 +371,7 @@ Indikator utama
 {sr_section}{quant_section}
 
 Catatan bot
-<i>{reason_text}</i>{final_gate_line}
+<i>{reason_text}</i>
 ⏰ <code>{timestamp.strftime('%H:%M:%S')}</code>
         """
 
