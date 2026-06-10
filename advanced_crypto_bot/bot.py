@@ -420,7 +420,6 @@ class AdvancedCryptoBot:
 
         # NEW: Start FastAPI Dashboard (revamp v2 — port 8091)
         try:
-            import threading
             import uvicorn
             from dashboard_api.main import app as dashboard_app
             api_port = int(os.getenv("DASHBOARD_API_PORT", "8091"))
