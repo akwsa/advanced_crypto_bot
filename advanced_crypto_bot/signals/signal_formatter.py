@@ -195,7 +195,7 @@ def format_signal_message(signal):
     if support_1 > 0 or resistance_1 > 0:
         sr_section = f"""
 🎯 Support/Resistance:
-• S: `{Utils.format_price(support_1)}`   • R: `{Utils.format_price(resistance_1)}`"""
+- S: `{Utils.format_price(support_1)}`   - R: `{Utils.format_price(resistance_1)}`"""
 
     strength_bar = generate_strength_bar_plain(combined_strength)
 
@@ -238,9 +238,9 @@ Vol: {volume_label}
 💰 Current Price: `{Utils.format_price(price)}` IDR
 
 📊 Signal Metrics:
-• Combined Strength: `{strength_bar}` `{combined_strength:+.2f}`
-• ML Confidence (final): `{ml_confidence:.1%}`
-• ML Raw (pre-adjust): `{ml_confidence_raw:.1%}`
+- Combined Strength: `{strength_bar}` `{combined_strength:+.2f}`
+- ML Confidence (final): `{ml_confidence:.1%}`
+- ML Raw (pre-adjust): `{ml_confidence_raw:.1%}`
 
 📈 Technical Indicators:
 {rsi_emoji} RSI (14): `{rsi_val}`
@@ -285,8 +285,8 @@ def format_signal_message_html(signal):
         r2 = Utils.format_price(resistance_2) if resistance_2 > 0 else '—'
         sr_section = f"""
 🎯 Support/Resistance:
-• S1: <code>{s1}</code>   • S2: <code>{s2}</code>
-• R1: <code>{r1}</code>   • R2: <code>{r2}</code>
+- S1: <code>{s1}</code>   - S2: <code>{s2}</code>
+- R1: <code>{r1}</code>   - R2: <code>{r2}</code>
 
 📍 Zona Harga: {_safe_text(price_zone)}
 ⚖️ Risk/Reward: {rr_ratio:.2f}"""
@@ -328,10 +328,7 @@ def format_signal_message_html(signal):
     volume_label = _format_volume_compact(signal.get("volume_24h"))
     volume_suffix = f"  Vol: {volume_label}"
     reason_text = _safe_text(reason)
-<<<<<<< Updated upstream
-=======
     # "Filter akhir" removed — info sudah ada di Catatan bot
->>>>>>> Stashed changes
     strength_label = _simple_strength_label(combined_strength)
 
     # ── Quant section (GARCH / VaR / ARIMA) ──────────────────────────────
@@ -357,9 +354,6 @@ def format_signal_message_html(signal):
             quant_section = "\n\n📐 Quant Analysis\n" + "\n".join(parts)
     # ── End quant section ─────────────────────────────────────────────────
 
-<<<<<<< Updated upstream
-    return f"""{signal_emoji} {pair_text}{volume_suffix}
-=======
     # Volume info for header
     volume_24h = signal.get("volume_24h") or indicators.get("volume_24h")
     volume_text = ""
@@ -378,16 +372,15 @@ def format_signal_message_html(signal):
             pass
 
     return f"""{signal_emoji} {pair_text}{volume_text}
->>>>>>> Stashed changes
 Keputusan: {_display_badge(theme, signal)} {gain_icon}
 
 Saran: {escape(theme['action'])}
 Harga: <code>{Utils.format_price(price)}</code> IDR
 
 Ringkasan
-• Keyakinan bot: <code>{confidence_pct}%</code>
-• Tenaga sinyal: <code>{combined_strength:+.2f}</code> ({strength_label})
-• Arah cepat: {perf_indicator}
+- Keyakinan bot: <code>{confidence_pct}%</code>
+- Tenaga sinyal: <code>{combined_strength:+.2f}</code> ({strength_label})
+- Arah cepat: {perf_indicator}
 
 Indikator utama
 {rsi_emoji} RSI: <code>{_safe_text(rsi_val)}</code>   {macd_emoji} MACD: <code>{_safe_text(macd_val)}</code>
