@@ -408,14 +408,35 @@ class AdvancedCryptoBot:
             logger.warning(f"⚠️ Adaptive Learning init failed: {e}")
             self._adaptive_engine = None
 
-        # NEW: Start TMA Dashboard Server
+        # NEW: Start TMA Dashboard Server (legacy, port 8090 to avoid code-server conflict)
         try:
             from api.tma_server import start_tma_server
-            self._tma_server = start_tma_server(self.db, port=8080)
-            logger.info("📱 TMA Dashboard server started on http://0.0.0.0:8080")
+            tma_port = int(os.getenv("TMA_DASHBOARD_PORT", "8090"))
+            self._tma_server = start_tma_server(self.db, port=tma_port)
+            logger.info(f"📱 TMA Dashboard server started on http://0.0.0.0:{tma_port}")
         except Exception as e:
             logger.warning(f"⚠️ TMA server init failed: {e}")
             self._tma_server = None
+
+        # NEW: Start FastAPI Dashboard (revamp v2 — port 8091)
+        try:
+            import threading
+            import uvicorn
+            from dashboard_api.main import app as dashboard_app
+            api_port = int(os.getenv("DASHBOARD_API_PORT", "8091"))
+
+            def _run_dashboard_api():
+                config = uvicorn.Config(
+                    dashboard_app, host="0.0.0.0", port=api_port,
+                    log_level="warning", access_log=False,
+                )
+                server = uvicorn.Server(config)
+                server.run()
+
+            threading.Thread(target=_run_dashboard_api, daemon=True, name="DashboardAPI").start()
+            logger.info(f"🌐 Dashboard API v2 starting on http://0.0.0.0:{api_port}")
+        except Exception as e:
+            logger.warning(f"⚠️ Dashboard API v2 failed: {e}")
 
     def _load_watchlist_from_db(self) -> Dict[int, List[str]]:
         """Load watchlist from database on startup"""
