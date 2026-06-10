@@ -1099,7 +1099,7 @@ async def check_trading_opportunity(bot, pair, signal=None):
 async def analyze_market_intelligence(bot, pair, current_price):
     result = {
         "volume_spike": False,
-        "volume_ratio": 1.0,
+        "volume_ratio": 0.0,  # 0.0 = no data (bukan 1.0 yang misleading)
         "orderbook_pressure": "NEUTRAL",
         "buy_sell_ratio": 1.0,
         "overall_signal": "NEUTRAL",
@@ -1116,6 +1116,12 @@ async def analyze_market_intelligence(bot, pair, current_price):
                     if volume_ratio >= Config.MI_VOLUME_SPIKE_MIN:
                         result["volume_spike"] = True
                         logger.info(f"📊 Volume spike detected for {pair}: {volume_ratio:.2f}x")
+                else:
+                    logger.debug(f"📊 Volume data for {pair}: avg_volume=0 (insufficient history)")
+            else:
+                logger.debug(f"📊 Volume data for {pair}: only {len(df)} candles (need 20+)")
+        else:
+            logger.debug(f"📊 Volume data for {pair}: no historical data in memory")
 
         try:
             orderbook = bot.indodax.get_orderbook(pair, limit=20)
@@ -1125,8 +1131,34 @@ async def analyze_market_intelligence(bot, pair, current_price):
                 bot._update_heatmap(pair, raw_bids, raw_asks)
                 cleaned_bids, cleaned_asks, spoof_detected = bot._detect_spoofing(pair, raw_bids, raw_asks)
                 result["spoof_detected"] = spoof_detected
-                bids = cleaned_bids if cleaned_bids else raw_bids[:10]
-                asks = cleaned_asks if cleaned_asks else raw_asks[:10]
+                # BUG FIX 2026-06-10: detect_spoofing return prices yang sudah
+                # di-round ke ribuan (round(price, -3)), merusak presisi harga
+                # untuk pair low-cap. Ini menyebabkan spread negatif (bid > ask)
+                # karena best_bid jadi ribuan terdekat ke ATAS, sementara ask asli
+                # tetap presisi. Contoh: bid=571 -> round=1000, best_ask=574 ->
+                # spread -54%.
+                #
+                # Solusi: spread calculation tetap pakai RAW orderbook (cuma
+                # filter price <= 0). Spoof detection tetap jalan untuk logging
+                # dan alert tapi tidak mempengaruhi entry decision.
+                raw_bids_clean = raw_bids[:10]
+                raw_asks_clean = raw_asks[:10]
+                # Filter out invalid prices (harga ≤ 0) dari raw data
+                # Pattern sama dengan spread guard di bawah: try/except float
+                def _price_valid(level):
+                    try:
+                        return float(level[0]) > 0
+                    except (TypeError, ValueError, IndexError):
+                        return False
+                raw_bids_clean = [lv for lv in raw_bids_clean if _price_valid(lv)]
+                raw_asks_clean = [lv for lv in raw_asks_clean if _price_valid(lv)]
+                if raw_bids_clean and raw_asks_clean:
+                    bids = raw_bids_clean
+                    asks = raw_asks_clean
+                else:
+                    # Fallback: cleaned data (mungkin tidak ada data raw yang valid)
+                    bids = cleaned_bids if cleaned_bids else raw_bids[:10]
+                    asks = cleaned_asks if cleaned_asks else raw_asks[:10]
 
                 def _orderbook_notional(levels):
                     total = 0.0

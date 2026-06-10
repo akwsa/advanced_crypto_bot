@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed - 2026-06-10 (Spread negatif: root cause `detect_spoofing` rusak data orderbook)
+**Konteks:** Setelah MI threshold tuning (commit ee83a46) di-deploy ke VM, bot tetap 0 entry DRY RUN. Dari log ditemukan **spread negatif** dan **volume ratio selalu 1.0** untuk SEMUA pair. Investigasi mengungkap 2 root cause.
+
+**Bug #1 — Spread negatif (akibat `detect_spoofing`):**
+`analyze_market_intelligence()` di runtime.py melewatkan orderbook melalui `_detect_spoofing()`, yang menggunakan `round(price, -3)` untuk mengelompokkan harga per level ribuan. Untuk pair low-cap (~300-3000 IDR), rounding ini menghilangkan presisi harga asli:
+- bid asli 571 → `round(571, -3)` = 1000
+- ask asli 574 → tetap 574
+- spread = (1000-574)/(787) = **-54%** (bid > ask = crossed market, impossible)
+
+Contoh dari log VM (semua spread negatif terverifikasi sebagai false positive):
+- `gweiidr: bid=3,000 ask=2,989` (asli: ~2,979 vs ~2,989 — spread positif)
+- `homeidr: bid=1,000 ask=574` (asli: ~571 vs ~575 — spread positif)
+- `usdtidr: bid=18,000 ask=17,974` (asli: ~17,937 vs ~17,938)
+- `xrpidr: bid=21,000 ask=20,358` (asli: ~20,350 vs ~20,358)
+
+**Fix:** `analyze_market_intelligence()` sekarang menggunakan **raw orderbook data** untuk spread calculation, bukan data yang sudah di-cleaning oleh `detect_spoofing`. Spoof detection tetap jalan untuk logging tapi tidak mempengaruhi entry decision. Raw data tetap difilter price ≤ 0 (guard existing).
+
+**Bug #2 — Volume ratio selalu 1.0 (misleading default):**
+Ketika `historical_data` tidak mengandung pair (belum di-preload atau blum di-update oleh price_poller), volume_ratio default = 1.0 yang misleading karena memberi kesan tidak ada anomaly padahal data tidak tersedia.
+
+**Fix:** Default volume_ratio diubah dari 1.0 ke 0.0. Ditambah logging DEBUG untuk explain kenapa volume tidak dihitung (no data / terlalu sedikit candles).
+
 ### Fixed - 2026-06-09 (Autotrade DRY RUN follow-up #2: MI filter terlalu strict)
 **Konteks:** Setelah fix `pre_sr_recommendation` (commit 1b92bb6) di-deploy, autotrade SUDAH lulus filter pipeline (Quality Engine + SR Validation di-bypass via pre_sr_recommendation snapshot pre-filter). Tapi di sample 2 menit di VM, **26 dari 48 scan (54%) di-block oleh Market Intelligence filter** dengan reason `Signal=NEUTRAL`, walau pre_sr_recommendation = STRONG_BUY.
 
