@@ -1107,19 +1107,30 @@ async def analyze_market_intelligence(bot, pair, current_price):
     try:
         if pair in bot.historical_data and not bot.historical_data[pair].empty:
             df = bot.historical_data[pair]
-            if len(df) >= 20:
-                current_volume = df["volume"].iloc[-1]
-                avg_volume = df["volume"].iloc[-20:].mean()
-                if avg_volume > 0:
-                    volume_ratio = current_volume / avg_volume
-                    result["volume_ratio"] = round(volume_ratio, 2)
-                    if volume_ratio >= Config.MI_VOLUME_SPIKE_MIN:
-                        result["volume_spike"] = True
-                        logger.info(f"📊 Volume spike detected for {pair}: {volume_ratio:.2f}x")
+            # 2026-06-10: volume_ratio fix.
+            # Field `volume` di historical_data adalah volume_24h dari ticker
+            # (rolling 24h window) yang di-append berulang per poll. Akibatnya
+            # 20 candle terakhir punya volume ~sama → ratio ≈ 1.0 (palsu).
+            # Solusi: pakai DELTA volume_24h antar candle = trade baru dalam
+            # window poll. Volume_24h kadang turun (trade lama drop out window)
+            # → clip ke 0 supaya tidak negatif.
+            if len(df) >= 21:  # need 21 = 20 deltas + 1 anchor
+                volume_delta = df["volume"].diff().clip(lower=0).dropna()
+                if len(volume_delta) >= 20:
+                    current_volume = float(volume_delta.iloc[-1])
+                    avg_volume = float(volume_delta.iloc[-20:].mean())
+                    if avg_volume > 0:
+                        volume_ratio = current_volume / avg_volume
+                        result["volume_ratio"] = round(volume_ratio, 2)
+                        if volume_ratio >= Config.MI_VOLUME_SPIKE_MIN:
+                            result["volume_spike"] = True
+                            logger.info(f"📊 Volume spike detected for {pair}: {volume_ratio:.2f}x")
+                    else:
+                        logger.debug(f"📊 Volume data for {pair}: avg_delta=0 (no recent trades)")
                 else:
-                    logger.debug(f"📊 Volume data for {pair}: avg_volume=0 (insufficient history)")
+                    logger.debug(f"📊 Volume data for {pair}: only {len(volume_delta)} deltas (need 20+)")
             else:
-                logger.debug(f"📊 Volume data for {pair}: only {len(df)} candles (need 20+)")
+                logger.debug(f"📊 Volume data for {pair}: only {len(df)} candles (need 21+ for delta)")
         else:
             logger.debug(f"📊 Volume data for {pair}: no historical data in memory")
 

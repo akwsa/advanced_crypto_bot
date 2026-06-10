@@ -30,19 +30,30 @@ from core.config import Config
 
 
 def _build_bot(*, volume_ratio: float, bid_volume: float, ask_volume: float, last_price: float = 100.0):
-    """Build minimal bot fixture for MI analysis."""
+    """Build minimal bot fixture for MI analysis.
+
+    2026-06-10: volume di historical_data adalah volume_24h cumulative dari
+    ticker (di-append berulang per poll). MI sekarang hitung volume_ratio dari
+    DELTA volume antar candle, bukan raw value. Fixture mensimulasikan pattern
+    ini: 21 candle dengan delta konstan = avg_delta, kecuali delta terakhir =
+    avg_delta * volume_ratio.
+    """
     bot = MagicMock()
 
-    # Historical data: 21 candles, last volume = volume_ratio × avg
-    avg_vol = 1000.0
-    last_vol = avg_vol * volume_ratio
+    avg_delta = 1000.0
+    deltas = [avg_delta] * 19 + [avg_delta * volume_ratio]  # 20 deltas total
+    volumes = [0.0]
+    for d in deltas:
+        volumes.append(volumes[-1] + d)
+    # volumes: 21 entries (cumulative volume_24h pattern)
+
     df = pd.DataFrame(
         {
             "open": [last_price] * 21,
             "high": [last_price + 1] * 21,
             "low": [last_price - 1] * 21,
             "close": [last_price] * 21,
-            "volume": [avg_vol] * 20 + [last_vol],
+            "volume": volumes,
         }
     )
     bot.historical_data = {"testidr": df}
@@ -137,3 +148,89 @@ async def test_mi_truly_neutral_pair_still_blocked():
     assert result["passes_entry_filter"] is False, (
         "Pair benar-benar neutral harus tetap di-block — proteksi minimum"
     )
+
+
+@pytest.mark.asyncio
+async def test_mi_volume_ratio_uses_delta_not_raw_cumulative_volume():
+    """Regression test 2026-06-10.
+
+    Bug: historical_data.volume adalah volume_24h dari ticker (rolling 24h),
+    di-append berulang per poll. Akibatnya raw_value/avg ≈ 1.0 untuk SEMUA
+    pair, tidak peduli aktivitas trading sebenarnya.
+
+    Fix: pakai DELTA volume_24h antar candle = trade baru dalam window poll.
+
+    Test ini build dataset dengan cumulative volume monoton naik di rate
+    konstan (no spike) dan verify volume_ratio ≈ 1.0 — bukan ratio dari
+    raw cumulative value (yang akan mendekati 1.0 hanya secara kebetulan).
+    Lalu test juga bahwa SPIKE di delta terakhir ter-detect.
+    """
+    bot_no_spike = MagicMock()
+    # 21 candle dengan volume cumulative monoton naik 100/poll (delta konstan).
+    # Raw value: 100, 200, 300, ..., 2100. Raw ratio = 2100 / mean([200..2100]) = 1.83.
+    # Delta-mode: semua delta = 100, ratio = 100/100 = 1.0 (correct, no spike).
+    cumulative = [100.0 * i for i in range(1, 22)]
+    df_no_spike = pd.DataFrame(
+        {
+            "open": [100.0] * 21, "high": [101.0] * 21, "low": [99.0] * 21,
+            "close": [100.0] * 21, "volume": cumulative,
+        }
+    )
+    bot_no_spike.historical_data = {"testidr": df_no_spike}
+    bot_no_spike.indodax = MagicMock()
+    bot_no_spike.indodax.get_orderbook.return_value = {
+        "bids": [["99.9", "100"]], "asks": [["100.1", "100"]],
+    }
+    bot_no_spike._update_heatmap = MagicMock()
+    bot_no_spike._detect_spoofing = MagicMock(return_value=([["99.9", "100"]], [["100.1", "100"]], False))
+
+    result = await analyze_market_intelligence(bot_no_spike, "testidr", current_price=100.0)
+    assert result["volume_ratio"] == 1.0, (
+        f"Cumulative volume monoton naik konstan harus give ratio ~1.0 (delta konstan). "
+        f"Got {result['volume_ratio']} — tanda regress ke raw-value mode."
+    )
+    assert result["volume_spike"] is False
+
+    # Sekarang test SPIKE: delta terakhir 5x lipat. Cumulative jump.
+    bot_spike = MagicMock()
+    cumulative_spike = [100.0 * i for i in range(1, 21)] + [2000.0 + 500.0]  # delta last = 500
+    df_spike = pd.DataFrame(
+        {
+            "open": [100.0] * 21, "high": [101.0] * 21, "low": [99.0] * 21,
+            "close": [100.0] * 21, "volume": cumulative_spike,
+        }
+    )
+    bot_spike.historical_data = {"testidr": df_spike}
+    bot_spike.indodax = MagicMock()
+    bot_spike.indodax.get_orderbook.return_value = {
+        "bids": [["99.9", "100"]], "asks": [["100.1", "100"]],
+    }
+    bot_spike._update_heatmap = MagicMock()
+    bot_spike._detect_spoofing = MagicMock(return_value=([["99.9", "100"]], [["100.1", "100"]], False))
+
+    result_spike = await analyze_market_intelligence(bot_spike, "testidr", current_price=100.0)
+    # avg delta = (19*100 + 500) / 20 = 120, last delta = 500, ratio = 4.17
+    assert result_spike["volume_ratio"] >= 4.0, (
+        f"Delta spike 5x harus terdeteksi sebagai high ratio. Got {result_spike['volume_ratio']}"
+    )
+    assert result_spike["volume_spike"] is True
+
+
+@pytest.mark.asyncio
+async def test_mi_volume_ratio_default_zero_when_no_history():
+    """Pair tanpa historical_data → volume_ratio default 0.0 (bukan misleading 1.0)."""
+    bot = MagicMock()
+    bot.historical_data = {}  # Pair tidak di-preload
+    bot.indodax = MagicMock()
+    bot.indodax.get_orderbook.return_value = {
+        "bids": [["99.9", "100"]], "asks": [["100.1", "100"]],
+    }
+    bot._update_heatmap = MagicMock()
+    bot._detect_spoofing = MagicMock(return_value=([["99.9", "100"]], [["100.1", "100"]], False))
+
+    result = await analyze_market_intelligence(bot, "newpairidr", current_price=100.0)
+    assert result["volume_ratio"] == 0.0, (
+        "No history → volume_ratio harus 0.0 (eksplisit no-data), "
+        "bukan 1.0 (misleading 'normal volume')"
+    )
+    assert result["volume_spike"] is False

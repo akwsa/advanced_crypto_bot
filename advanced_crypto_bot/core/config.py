@@ -222,6 +222,11 @@ class Config:
 
     # Profit Optimization
     PROFIT_AUTOTRADE_MIN_EDGE_SCORE = _safe_float_env('PROFIT_AUTOTRADE_MIN_EDGE_SCORE', 56)
+    # Dry-run R/R floor (relaxed dari LIVE supaya observasi/kalibrasi tidak no-entry).
+    # LIVE tetap pakai max(RISK_REWARD_RATIO*0.75, 1.35) = 1.50 di profit_optimizer.
+    # 2026-06-10: ditambah supaya saharaidr-class setup (R/R ~1.2) bisa lolos di dry-run
+    # tanpa melonggarkan floor real-trading.
+    PROFIT_AUTOTRADE_DRYRUN_MIN_RR = _safe_float_env('PROFIT_AUTOTRADE_DRYRUN_MIN_RR', 1.20)
     PROFIT_AUTOTRADE_MAX_POSITION_BOOST = _safe_float_env('PROFIT_AUTOTRADE_MAX_POSITION_BOOST', 1.35)
     PROFIT_TP2_EXPANSION_MAX = _safe_float_env('PROFIT_TP2_EXPANSION_MAX', 0.35)
     PROFIT_HUNTER_MIN_EDGE_SCORE = _safe_float_env('PROFIT_HUNTER_MIN_EDGE_SCORE', 58)

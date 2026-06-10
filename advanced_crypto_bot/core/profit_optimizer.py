@@ -128,7 +128,12 @@ def evaluate_autotrade_setup(
         edge_score -= 5.0
 
     edge_score = _clamp(edge_score, 0.0, 100.0)
-    min_rr_required = max(Config.RISK_REWARD_RATIO * 0.75, 1.35)
+    # Mode-aware R/R floor: dry-run pakai threshold lebih longgar untuk
+    # observasi/kalibrasi, LIVE tetap konservatif. Default dry-run=1.20, LIVE=1.50.
+    if getattr(Config, "AUTO_TRADE_DRY_RUN", False):
+        min_rr_required = float(getattr(Config, "PROFIT_AUTOTRADE_DRYRUN_MIN_RR", 1.20))
+    else:
+        min_rr_required = max(Config.RISK_REWARD_RATIO * 0.75, 1.35)
 
     if rr_after_fees < min_rr_required:
         return ProfitOptimizationDecision(
