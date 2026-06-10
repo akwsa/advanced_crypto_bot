@@ -8,34 +8,75 @@
   <script src="https://unpkg.com/lightweight-charts@4.2.3/dist/lightweight-charts.standalone.production.js"></script>
 </head>
 <body>
-  <div class="dashboard">
-    <!-- LEFT PANEL: Watchlist -->
+  <!-- TOP BAR: Status + Mode + Stats -->
+  <header class="topbar">
+    <div class="topbar-left">
+      <span class="brand">📊 <strong>Crypto Bot</strong></span>
+      <span id="mode-badge" class="mode-badge">DRY RUN</span>
+      <span id="api-status" class="status-pill online">● API ONLINE</span>
+    </div>
+    <div class="topbar-right">
+      <div class="stat-mini">
+        <span class="stat-mini-label">Open Positions</span>
+        <span class="stat-mini-value" id="stat-open-positions">—</span>
+      </div>
+      <div class="stat-mini">
+        <span class="stat-mini-label">Today P&L</span>
+        <span class="stat-mini-value" id="stat-today-pnl">—</span>
+      </div>
+      <div class="stat-mini">
+        <span class="stat-mini-label">Pairs Tracked</span>
+        <span class="stat-mini-value" id="stat-pairs-tracked">—</span>
+      </div>
+      <div class="stat-mini">
+        <span class="stat-mini-label">Last Update</span>
+        <span class="stat-mini-value" id="stat-last-update">—</span>
+      </div>
+    </div>
+  </header>
+
+  <main class="dashboard">
+    <!-- LEFT: Pairs & Watchlist -->
     <aside class="panel-left">
-      <div class="panel-header">
-        <h2>📋 Watchlist</h2>
-        <span id="pairs-count" class="badge">0</span>
+      <div class="tabs">
+        <button class="tab-btn active" data-tab="watchlist">
+          <span class="tab-icon">📋</span>
+          <span class="tab-label">Watchlist</span>
+          <span class="tab-count" id="count-watchlist">0</span>
+        </button>
+        <button class="tab-btn" data-tab="movers">
+          <span class="tab-icon">🚀</span>
+          <span class="tab-label">Top Movers</span>
+          <span class="tab-count" id="count-movers">0</span>
+        </button>
+        <button class="tab-btn" data-tab="losers">
+          <span class="tab-icon">📉</span>
+          <span class="tab-label">Top Losers</span>
+          <span class="tab-count" id="count-losers">0</span>
+        </button>
       </div>
+
       <div class="search-box">
-        <input type="text" id="pair-search" placeholder="Cari pair..." />
+        <input type="text" id="pair-search" placeholder="🔍 Cari pair..." />
       </div>
-      <ul id="pairs-list" class="pairs-list">
-        <li class="loading">Loading...</li>
-      </ul>
-      <div class="panel-footer">
-        <span id="mode-badge" class="mode-badge dryrun">DRY RUN</span>
-        <span id="last-update" class="last-update">—</span>
+
+      <div class="pairs-container">
+        <ul id="pairs-list" class="pairs-list">
+          <li class="loading">Loading...</li>
+        </ul>
       </div>
     </aside>
 
-    <!-- RIGHT PANEL -->
-    <main class="panel-right">
-      <!-- TOP: Chart -->
-      <section class="chart-section">
+    <!-- CENTER: Chart + Detail -->
+    <section class="panel-center">
+      <div class="chart-section">
         <div class="chart-header">
           <div class="chart-title-group">
             <h2 id="chart-pair">Pilih pair dari watchlist</h2>
-            <span id="chart-price" class="chart-price">—</span>
-            <span id="chart-change" class="chart-change neutral">—</span>
+            <div class="price-row">
+              <span id="chart-price" class="chart-price">—</span>
+              <span id="chart-change" class="chart-change neutral">—</span>
+            </div>
           </div>
           <div class="chart-controls">
             <div id="chart-timeframes" class="timeframes">
@@ -47,62 +88,76 @@
               <button class="tf-btn" data-tf="86400" data-limit="200">1D</button>
             </div>
             <select id="chart-type" class="chart-type-select">
-              <option value="candle" selected>Candle</option>
-              <option value="line">Line</option>
-              <option value="area">Area</option>
+              <option value="candle" selected>🕯️ Candle</option>
+              <option value="line">📈 Line</option>
+              <option value="area">🏔️ Area</option>
             </select>
           </div>
         </div>
         <div id="chart-container" class="chart-container"></div>
-      </section>
+      </div>
 
-      <!-- BOTTOM: Pair Detail -->
-      <section class="detail-section">
+      <!-- BOTTOM: Pair Detail Cards -->
+      <div class="detail-section">
         <div class="detail-grid" id="detail-grid">
-          <div class="detail-card">
-            <span class="detail-label">ML Confidence</span>
-            <span class="detail-value" id="d-confidence">—</span>
-          </div>
-          <div class="detail-card">
-            <span class="detail-label">Signal</span>
+          <div class="detail-card primary">
+            <span class="detail-label">🤖 ML Signal</span>
             <span class="detail-value" id="d-signal">—</span>
+            <span class="detail-sub" id="d-confidence">—</span>
           </div>
           <div class="detail-card">
-            <span class="detail-label">Combined Strength</span>
+            <span class="detail-label">💪 Strength</span>
             <span class="detail-value" id="d-strength">—</span>
+            <span class="detail-sub">Combined</span>
           </div>
           <div class="detail-card">
-            <span class="detail-label">Volatilitas</span>
-            <span class="detail-value" id="d-volatility">—</span>
-          </div>
-          <div class="detail-card">
-            <span class="detail-label">Volume 24h</span>
+            <span class="detail-label">📊 Volume 24h</span>
             <span class="detail-value" id="d-volume">—</span>
+            <span class="detail-sub" id="d-volume-rank">—</span>
           </div>
           <div class="detail-card">
-            <span class="detail-label">Support</span>
-            <span class="detail-value" id="d-support">—</span>
+            <span class="detail-label">📐 Spread</span>
+            <span class="detail-value" id="d-spread">—</span>
+            <span class="detail-sub">bid/ask gap</span>
           </div>
           <div class="detail-card">
-            <span class="detail-label">Resistance</span>
-            <span class="detail-value" id="d-resistance">—</span>
-          </div>
-          <div class="detail-card">
-            <span class="detail-label">Risk/Reward</span>
-            <span class="detail-value" id="d-rr">—</span>
-          </div>
-          <div class="detail-card">
-            <span class="detail-label">Position</span>
+            <span class="detail-label">🎯 Position</span>
             <span class="detail-value" id="d-position">—</span>
+            <span class="detail-sub" id="d-pnl">—</span>
           </div>
           <div class="detail-card">
-            <span class="detail-label">P&L</span>
-            <span class="detail-value" id="d-pnl">—</span>
+            <span class="detail-label">⚖️ Risk/Reward</span>
+            <span class="detail-value" id="d-rr">—</span>
+            <span class="detail-sub" id="d-sr">S/R</span>
           </div>
         </div>
-      </section>
-    </main>
-  </div>
+      </div>
+    </section>
+
+    <!-- RIGHT: Insights Panel -->
+    <aside class="panel-right">
+      <div class="insight-card">
+        <h3>📈 Live Movers (5min)</h3>
+        <ul id="live-movers-list" class="mini-list">
+          <li class="loading">Loading...</li>
+        </ul>
+      </div>
+
+      <div class="insight-card">
+        <h3>📡 Recent Signals</h3>
+        <ul id="recent-signals-list" class="mini-list">
+          <li class="loading">Loading...</li>
+        </ul>
+      </div>
+
+      <div class="insight-card">
+        <h3>💼 Open Positions</h3>
+        <ul id="open-positions-list" class="mini-list">
+          <li class="loading">Loading...</li>
+        </ul>
+      </div>
+    </aside>
+  </main>
 
   <script src="./app.js"></script>
 </body>

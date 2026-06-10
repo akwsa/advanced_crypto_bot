@@ -273,6 +273,13 @@ def register_bot_handlers(bot):
     except Exception as e:
         logger.warning(f"⚠️ Quant commands not registered: {e}")
 
+    # Pair Scanner Commands (top volume / movers / scan_pairs)
+    try:
+        from autohunter.scanner_commands import register_scanner_handlers
+        register_scanner_handlers(bot, app)
+    except Exception as e:
+        logger.warning(f"⚠️ Scanner commands not registered: {e}")
+
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, _guard_callback(bot, "text", bot.handle_text_input)))
     app.add_handler(MessageHandler(filters.TEXT & filters.Regex("^/"), _guard_callback(bot, "unknown", bot.handle_unknown_command)))
     app.add_handler(CallbackQueryHandler(_guard_callback(bot, "callback", bot.callback_handler)))

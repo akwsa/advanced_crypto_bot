@@ -9,6 +9,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added - 2026-06-10 (Pair Scanner + Dashboard Revamp)
+**Konteks:** User minta dashboard yang lebih representatif & modern, plus auto-scanning Indodax untuk identifikasi top volume + pair yang lagi pump (momentum tinggi) supaya bot bisa auto-promote ke watchlist.
+
+**Module baru:**
+
+`autohunter/pair_scanner.py` — scanner untuk Indodax public summaries:
+- `scan_top_volume(limit, min_volume_idr)` — top N pair berdasar volume IDR 24h
+- `scan_top_movers(limit, direction)` — top gainers/losers dengan composite scoring
+- `build_watchlist_recommendation()` — gabungan top volume + top movers, unique
+- Cache 60 detik supaya tidak hammering API
+- Score momentum = `change_percent + (5 - distance_from_high) + 0.5*log10(volume) - liquidity_penalty`
+
+`autohunter/scanner_commands.py` — Telegram commands:
+- `/top_volume [N]` — top N pair by volume (default 15)
+- `/top_movers [N]` — top N gainers (default 10)
+- `/top_losers [N]` — top N losers (default 10)
+- `/scan_pairs [add]` — rekomendasi watchlist; pakai `add` untuk auto-promote
+
+**Endpoint dashboard baru:**
+- `GET /api/v1/pairs/top-movers?limit=N&direction=up|down|both&min_volume_idr=N`
+- `GET /api/v1/pairs/watchlist-recommendation?top_volume=N&top_movers=N`
+
+**Dashboard Revamp (frontend v2):**
+- Layout baru: top bar (mode badge + 4 stat) + 3 kolom (pairs tabs | chart+detail | insights)
+- 3 tab di kiri: Watchlist (top volume), Top Movers, Top Losers
+- Panel kanan baru: Live Movers, Recent Signals, Open Positions
+- Modern dark theme dengan CSS variables, gradient cards, badge animasi (PUMPING 🚀)
+- Lightweight-charts kept (TradingView widget di-drop untuk reduce dependency)
+- Detail cards: ML Signal+Confidence, Combined Strength, Volume+Rank, Spread, Position+P&L, R/R+S/R
+- Responsive: < 1100px hide right panel, < 768px stack vertical
+
+**Tests:**
+- `test_pair_scanner.py` — 18 test (snapshot, scan, momentum scoring, cache, error)
+- `test_dashboard_pair_scanner_endpoints.py` — 5 test (endpoint contract)
+- `test_dashboard_frontend_static.py` — refactor: snapshot test layout lama (TradingView/Binance) di-replace dengan kontrak layout v2 (12 test)
+- Total scanner+dashboard: 70/70 PASS
+
+**Files Added:**
+- `autohunter/pair_scanner.py` (14KB)
+- `autohunter/scanner_commands.py` (10KB)
+- `tests/test_pair_scanner.py` (9KB)
+- `tests/test_dashboard_pair_scanner_endpoints.py` (5.8KB)
+
+**Files Changed:**
+- `dashboard_api/main.py` — 2 endpoint baru (/top-movers, /watchlist-recommendation)
+- `dashboard_frontend/index.html` — full rewrite layout v2
+- `dashboard_frontend/styles.css` — full rewrite modern dark theme
+- `dashboard_frontend/app.js` — full rewrite dengan tabs + insights
+- `core/handler_registry.py` — register scanner commands
+- `tests/test_dashboard_frontend_static.py` — snapshot baru untuk layout v2
+
 ### Fixed - 2026-06-10 (Spread negatif: root cause `detect_spoofing` rusak data orderbook)
 **Konteks:** Setelah MI threshold tuning (commit ee83a46) di-deploy ke VM, bot tetap 0 entry DRY RUN. Dari log ditemukan **spread negatif** dan **volume ratio selalu 1.0** untuk SEMUA pair. Investigasi mengungkap 2 root cause.
 

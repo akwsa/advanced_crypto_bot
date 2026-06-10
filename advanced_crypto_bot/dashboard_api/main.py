@@ -371,6 +371,52 @@ def get_top_volume_pairs(limit: int | None = None) -> dict:
     )
 
 
+@app.get("/api/v1/pairs/top-movers")
+def get_top_movers(limit: int = 30, direction: str = "up", min_volume_idr: float = 500_000_000) -> dict:
+    """Return top momentum pairs (gainers/losers/both) with composite scoring.
+
+    Args:
+        limit: jumlah pair (1-50).
+        direction: "up" (gainers, default), "down" (losers), "both" (absolute).
+        min_volume_idr: filter volume minimum (default 500M IDR exclude shitcoin).
+
+    Backed by autohunter.pair_scanner — Indodax public summaries, no auth.
+    """
+    from autohunter.pair_scanner import scan_top_movers
+
+    safe_limit = max(1, min(int(limit), 50))
+    safe_direction = direction.lower() if direction else "up"
+    if safe_direction not in {"up", "down", "both"}:
+        safe_direction = "up"
+    snapshots = scan_top_movers(limit=safe_limit, min_volume_idr=min_volume_idr, direction=safe_direction)
+    pairs = [s.to_dict() for s in snapshots]
+    return _response(
+        {"pairs": pairs, "count": len(pairs), "limit": safe_limit, "direction": safe_direction, "min_volume_idr": min_volume_idr},
+        source="indodax_public_summaries",
+        freshness="empty" if not pairs else "fresh",
+    )
+
+
+@app.get("/api/v1/pairs/watchlist-recommendation")
+def get_watchlist_recommendation(top_volume: int = 20, top_movers: int = 10) -> dict:
+    """Combined watchlist suggestion: top volume + top momentum movers.
+
+    Useful for "should I watch this?" UI — returns merged unique list with
+    badges (TOP_VOLUME, TOP_GAINER, PUMPING).
+    """
+    from autohunter.pair_scanner import build_watchlist_recommendation
+
+    safe_volume = max(1, min(int(top_volume), 50))
+    safe_movers = max(0, min(int(top_movers), 30))
+    snapshots = build_watchlist_recommendation(top_volume_limit=safe_volume, top_mover_limit=safe_movers)
+    pairs = [s.to_dict() for s in snapshots]
+    return _response(
+        {"pairs": pairs, "count": len(pairs), "top_volume_limit": safe_volume, "top_mover_limit": safe_movers},
+        source="indodax_public_summaries",
+        freshness="empty" if not pairs else "fresh",
+    )
+
+
 @app.get("/api/v1/signals/latest")
 def get_latest_signals(limit: int = 50, pair: str | None = None) -> dict:
     settings = get_settings()
