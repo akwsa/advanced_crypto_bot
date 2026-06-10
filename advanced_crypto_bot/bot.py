@@ -2986,44 +2986,15 @@ class AdvancedCryptoBot:
         """Helper to send message for both command and callback query.
         Logs all failures so bugs are visible in logs.
 
-<<<<<<< Updated upstream
-        For parse_mode='HTML', sanitize text proactively to prevent
-        Telegram 'Can't parse entities' errors caused by stray <, >, & or
-        non-whitelisted tags in dynamic content (Bug Critical #4 — audit
-        2026-06-07).
-=======
         FIX 2026-06-07 v2: Robust error recovery —
         - HTML parse-mode fallback (html_escape retry)
         - Markdown parse-mode fallback (strip **, `, _ → plain text)
         - Event-loop mismatch fallback (RuntimeError 'different event loop' → retry on main loop if available)
         - Bare-text last-resort (strips ALL kwargs, no parse_mode)
->>>>>>> Stashed changes
         """
         edit_error = None
         reply_error = None
 
-<<<<<<< Updated upstream
-        # Proactive HTML sanitization: pre-clean text so Telegram doesn't
-        # reject the message in the first place. Preserves whitelisted tags
-        # (b/i/u/code/pre/a/etc), escapes everything else.
-        if kwargs.get('parse_mode') == 'HTML' and text:
-            text = sanitize_telegram_html(str(text))
-
-        async def _send_html_escaped_fallback(target_message):
-            # FIX: Strip parse_mode! After html_escape the text is plain.
-            # Keeping parse_mode='HTML' causes a second parse failure.
-            safe_kwargs = {k: v for k, v in kwargs.items()
-                           if k not in ('parse_mode',)}
-            safe_text = html_escape(str(text))
-            try:
-                await target_message.reply_text(safe_text, **safe_kwargs)
-            except Exception:
-                # Last resort: bare text with zero kwargs
-                try:
-                    await target_message.reply_text(safe_text)
-                except Exception as bare_err:
-                    logger.warning("_send_message bare fallback failed: %s", bare_err)
-=======
         async def _try_escaped_fallback(target_message, safe_kwargs, safe_text):
             """Multi-layer fallback: try with safe_kwargs, then bare, then fire-and-forget."""
             for attempt, (use_kwargs, label) in enumerate([
@@ -3052,7 +3023,6 @@ class AdvancedCryptoBot:
                         except Exception:
                             pass
             return False
->>>>>>> Stashed changes
 
         if update.callback_query:
             try:
@@ -3090,25 +3060,6 @@ class AdvancedCryptoBot:
                 await target.reply_text(text, **kwargs)
                 return
         except Exception as e:
-<<<<<<< Updated upstream
-            # Unconditional HTML fallback: any error with parse_mode='HTML'
-            # triggers html_escape retry (not just 'parse entities').
-            # Also handles event-loop mismatch by detecting the error pattern.
-            err_str = str(e).lower()
-            is_html = kwargs.get('parse_mode') == 'HTML'
-            is_loop_err = 'different event loop' in err_str or 'different loop' in err_str
-            target = update.message or update.effective_message
-
-            if is_html and target:
-                await _send_html_escaped_fallback(target)
-                return
-            elif is_loop_err and target:
-                # Event loop mismatch — reschedule on main Telegram loop
-                try:
-                    import asyncio as _asyncio
-                    loop_ref = getattr(self, '_telegram_loop', None)
-                    if loop_ref and not loop_ref.is_closed():
-=======
             err_str = str(e).lower()
             pm = kwargs.get('parse_mode')
             is_html_mode = pm == 'HTML'
@@ -3137,19 +3088,10 @@ class AdvancedCryptoBot:
                     loop_ref = getattr(self, '_telegram_loop', None)
                     if loop_ref and not loop_ref.is_closed():
                         import asyncio as _asyncio
->>>>>>> Stashed changes
                         _asyncio.run_coroutine_threadsafe(
                             target.reply_text(html_escape(str(text))),
                             loop_ref
                         )
-<<<<<<< Updated upstream
-                        return
-                except Exception:
-                    pass
-
-            logger.warning("_send_message failed (edit=%s, reply=%s, fallback=%s)",
-                           edit_error, reply_error, str(e)[:120])
-=======
                         logger.debug("_send_message rescheduled on main loop after event-loop mismatch")
                         return
                 except Exception as loop_fix_err:
@@ -3158,7 +3100,6 @@ class AdvancedCryptoBot:
             logger.warning("_send_message failed (edit=%s, reply=%s, fallback=%s)",
                            edit_error, reply_error, str(e)[:120])
             # Don't raise — prevent cascading failures in command handlers
->>>>>>> Stashed changes
             return
 
         if edit_error or reply_error:
