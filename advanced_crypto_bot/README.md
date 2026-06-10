@@ -153,6 +153,7 @@ Sekitar **300+ test** sudah ada (signal pipeline, dryrun safety, telegram UI, sc
 |---------|--------|
 | Bot tidak respond di Telegram | Cek `TELEGRAM_BOT_TOKEN`, cek log `data/logs/crypto_bot.log` |
 | Signal tidak muncul | Pair belum di-`/watch`, atau candle < 60 (butuh ~15 menit polling awal) |
+| DRY RUN 0 trade | Cek `/signal on` aktif, pastikan pair likuid (spread <2%), lihat log `SPREAD_TOO_WIDE` atau `PANTAU` |
 | ML model not trained | Run `/retrain` (admin), butuh 200+ candles |
 | Redis warning | Redis opsional; tanpa Redis bot fallback ke dict in-memory |
 | Indodax API error 403 | API tidak ekspose historical OHLC ke public; bot pakai REST polling + CoinGecko fallback |

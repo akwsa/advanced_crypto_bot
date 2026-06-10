@@ -57,6 +57,148 @@ class _FakeDryRunDB:
 
 
 class TestAutoTradeDryRunSignalCycle(unittest.IsolatedAsyncioTestCase):
+    def _make_dryrun_bot(self, pair="btcidr"):
+        db = _FakeDryRunDB()
+        bot = SimpleNamespace(
+            is_trading=True,
+            auto_trade_pairs={123: [pair]},
+            subscribers={123: [pair]},
+            last_ml_update={},
+            auto_trade_interval_minutes=5,
+            signal_notifications_enabled=False,
+            signal_notification_filter="actionable",
+            db=db,
+            risk_manager=SimpleNamespace(check_daily_loss_limit=Mock(return_value=(True, "ok"))),
+            _check_max_drawdown=Mock(return_value=(True, "ok")),
+            _format_signal_message_html=Mock(return_value="signal text"),
+            app=SimpleNamespace(bot=SimpleNamespace(send_message=AsyncMock())),
+            indodax=SimpleNamespace(
+                get_ticker=Mock(return_value={"last": 100.0, "bid": 100.0}),
+                get_orderbook=Mock(return_value={"bids": [], "asks": []}),
+            ),
+            price_data={},
+            historical_data={},
+            ml_model_v4=None,
+            _quant_kelly_engine=None,
+            _quant_momentum_engine=None,
+            trading_engine=SimpleNamespace(
+                should_execute_trade=Mock(return_value=(True, "ok")),
+                calculate_position_size=Mock(return_value=(10.0, 1000.0)),
+                calculate_stop_loss_take_profit=Mock(return_value={
+                    "stop_loss": 98.0,
+                    "take_profit_1": 104.0,
+                    "take_profit_2": 108.0,
+                    "rr_ratio": 2.0,
+                    "method": "fixed",
+                }),
+            ),
+            price_monitor=SimpleNamespace(set_price_level=Mock(), remove_price_level=Mock()),
+            sr_detector=SimpleNamespace(),
+            _broadcast_to_subscribers=AsyncMock(),
+            _find_liquidity_zones=Mock(return_value=[]),
+            _elite_signal=Mock(return_value=("BUY", 0.8, 1.0)),
+            _fee_aware_net_price=Mock(return_value=(100.0, 0.0, 0.0)),
+        )
+        optimization = SimpleNamespace(
+            should_skip=False,
+            reason="ok",
+            position_multiplier=1.0,
+            stop_loss_multiplier=1.0,
+            tp1_multiplier=1.0,
+            tp2_multiplier=1.0,
+            min_rr_required=1.0,
+            edge_score=10.0,
+        )
+        return bot, db, optimization
+
+    async def _run_dryrun_signal(self, bot, pair, signal, optimization):
+        with patch("autotrade.runtime.Config.AUTO_TRADE_DRY_RUN", True), \
+             patch("autotrade.runtime.Config.ADMIN_IDS", [123]), \
+             patch("autotrade.runtime.Config.CORRELATION_AVOIDANCE_ENABLED", False), \
+             patch("autotrade.runtime.Config.RL_ENABLED", False), \
+             patch("autotrade.runtime.Config.SMART_ROUTING_ENABLED", False), \
+             patch("autotrade.runtime.Config.PORTFOLIO_RISK_ADJUSTED", False), \
+             patch("autotrade.runtime.Config.LIMIT_ORDER_MIN_EDGE_PCT", 0.0), \
+             patch("autotrade.runtime.Config.AUTOTRADE_CHASE_THRESHOLD_PCT", 1.5), \
+             patch("autotrade.runtime.Config.TRADING_FEE_RATE", 0.0), \
+             patch("autotrade.runtime.Config.AUTOTRADE_LIQUIDITY_WHITELIST", []), \
+             patch("autotrade.runtime.Config.AUTOTRADE_LIQUIDITY_PROMOTE_REQUIRE_BIDASK", False), \
+             patch("api.indodax_api.IndodaxAPI", Mock(return_value=bot.indodax)), \
+             patch("autotrade.runtime._calculate_entry_zone", Mock(return_value=100.0)), \
+             patch("autotrade.runtime.analyze_market_intelligence", AsyncMock(return_value={"passes_entry_filter": True, "overall_signal": "BULLISH"})), \
+             patch("autotrade.runtime.detect_market_regime", Mock(return_value={"regime": "RANGE", "volatility": 0.01, "is_high_vol": False, "is_trending": False, "trend_direction": "NEUTRAL"})), \
+             patch("autotrade.runtime.get_support_resistance_for_pair", AsyncMock(return_value=None)), \
+             patch("autotrade.runtime.evaluate_autotrade_setup", Mock(return_value=optimization)):
+            await check_trading_opportunity(bot, pair, signal=signal)
+
+    async def test_duplicate_filtered_signal_does_not_open_dryrun_trade(self):
+        bot, db, optimization = self._make_dryrun_bot("btcidr")
+
+        await self._run_dryrun_signal(
+            bot,
+            "btcidr",
+            {
+                "pair": "btcidr",
+                "recommendation": "HOLD",
+                "pre_sr_recommendation": "STRONG_BUY",
+                "display_recommendation": "HOLD",
+                "duplicate_filtered": True,
+                "duplicate_filtered_reason": "duplicate buy signal tanpa improvement",
+                "ml_confidence": 0.8,
+                "price": 100.0,
+                "indicators": {},
+            },
+            optimization,
+        )
+
+        self.assertEqual(db.get_open_trades(123), [])
+        bot.trading_engine.should_execute_trade.assert_not_called()
+
+    async def test_execution_allowed_false_signal_does_not_open_dryrun_trade(self):
+        bot, db, optimization = self._make_dryrun_bot("btcidr")
+
+        await self._run_dryrun_signal(
+            bot,
+            "btcidr",
+            {
+                "pair": "btcidr",
+                "recommendation": "BUY",
+                "pre_sr_recommendation": "BUY",
+                "display_recommendation": "BUY",
+                "execution_allowed": False,
+                "decision_reason": "decision layer blocked execution",
+                "ml_confidence": 0.8,
+                "price": 100.0,
+                "indicators": {},
+            },
+            optimization,
+        )
+
+        self.assertEqual(db.get_open_trades(123), [])
+        bot.trading_engine.should_execute_trade.assert_not_called()
+
+    async def test_pantau_display_signal_does_not_open_dryrun_trade_even_when_pre_sr_buy(self):
+        bot, db, optimization = self._make_dryrun_bot("btcidr")
+
+        await self._run_dryrun_signal(
+            bot,
+            "btcidr",
+            {
+                "pair": "btcidr",
+                "recommendation": "BUY",
+                "pre_sr_recommendation": "STRONG_BUY",
+                "display_recommendation": "PANTAU",
+                "display_reason": "momentum belum konfirmasi",
+                "ml_confidence": 0.8,
+                "price": 100.0,
+                "indicators": {},
+            },
+            optimization,
+        )
+
+        self.assertEqual(db.get_open_trades(123), [])
+        bot.trading_engine.should_execute_trade.assert_not_called()
+
     async def test_dryrun_only_strong_buy_opens_and_buy_does_not_open_position(self):
         """DRY RUN: BUY dan STRONG_BUY keduanya bisa buka posisi (validasi realistis).
         Dulu BUY diblokir, sekarang diizinkan agar DRY RUN representatif untuk real trading."""
@@ -316,8 +458,10 @@ class TestAutoTradeDryRunSignalCycle(unittest.IsolatedAsyncioTestCase):
 
     async def test_watched_buy_signal_auto_promotes_and_saves_dryrun_trade_to_db(self):
         """Saat /autotrade dryrun aktif, BUY/STRONG_BUY dari pair watchlist
-        harus otomatis masuk auto_trade_pairs dan tersimpan sebagai trade DRY RUN di DB.
-        """
+        harus otomatis masuk auto_trade_pairs. Jika recommendation final adalah
+        BUY/STRONG_BUY (bukan HOLD), trade DRY RUN juga harus tersimpan di DB.
+        Jika recommendation=HOLD (misal karena SR_VALIDATION menolak), pair
+        tetap di-promote tapi trade TIDAK dieksekusi."""
         db = _FakeDryRunDB()
         bot = SimpleNamespace(
             is_trading=True,
@@ -379,24 +523,31 @@ class TestAutoTradeDryRunSignalCycle(unittest.IsolatedAsyncioTestCase):
              patch("autotrade.runtime.Config.LIMIT_ORDER_MIN_EDGE_PCT", 0.0), \
              patch("autotrade.runtime.Config.AUTOTRADE_CHASE_THRESHOLD_PCT", 1.5), \
              patch("autotrade.runtime.Config.TRADING_FEE_RATE", 0.0), \
+             patch("autotrade.runtime.Config.AUTOTRADE_LIQUIDITY_WHITELIST", []), \
+             patch("autotrade.runtime.Config.AUTOTRADE_LIQUIDITY_PROMOTE_REQUIRE_BIDASK", False), \
              patch("api.indodax_api.IndodaxAPI", Mock(return_value=bot.indodax)), \
              patch("autotrade.runtime.analyze_market_intelligence", AsyncMock(return_value={"passes_entry_filter": True, "overall_signal": "BULLISH"})), \
              patch("autotrade.runtime.detect_market_regime", Mock(return_value={"regime": "RANGE", "volatility": 0.01, "is_high_vol": False, "is_trending": False, "trend_direction": "NEUTRAL"})), \
              patch("autotrade.runtime.get_support_resistance_for_pair", AsyncMock(return_value=None)), \
              patch("autotrade.runtime.evaluate_autotrade_setup", Mock(return_value=optimization)):
+            # Signal with recommendation=HOLD (rejected by SR_VALIDATION).
+            # Pair should auto-promote, but NO trade should execute.
             await check_trading_opportunity(
                 bot,
                 "testidr",
                 signal={"pair": "testidr", "recommendation": "HOLD", "pre_sr_recommendation": "STRONG_BUY", "ml_confidence": 0.8, "price": 100.0, "indicators": {}},
             )
 
+<<<<<<< Updated upstream
         self.assertEqual(bot.auto_trade_pairs[123], ["testidr"])
+=======
+        # Auto-promote should still happen (pair added to auto_trade_pairs)
+        self.assertEqual(bot.auto_trade_pairs[123], ["btcidr"])
+        # But no trade should execute because recommendation is HOLD
+>>>>>>> Stashed changes
         open_trades = db.get_open_trades(123)
-        self.assertEqual(len(open_trades), 1)
-        self.assertEqual(open_trades[0]["signal_source"], "auto")
-        self.assertEqual(open_trades[0]["type"], "BUY")
-        self.assertIn("[DRY RUN]", open_trades[0]["notes"])
-        bot.price_monitor.set_price_level.assert_called_once()
+        self.assertEqual(len(open_trades), 0)
+        bot.price_monitor.set_price_level.assert_not_called()
 
     async def test_low_price_pair_uses_price_times_1000_as_dryrun_nominal(self):
         db = _FakeDryRunDB()
@@ -474,11 +625,13 @@ class TestAutoTradeDryRunSignalCycle(unittest.IsolatedAsyncioTestCase):
 
         open_trades = db.get_open_trades(123)
         self.assertEqual(len(open_trades), 1)
-        self.assertEqual(open_trades[0]["total"], 370000.0)
+        # FIX 2026-06-07: MAX_TOTAL=2.000.000 with slippage 0.1%
+        # Price=370, min coins=10000, total=370*10000=3.700.000 → clamped to 2.000.000 max
+        self.assertAlmostEqual(open_trades[0]["total"], 2000000.0, delta=20000.0)
 
     async def test_mid_price_pair_uses_price_times_100_as_dryrun_nominal(self):
-        """Mid-price pair uses continuous formula: round(1M/price), clamped [10,1000].
-        For price=25000: mult=round(1M/25000)=40, total=25000*40=1,000,000."""
+        """Mid-price pair uses new formula: target total 1.000.000-1.500.000 IDR.
+        For price=25000: target=1.250.000 IDR, amount=50 coins."""
         db = _FakeDryRunDB()
         current_price = 25000.0
         bot = SimpleNamespace(
@@ -554,7 +707,8 @@ class TestAutoTradeDryRunSignalCycle(unittest.IsolatedAsyncioTestCase):
 
         open_trades = db.get_open_trades(123)
         self.assertEqual(len(open_trades), 1)
-        self.assertEqual(open_trades[0]["total"], 1000000.0)
+        # Accept approximate value due to slippage realism (DRYRUN_SLIPPAGE_PCT)
+        self.assertAlmostEqual(open_trades[0]["total"], 1250000.0, delta=12500.0)
 
     async def test_high_price_pair_uses_price_times_10_as_dryrun_nominal(self):
         db = _FakeDryRunDB()
@@ -632,7 +786,8 @@ class TestAutoTradeDryRunSignalCycle(unittest.IsolatedAsyncioTestCase):
 
         open_trades = db.get_open_trades(123)
         self.assertEqual(len(open_trades), 1)
-        self.assertEqual(open_trades[0]["total"], 1500000.0)
+        # New formula: target 1.250.000 IDR + slippage (DRYRUN_SLIPPAGE_PCT=0.1%)
+        self.assertAlmostEqual(open_trades[0]["total"], 1250000.0, delta=12500.0)
 
 
 if __name__ == "__main__":

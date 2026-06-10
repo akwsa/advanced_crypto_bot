@@ -114,6 +114,7 @@ Semua Telegram command yang tersedia. Format: `/command [arg]`.
 |---------|-------|-----------|
 | `/s_menu` | 🟢 | Menu utama Scalper |
 | `/s_buy <PAIR> <PRICE> <IDR> [TP] [SL]` | 🔴💰 | BUY via Scalper (dengan konfirmasi), opsional langsung set TP/SL |
+| `/s_buy_auto <PAIR> <PRICE> <IDR>` | 🟢🧪 | BUY DRY RUN dengan default TP +3% dan SL -2%; di REAL tetap sama seperti `/s_buy` tanpa TP/SL auto |
 | `/s_sell <PAIR> [PRICE] [AMOUNT]` | 🔴💰 | SELL via Scalper |
 | `/s_sltp <PAIR> <TP> <SL>` | 🔴💰 | Set/update Take Profit & Stop Loss posisi Scalper; gunakan `-` untuk hapus salah satu level |
 | `/s_cancel <PAIR> [tp|sl|all]` | 🔴💰 | Hapus TP, SL, atau keduanya dari posisi Scalper |
@@ -123,6 +124,7 @@ Semua Telegram command yang tersedia. Format: `/command [arg]`.
 Contoh SL/TP:
 ```text
 /s_buy btcidr 1500000000 100000 1545000000 1470000000
+/s_buy_auto hypeidr 1000 500000
 /s_sltp btcidr 1545000000 1470000000
 /s_cancel btcidr all
 ```
@@ -283,6 +285,6 @@ Untuk Indodax API internal: `btc_idr`, `pippin_idr` — bot handle conversion ot
    - Watchlist: untuk monitoring + scalping (`/watch`)
    - Auto-trade: untuk eksekusi otomatis (`/add_autotrade`)
 
-5. **Cooldown:** Signal punya cooldown 5 menit per pair+type untuk prevent spam.
+5. **Cooldown:** Signal punya cooldown 3 menit per pair+type untuk prevent spam.
 
 6. **Circuit breaker:** Kalau drawdown > `MAX_DRAWDOWN_PCT` (default 20%), auto-trade auto-stop. Reset dengan `/reset_drawdown`.

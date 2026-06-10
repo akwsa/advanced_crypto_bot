@@ -328,6 +328,10 @@ def format_signal_message_html(signal):
     volume_label = _format_volume_compact(signal.get("volume_24h"))
     volume_suffix = f"  Vol: {volume_label}"
     reason_text = _safe_text(reason)
+<<<<<<< Updated upstream
+=======
+    # "Filter akhir" removed — info sudah ada di Catatan bot
+>>>>>>> Stashed changes
     strength_label = _simple_strength_label(combined_strength)
 
     # ── Quant section (GARCH / VaR / ARIMA) ──────────────────────────────
@@ -353,7 +357,28 @@ def format_signal_message_html(signal):
             quant_section = "\n\n📐 Quant Analysis\n" + "\n".join(parts)
     # ── End quant section ─────────────────────────────────────────────────
 
+<<<<<<< Updated upstream
     return f"""{signal_emoji} {pair_text}{volume_suffix}
+=======
+    # Volume info for header
+    volume_24h = signal.get("volume_24h") or indicators.get("volume_24h")
+    volume_text = ""
+    if volume_24h is not None:
+        try:
+            vol_num = float(volume_24h)
+            if vol_num >= 1_000_000_000:
+                volume_text = f" | Vol: {vol_num/1_000_000_000:.1f}B"
+            elif vol_num >= 1_000_000:
+                volume_text = f" | Vol: {vol_num/1_000_000:.1f}M"
+            elif vol_num >= 1_000:
+                volume_text = f" | Vol: {vol_num/1_000:.0f}K"
+            else:
+                volume_text = f" | Vol: {vol_num:.0f}"
+        except (TypeError, ValueError):
+            pass
+
+    return f"""{signal_emoji} {pair_text}{volume_text}
+>>>>>>> Stashed changes
 Keputusan: {_display_badge(theme, signal)} {gain_icon}
 
 Saran: {escape(theme['action'])}

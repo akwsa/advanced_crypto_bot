@@ -662,9 +662,22 @@ async def generate_signal_for_pair(bot, pair):
         try:
             ticker = bot.indodax.get_ticker(pair)
             if ticker:
-                volume_24h = ticker.get("vol_idr", 0) or ticker.get("vol_btc", 0) * ticker.get("last", 0)
+                # get_ticker returns 'volume' (in IDR for sorting) from Indodax API
+                volume_24h = float(ticker.get("volume", 0) or 0)
+                if volume_24h <= 0:
+                    # Fallback: try vol_idr or compute from vol_btc * last
+                    volume_24h = float(ticker.get("vol_idr", 0) or 0)
+                if volume_24h <= 0:
+                    vol_btc = float(ticker.get("vol_btc", 0) or 0)
+                    last = float(ticker.get("last", 0) or 0)
+                    if vol_btc > 0 and last > 0:
+                        volume_24h = vol_btc * last
         except Exception:
             pass
+
+        # Attach volume to signal for Telegram display
+        if volume_24h and volume_24h > 0:
+            signal["volume_24h"] = volume_24h
 
         enhancement_result = bot.signal_enhancement.analyze(
             df=df,
@@ -865,6 +878,56 @@ async def generate_signal_for_pair(bot, pair):
     except Exception as _ae:
         logger.debug(f"[ARIMA FILTER] {pair}: skipped — {_ae}")
     # ── End ARIMA filter ──────────────────────────────────────────────────
+
+    # ── Sentiment enrichment (NEW 2026-06-06 — adapted from Meridian-main) ──
+    # Fetches crypto news sentiment and adjusts confidence.
+    # Bullish sentiment + BUY signal → confidence boost
+    # Bearish sentiment + BUY signal → confidence penalty
+    # Concept source: Meridian-main/agent.py get_crypto_sentiment()
+    try:
+        from signals.sentiment_analysis import get_sentiment_for_pair
+        from core.config import Config as _SentCfg
+
+        if getattr(_SentCfg, 'SENTIMENT_ENABLED', False):
+            _sent_result = get_sentiment_for_pair(pair)
+            signal["sentiment"] = {
+                "sentiment": _sent_result.sentiment,
+                "score": _sent_result.score,
+                "summary": _sent_result.summary,
+                "source": _sent_result.source,
+                "headline_count": _sent_result.headline_count,
+            }
+
+            # Apply confidence adjustment based on sentiment alignment
+            _sent_rec = signal.get("recommendation", "HOLD")
+            if _sent_rec in ACTIONABLE_SIGNALS:
+                _old_conf = signal.get("ml_confidence", 0.5)
+                _boost = getattr(_SentCfg, 'SENTIMENT_CONFIDENCE_BOOST', 0.05)
+                _penalty = getattr(_SentCfg, 'SENTIMENT_CONFIDENCE_PENALTY', 0.03)
+                _is_buy = _sent_rec in BUY_SIGNALS
+                _sent_bullish = _sent_result.sentiment == "BULLISH"
+                _sent_bearish = _sent_result.sentiment == "BEARISH"
+
+                _adjustment = 0.0
+                if _is_buy and _sent_bullish:
+                    _adjustment = _boost
+                elif _is_buy and _sent_bearish:
+                    _adjustment = -_penalty
+                elif not _is_buy and _sent_bearish:  # SELL + bearish = aligned
+                    _adjustment = _boost
+                elif not _is_buy and _sent_bullish:  # SELL + bullish = misaligned
+                    _adjustment = -_penalty
+
+                if _adjustment != 0:
+                    _new_conf = max(0.0, min(1.0, _old_conf + _adjustment))
+                    signal["ml_confidence"] = _new_conf
+                    logger.info(
+                        f"📰 [SENTIMENT] {pair}: {_sent_result.sentiment} ({_sent_result.score:+.1f}) "
+                        f"→ confidence {_old_conf:.1%} → {_new_conf:.1%} ({_adjustment:+.2f})"
+                    )
+    except Exception as _se:
+        logger.debug(f"[SENTIMENT] {pair}: enrichment skipped — {_se}")
+    # ── End sentiment enrichment ────────────────────────────────────────────
 
     final_policy_reason = get_final_actionable_rejection_reason(signal)
     if final_policy_reason:

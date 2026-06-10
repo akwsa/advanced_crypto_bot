@@ -20,7 +20,7 @@ moderate bid pressure" sekarang menghasilkan MODERATE (bukan NEUTRAL).
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pandas as pd
 import pytest
@@ -140,7 +140,8 @@ async def test_mi_truly_neutral_pair_still_blocked():
     """
     bot = _build_bot(volume_ratio=1.0, bid_volume=10_000_000, ask_volume=10_000_000)
 
-    result = await analyze_market_intelligence(bot, "testidr", current_price=100.0)
+    with patch.object(Config, "MI_ALLOW_NEUTRAL_ENTRY", False):
+        result = await analyze_market_intelligence(bot, "testidr", current_price=100.0)
 
     assert result["volume_spike"] is False  # 1.0 < 1.1
     assert result["orderbook_pressure"] == "NEUTRAL"  # 1.0 < 1.05

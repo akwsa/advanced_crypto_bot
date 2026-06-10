@@ -90,6 +90,19 @@ class Config:
     # Auto-Trading Control
     AUTO_TRADING_ENABLED = os.getenv('AUTO_TRADING_ENABLED', 'false').lower() == 'true'
     AUTO_TRADE_DRY_RUN = os.getenv('AUTO_TRADE_DRY_RUN', 'true').lower() == 'true'  # True = simulation mode
+    AUTOTRADE_LIQUIDITY_WHITELIST = _parse_watch_pairs(os.getenv('AUTOTRADE_LIQUIDITY_WHITELIST', ''))
+    AUTOTRADE_LIQUIDITY_BLACKLIST_TTL_MINUTES = _safe_int_env('AUTOTRADE_LIQUIDITY_BLACKLIST_TTL_MINUTES', 180)
+    AUTOTRADE_LIQUIDITY_PROMOTE_MAX_SPREAD_PCT = _safe_float_env('AUTOTRADE_LIQUIDITY_PROMOTE_MAX_SPREAD_PCT', 0.03)
+    AUTOTRADE_LIQUIDITY_PROMOTE_REQUIRE_BIDASK = os.getenv('AUTOTRADE_LIQUIDITY_PROMOTE_REQUIRE_BIDASK', 'true').lower() == 'true'
+    
+    # DRY RUN Exploration Mode: allow PANTAU signals with high confluence to enter
+    # with reduced position size (data collection for tuning)
+    DRYRUN_EXPLORATION_ENABLED = os.getenv('DRYRUN_EXPLORATION_ENABLED', 'true').lower() == 'true'
+    DRYRUN_EXPLORATION_POSITION_FACTOR = _safe_float_env('DRYRUN_EXPLORATION_POSITION_FACTOR', 0.20)
+    # Exploration thresholds (relaxed to generate more sample trades for evaluation)
+    DRYRUN_EXPLORATION_MIN_CONFIDENCE = _safe_float_env('DRYRUN_EXPLORATION_MIN_CONFIDENCE', 0.45)
+    DRYRUN_EXPLORATION_MIN_STRENGTH = _safe_float_env('DRYRUN_EXPLORATION_MIN_STRENGTH', 0.05)
+    DRYRUN_EXPLORATION_MIN_RR = _safe_float_env('DRYRUN_EXPLORATION_MIN_RR', 0.6)
     
     # Manual Trading
     MANUAL_TRADING_ENABLED = os.getenv('MANUAL_TRADING_ENABLED', 'false').lower() == 'true'
@@ -140,6 +153,7 @@ class Config:
     MI_SPREAD_MAX_PCT = 0.02  # Max spread % before entry is blocked (2% default)
     MI_REQUIRE_BULLISH_FOR_ENTRY = False  # If True, only enter when MI is BULLISH
     MI_ALLOW_MODERATE_ENTRY = True  # If True, also allow MODERATE MI signal
+    MI_ALLOW_NEUTRAL_ENTRY = True  # NEW: If True, also allow NEUTRAL MI signal (was blocked before)
     
     # Portfolio Allocation Dinamis
     PORTFOLIO_MAX_EXPOSURE_PCT = 0.75  # Max 75% of balance in open positions
@@ -173,6 +187,7 @@ class Config:
     # Fee-aware P&L Calculation
     TRADING_FEE_RATE = 0.003  # Indodax fee: 0.3%
     SLIPPAGE_MAX_PCT = 0.005  # Max 0.5% slippage allowed
+    DRYRUN_SLIPPAGE_PCT = _safe_float_env('DRYRUN_SLIPPAGE_PCT', 0.001)
     SLIPPAGE_CANCEL_ENABLED = True  # Cancel order if slippage > threshold
     ELITE_SIGNAL_PROB_THRESHOLD = 0.6  # Elite signal: prob > 0.6 = BUY
     ELITE_SIGNAL_IMBALANCE_DISTANCE = 0.002  # Zone proximity threshold (0.2%)
@@ -202,9 +217,11 @@ class Config:
 
     # Entry Quality
     AUTOTRADE_CHASE_THRESHOLD_PCT = 1.5  # Skip BUY if price moved >1.5% from signal price
-    LIMIT_ORDER_TIMEOUT_MINUTES = 5.0  # Cancel unfilled limit orders after N minutes
-    LIMIT_ORDER_MIN_EDGE_PCT = _safe_float_env('LIMIT_ORDER_MIN_EDGE_PCT', 0.15)  # Min discount vs market for maker BUY
-    LIMIT_ORDER_CANCEL_DISTANCE_PCT = _safe_float_env('LIMIT_ORDER_CANCEL_DISTANCE_PCT', 1.25)  # Cancel stale BUY if market runs too far above limit
+    # FIX 2026-06-06: Entry zone distance relaxed from 0.5%→0.2% for more instant fills in trending markets
+    ENTRY_ZONE_DISTANCE_PCT = _safe_float_env('ENTRY_ZONE_DISTANCE_PCT', 0.002)  # Default 0.2% below market (was 0.5%)
+    LIMIT_ORDER_TIMEOUT_MINUTES = _safe_float_env('LIMIT_ORDER_TIMEOUT_MINUTES', 15.0)  # Cancel unfilled limit orders after N minutes (raised from 5→15 for DRY RUN realism)
+    LIMIT_ORDER_MIN_EDGE_PCT = _safe_float_env('LIMIT_ORDER_MIN_EDGE_PCT', 0.10)  # Min discount vs market for maker BUY (relaxed 0.15→0.10 for more fills)
+    LIMIT_ORDER_CANCEL_DISTANCE_PCT = _safe_float_env('LIMIT_ORDER_CANCEL_DISTANCE_PCT', 1.50)  # Cancel stale BUY if market runs too far above limit (relaxed 1.25→1.50)
     PARTIAL_TP_MOVE_SL_TO_BREAKEVEN = os.getenv('PARTIAL_TP_MOVE_SL_TO_BREAKEVEN', 'true').lower() == 'true'
 
     # Time-Based Exit
@@ -292,6 +309,19 @@ class Config:
         'ETH': ['ethidr', 'maticidr', 'solidr'],
         'ALT': ['dogeidr', 'xrpidr', 'adaidr', 'shibidr'],
     }
+
+    # ================================================================
+    # Sentiment Analysis (NEW 2026-06-06 — adapted from Meridian-main)
+    # ================================================================
+    # Fetches crypto news from CryptoPanic API and scores sentiment.
+    # Integrated into signal_pipeline.py as additional confidence factor.
+    # Concept source: Meridian-main/agent.py get_crypto_sentiment()
+    # ================================================================
+    SENTIMENT_ENABLED = os.getenv('SENTIMENT_ENABLED', 'true').lower() == 'true'
+    SENTIMENT_CACHE_TTL = _safe_int_env('SENTIMENT_CACHE_TTL', 900)  # Cache per pair: 15 menit
+    SENTIMENT_MAX_HEADLINES = _safe_int_env('SENTIMENT_MAX_HEADLINES', 5)  # Max berita per fetch
+    SENTIMENT_CONFIDENCE_BOOST = _safe_float_env('SENTIMENT_CONFIDENCE_BOOST', 0.05)  # Boost confidence jika sentimen searah sinyal
+    SENTIMENT_CONFIDENCE_PENALTY = _safe_float_env('SENTIMENT_CONFIDENCE_PENALTY', 0.03)  # Penalty jika sentimen berlawanan
     
     @staticmethod
     def get_pair_symbol(pair):

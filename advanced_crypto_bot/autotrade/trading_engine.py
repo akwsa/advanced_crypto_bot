@@ -205,9 +205,11 @@ class TradingEngine:
 
         try:
             # Check daily trade limit (count trades opened today, not open positions)
+            # DRY RUN: raise limit to 50 for data collection purposes
+            max_daily = 50 if Config.AUTO_TRADE_DRY_RUN else Config.MAX_DAILY_TRADES
             daily_trade_count = self.db.count_trades_today(user_id) if hasattr(self.db, 'count_trades_today') else len(open_trades)
-            if daily_trade_count >= Config.MAX_DAILY_TRADES:
-                return False, f"Daily trade limit reached: {daily_trade_count}/{Config.MAX_DAILY_TRADES}"
+            if daily_trade_count >= max_daily:
+                return False, f"Daily trade limit reached: {daily_trade_count}/{max_daily}"
         except Exception as e:
             logger.error(f"Error checking daily trades for user {user_id}: {e}")
             return False, "Error checking trade status"
@@ -251,10 +253,11 @@ class TradingEngine:
                 logger.error(f"Error calculating risk-reward ratio for {pair}: {e}")
                 return False, "Error calculating risk metrics"
 
-        # Check trading hours
-        allowed, hours_reason = self.check_trading_hours()
-        if not allowed:
-            return False, hours_reason
+        # Check trading hours (skip in DRY RUN — data collection runs 24/7)
+        if not Config.AUTO_TRADE_DRY_RUN:
+            allowed, hours_reason = self.check_trading_hours()
+            if not allowed:
+                return False, hours_reason
             
         # Check correlation cooldown
         allowed, corr_reason = self.check_correlation_cooldown(pair, self.db)
@@ -266,18 +269,23 @@ class TradingEngine:
         # VaR candle crypto biasanya -0.5% s/d -3%. Threshold -3% / -5%
         # akan aktif saat volatilitas ekstrem (crash, pump besar).
         # Hanya untuk BUY signals — SELL tidak diblokir oleh VaR gate.
+        # DRY RUN: relax thresholds significantly to allow data collection.
         if recommendation in ['BUY', 'STRONG_BUY']:
             try:
                 var_hist = signal.get("var_historical")
                 cvar_hist = signal.get("cvar_historical")
                 if var_hist is not None and cvar_hist is not None:
-                    if var_hist < -3.0:   # FIX: was -5.0 (tidak pernah aktif)
+                    # DRY RUN uses relaxed thresholds to collect trade data
+                    is_dry_run = getattr(Config, 'AUTO_TRADE_DRY_RUN', True)
+                    var_threshold = -5.0 if is_dry_run else -3.0
+                    cvar_threshold = -15.0 if is_dry_run else -8.0
+                    if var_hist < var_threshold:
                         return False, (
-                            f"VaR gate: VaR95={var_hist:.2f}% < -3.0% — volatilitas candle ekstrem"
+                            f"VaR gate: VaR95={var_hist:.2f}% < {var_threshold:.1f}% — volatilitas candle ekstrem"
                         )
-                    if cvar_hist < -5.0:  # FIX: was -8.0 (tidak pernah aktif)
+                    if cvar_hist < cvar_threshold:
                         return False, (
-                            f"CVaR gate: CVaR95={cvar_hist:.2f}% < -5.0% — tail risk candle ekstrem"
+                            f"CVaR gate: CVaR95={cvar_hist:.2f}% < {cvar_threshold:.1f}% — tail risk candle ekstrem"
                         )
             except Exception as _ve:
                 logger.debug(f"[VAR GATE] {pair}: skipped — {_ve}")

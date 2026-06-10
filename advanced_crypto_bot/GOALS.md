@@ -101,6 +101,9 @@ Full suite: 411 passed, 46 failed (pre-existing), 10 warnings
 ### PHASE 3: VALIDASI DRY RUN (2 Minggu)
 > Goal: Bukti statistik bahwa bot profitable di simulasi
 
+- [x] **DRY RUN execution realism** — fee + slippage + fill rule ✅ (done 2026-06-04)
+- [x] **Liquidity whitelist + auto-blacklist** — pair illikuid otomatis skip ✅ (done 2026-06-04)
+- [x] **Exploration mode PANTAU/BELI_BERTAHAP** — entry kecil untuk data collection ✅ (done 2026-06-04)
 - [ ] Jalankan AutoTrade DRY RUN penuh 14 hari tanpa intervensi
 - [ ] Track semua trade outcomes (BUY→SELL cycle)
 - [ ] Hitung: Win Rate, Avg Profit/Loss, Max Drawdown, Sharpe Ratio

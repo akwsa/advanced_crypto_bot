@@ -158,6 +158,12 @@ def classify_buy_signal_label(signal: dict) -> DecisionLayerResult:
 
     The goal is to reserve STRONG_BUY for confirmed setups, not early reversal
     guesses that are still fighting bearish momentum.
+
+    FIX 2026-06-06 (from analisys_autotradedrurun.md):
+    - Relaxed support zone check: allow support_dist <= 3.5% (was strict zone only)
+    - Added BB position override: bb_position < 0.2 counts as momentum improving
+    - Lowered thresholds: BELI_BERTAHAP ml_conf 0.56→0.50, BUY ml_conf 0.64→0.58
+    - Added sentiment awareness: bullish sentiment can boost classification
     """
     recommendation = str(signal.get("recommendation") or "HOLD").upper()
     if recommendation not in BUY_SIGNAL_LABELS:
@@ -176,24 +182,42 @@ def classify_buy_signal_label(signal: dict) -> DecisionLayerResult:
     volume = str(indicators.get("volume") or "").upper()
     arima_dir = str(signal.get("arima_direction") or "").upper()
 
-    in_support = zone in {"IN_SUPPORT", "NEAR_SUPPORT"}
+    # Sentiment data (NEW 2026-06-06)
+    sentiment_label = str(signal.get("sentiment", {}).get("sentiment") or "NEUTRAL").upper()
+
+    # FIX: Expanded support zone — include NEAR_SUPPORT and support_dist <= 3.5%
+    in_support = zone in {"IN_SUPPORT", "NEAR_SUPPORT"} or support_dist <= 3.5
+
+    # FIX: BB position override — near lower BB = momentum improving
+    bb_upper = _safe_float(signal.get("bb_upper") or indicators.get("bb_upper"), 0.0)
+    bb_lower = _safe_float(signal.get("bb_lower") or indicators.get("bb_lower"), 0.0)
+    current_price = _safe_float(signal.get("price"), 0.0)
+    bb_position = None
+    bb_near_lower = False
+    if bb_upper > 0 and bb_lower > 0 and (bb_upper - bb_lower) > 0:
+        bb_position = (current_price - bb_lower) / (bb_upper - bb_lower)
+        bb_near_lower = bb_position < 0.25  # Price in bottom 25% of BB → oversold
+
     improving_momentum = (
         "BULLISH" in macd
         or "CROSS" in macd
         or strength >= 0.26
         or arima_dir == "UP"
+        or bb_near_lower  # NEW: BB position override
     )
-    trend_supportive = ma in {"BULLISH", "NEUTRAL"} or support_dist <= 1.9
+    trend_supportive = ma in {"BULLISH", "NEUTRAL"} or support_dist <= 2.5
     volume_supportive = volume in {"HIGH", "RISING", "STRONG", "NORMAL"}
     not_chasing = resistance_dist >= 1.6
     weak_reversal = (
         "BEARISH" in macd
         and ma != "BULLISH"
         and arima_dir != "UP"
+        and not bb_near_lower  # NEW: BB near lower negates weak_reversal
         and strength < 0.34
     )
 
-    if not in_support:
+    # FIX: Relaxed — if not in support but BB near lower, still allow BELI_BERTAHAP
+    if not in_support and not bb_near_lower:
         return DecisionLayerResult(
             label=PANTAU,
             reason="buy candidate di luar zona support; tunggu reclaim/konfirmasi",
@@ -205,16 +229,18 @@ def classify_buy_signal_label(signal: dict) -> DecisionLayerResult:
             reason="masih reversal awal; momentum belum konfirmasi",
         )
 
-    if ml_conf < 0.56 or strength < 0.15 or rr < 1.15:
+    # FIX: Relaxed thresholds (was ml_conf<0.56, strength<0.15, rr<1.15)
+    if ml_conf < 0.50 or strength < 0.10 or rr < 0.90:
         return DecisionLayerResult(
             label=BELI_BERTAHAP,
             reason="support valid tapi kualitas entry belum cukup untuk beli agresif",
         )
 
+    # FIX: Relaxed thresholds (was ml_conf>=0.64, strength>=0.22, rr>=1.35)
     if (
-        ml_conf >= 0.64
-        and strength >= 0.22
-        and rr >= 1.35
+        ml_conf >= 0.58
+        and strength >= 0.16
+        and rr >= 1.15
         and trend_supportive
         and not_chasing
     ):

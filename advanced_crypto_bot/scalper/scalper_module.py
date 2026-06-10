@@ -60,14 +60,25 @@ class ScalperConfig:
     PAIRS_DEFAULT = ['pippinidr', 'bridr', 'stoidr', 'drxidr']
     PAIRS_FILE = 'scalper_pairs.txt'
     BASE_URL = "https://indodax.com/api/ticker/"
-    
+
     # FIX: Load from .env directly to avoid import issues
     INITIAL_BALANCE = float(os.getenv('INITIAL_BALANCE', 50000000))  # Default 50 juta dari .env
     TRADING_FEE_PCT = 0.003
     DEFAULT_TRADE_PCT = 0.10
+    DEFAULT_TP_PCT = 0.03  # /s_buy_auto default take-profit (+3%)
+    DEFAULT_SL_PCT = 0.02  # /s_buy_auto default stop-loss (-2%)
     PROFIT_ALERT_THRESHOLD = 3.0
     DROP_ALERT_THRESHOLDS = [3, 5, 10, 15, 20, 25, 30]  # Tiered drop alerts (loss)
     PROFIT_ALERT_THRESHOLDS = [3, 5, 8, 10, 15, 20, 25, 30]  # Tiered profit alerts (sell suggestions)
+
+    # ── AUTO TP/SL Configuration ────────────────────────────────
+    AUTO_TP_SL_ENABLED = True          # Master toggle: auto-apply TP/SL on every buy
+    AUTO_TP_PCT = 0.03                 # Auto take-profit percentage (3%)
+    AUTO_SL_PCT = 0.02                 # Auto stop-loss percentage (2%)
+    AUTO_RISK_REWARD_RATIO = 1.5       # Minimum R/R ratio enforced on auto TP
+    AUTO_TRAILING_STOP_ENABLED = False  # Trailing stop toggle
+    AUTO_TRAILING_DISTANCE_PCT = 0.01  # Trailing stop distance from peak (1%)
+    AUTO_TRAILING_STEP_PCT = 0.005     # Min price rise to update trailing high (0.5%)
 
     @staticmethod
     def load_pairs():
@@ -762,6 +773,111 @@ class ScalperModule:
         warning = "⚠️ SL/TP adalah bot-side polling, bukan native OCO Indodax. Jika bot mati, trigger tidak jalan."
         return [tp_text, sl_text, rr_text, risk_reward_text, warning]
 
+    # ── AUTO TP/SL ──────────────────────────────────────────────
+
+    def _calculate_auto_tp_sl(self, entry_price: float):
+        """Calculate automatic TP/SL from entry price using ScalperConfig defaults.
+
+        Returns (tp_price, sl_price) tuple.  TP is adjusted upward to satisfy
+        the minimum risk/reward ratio when AUTO_RISK_REWARD_RATIO is set.
+        """
+        entry = float(entry_price or 0)
+        if entry <= 0:
+            return (None, None)
+
+        tp_pct = ScalperConfig.AUTO_TP_PCT
+        sl_pct = ScalperConfig.AUTO_SL_PCT
+        rr = ScalperConfig.AUTO_RISK_REWARD_RATIO
+
+        sl_price = entry * (1 - sl_pct)
+
+        # Enforce minimum R/R: if tp_pct < sl_pct * rr, bump tp
+        min_tp_pct = sl_pct * rr
+        effective_tp_pct = max(tp_pct, min_tp_pct)
+
+        tp_price = entry * (1 + effective_tp_pct)
+
+        return (tp_price, sl_price)
+
+    def _auto_apply_tp_sl(self, pair: str):
+        """Apply auto TP/SL to an existing position if AUTO_TP_SL_ENABLED.
+
+        Skips positions that already have manual TP/SL or auto_sltp set.
+        Updates position dict in-place and persists.
+        """
+        if not ScalperConfig.AUTO_TP_SL_ENABLED:
+            return
+
+        pair_lower = self._normalize_pair(pair)
+        pos = self.active_positions.get(pair_lower)
+        if not pos:
+            return
+
+        # Don't overwrite if already has auto or manual TP/SL
+        if pos.get('auto_sltp') or 'tp' in pos or 'sl' in pos:
+            return
+
+        entry = float(pos.get('entry') or 0)
+        if entry <= 0:
+            return
+
+        tp_price, sl_price = self._calculate_auto_tp_sl(entry)
+        if tp_price and sl_price:
+            pos['tp'] = tp_price
+            pos['sl'] = sl_price
+            pos['auto_sltp'] = True
+            pos['trailing_high'] = entry
+            self.active_positions[pair_lower] = pos
+            self._save_positions()
+            logger.info(
+                f"🤖 AUTO TP/SL applied: {pair_lower.upper()} "
+                f"TP={tp_price:,.0f} (+{ScalperConfig.AUTO_TP_PCT*100:.1f}%) "
+                f"SL={sl_price:,.0f} (-{ScalperConfig.AUTO_SL_PCT*100:.1f}%)"
+            )
+
+    def _check_trailing_stop(self, pair: str, pos: dict, current_price: float):
+        """Update trailing stop for auto-SL positions.
+
+        If price has risen above entry + step, raise SL to
+        (current_price - trailing_distance).  Only triggers when
+        AUTO_TRAILING_STOP_ENABLED is True and pos['auto_sltp'] is True.
+        """
+        if not ScalperConfig.AUTO_TRAILING_STOP_ENABLED:
+            return
+        if not pos.get('auto_sltp'):
+            return
+
+        entry = float(pos.get('entry') or 0)
+        current_sl = float(pos.get('sl') or 0)
+        trailing_high = float(pos.get('trailing_high') or entry)
+        distance_pct = ScalperConfig.AUTO_TRAILING_DISTANCE_PCT
+        step_pct = ScalperConfig.AUTO_TRAILING_STEP_PCT
+
+        # Update trailing high if price exceeds previous high by at least step
+        new_high = max(trailing_high, current_price)
+        if new_high > trailing_high * (1 + step_pct):
+            pos['trailing_high'] = new_high
+
+            # Calculate new trailing SL
+            new_sl = new_high * (1 - distance_pct)
+
+            # Only raise SL, never lower it
+            if new_sl > current_sl:
+                pos['sl'] = new_sl
+                logger.info(
+                    f"📐 TRAILING SL updated: {pair.upper()} "
+                    f"High={new_high:,.0f} → SL={new_sl:,.0f} "
+                    f"(was {current_sl:,.0f})"
+                )
+
+    def _auto_sltp_status_text(self, pos: dict) -> str:
+        """Return a short label for auto vs manual TP/SL mode."""
+        if pos.get('auto_sltp'):
+            return "🤖 AUTO"
+        if 'tp' in pos or 'sl' in pos:
+            return "✋ MANUAL"
+        return "—"
+
     def _dryrun_balance_text(self, mark_prices=None, markdown=False) -> str:
         """Return dry-run equity display: IDR cash plus active simulated positions."""
         mark_prices = {
@@ -1302,6 +1418,9 @@ class ScalperModule:
             # Check drop alerts for VERIFIED positions only
             self._check_drop_alerts(pair, pos, price)
 
+            # ── Trailing stop: update SL before TP/SL execution check ──
+            self._check_trailing_stop(pair, pos, price)
+
             # Only auto-execute TP/SL if they are actually set
             if not has_tp and not has_sl:
                 continue
@@ -1574,8 +1693,10 @@ class ScalperModule:
     def _register_handlers(self):
         # Primary scalper commands
         self.app.add_handler(CommandHandler("s_buy", self.cmd_buy))
+        self.app.add_handler(CommandHandler("s_buy_auto", self.cmd_buy_auto))
         self.app.add_handler(CommandHandler("s_sell", self.cmd_sell))
         self.app.add_handler(CommandHandler("s_sltp", self.cmd_sltp))
+        self.app.add_handler(CommandHandler("s_auto_sltp", self.cmd_auto_sltp))
         self.app.add_handler(CommandHandler("s_cancel", self.cmd_cancel))
         self.app.add_handler(CommandHandler("s_info", self.cmd_info))
         self.app.add_handler(CommandHandler("s_pair", self.cmd_pair))
@@ -1593,6 +1714,7 @@ class ScalperModule:
         # Aliases for convenience (no 's_' prefix needed)
         # Note: Skip 'menu' as it conflicts with main bot's /menu command
         self.app.add_handler(CommandHandler("buy", self.cmd_buy))
+        self.app.add_handler(CommandHandler("buy_auto", self.cmd_buy_auto))
         self.app.add_handler(CommandHandler("sell", self.cmd_sell))
         self.app.add_handler(CommandHandler("sltp", self.cmd_sltp))
         self.app.add_handler(CommandHandler("posisi", self.cmd_posisi))
@@ -1735,6 +1857,9 @@ class ScalperModule:
             ],
             [
                 InlineKeyboardButton("🔄 Sync Indodax", callback_data="s_sync_hint"),
+                InlineKeyboardButton("🤖 AUTO TP/SL", callback_data="s_auto_sltp_hint"),
+            ],
+            [
                 InlineKeyboardButton("🚪 Tutup Semua", callback_data="s_close_all_confirm"),
             ],
         ]
@@ -1747,6 +1872,7 @@ class ScalperModule:
             "• <code>/s_analisa &lt;pair&gt;</code> analisa teknikal\n"
             "• <code>/s_pair list|add|remove|reset</code> kelola pair\n"
             "• <code>/s_buy</code>, <code>/s_sell</code>, <code>/s_sltp</code>, <code>/s_cancel</code>\n"
+            "• <code>/s_auto_sltp</code> — auto TP/SL config\n"
             "• <code>/s_sync</code> sync posisi real Indodax\n"
             "• <code>/s_closeall</code> tutup semua posisi\n\n"
             "<b>Notifikasi sinyal otomatis:</b>\n"
@@ -2029,6 +2155,14 @@ class ScalperModule:
                 logger.error(f"❌ s_sync_hint failed: {e}")
             return
 
+        if callback_data == 's_auto_sltp_hint':
+            try:
+                # Simulate /s_auto_sltp with no args — show config
+                await self.cmd_auto_sltp(update, context)
+            except Exception as e:
+                logger.error(f"❌ s_auto_sltp_hint failed: {e}")
+            return
+
         if callback_data == 's_add_pair_hint':
             logger.info("✅ Handling s_add_pair_hint")
             await query.edit_message_text(
@@ -2242,11 +2376,26 @@ class ScalperModule:
                     'entry': price, 'time': time.time(), 'amount': amount, 'capital': capital
                 }
             self._save_positions()
+
+            # ── AUTO TP/SL ──
+            self._auto_apply_tp_sl(pair)
+
             if pair not in self.pairs:
                 self.pairs.append(pair)
                 ScalperConfig.save_pairs(self.pairs)
 
-            await query.message.reply_text(f"✅ **BUY {pair.upper()}**\nPrice: {price:,.0f}\nModal: {capital:,.0f}", parse_mode='Markdown')
+            final_pos = self.active_positions.get(pair, {})
+            final_tp = final_pos.get('tp')
+            final_sl = final_pos.get('sl')
+            auto_label = " 🤖" if final_pos.get('auto_sltp') else ""
+            tp_text = f"\n🎯 TP: {final_tp:,.0f}" if final_tp else ""
+            sl_text = f"\n🛑 SL: {final_sl:,.0f}" if final_sl else ""
+
+            await query.message.reply_text(
+                f"✅ **BUY {pair.upper()}**{auto_label}\n"
+                f"Price: {price:,.0f}\nModal: {capital:,.0f}{tp_text}{sl_text}",
+                parse_mode='Markdown'
+            )
         except Exception as e:
             await query.message.reply_text(f"❌ Gagal Buy: {e}")
 
@@ -2589,12 +2738,27 @@ class ScalperModule:
             detail = ""
 
         self._save_positions()
+
+        # ── AUTO TP/SL: apply if no manual TP/SL was provided ──
+        self._auto_apply_tp_sl(pair)
+
         if pair not in self.pairs:
             self.pairs.append(pair)
             ScalperConfig.save_pairs(self.pairs)
 
         tp_info = f"\n🎯 TP: {tp:,.0f}" if tp else ""
         sl_info = f"\n🛑 SL: {sl:,.0f}" if sl else ""
+
+        # Read back auto-applied TP/SL if no manual was provided
+        final_pos = self.active_positions.get(pair, {})
+        final_tp = final_pos.get('tp')
+        final_sl = final_pos.get('sl')
+        auto_label = " 🤖" if final_pos.get('auto_sltp') else ""
+        if not tp and final_tp:
+            tp_info = f"\n🎯 TP: {final_tp:,.0f}"
+        if not sl and final_sl:
+            sl_info = f"\n🛑 SL: {final_sl:,.0f}"
+
         sltp_summary = ""
         if tp or sl:
             sltp_summary = "\n" + "\n".join(self._sltp_summary_lines(
@@ -2606,13 +2770,26 @@ class ScalperModule:
             ))
         balance_text = self._dryrun_balance_text({pair: price})
         await update.effective_message.reply_text(
-            f"{action_text}\n\n"
+            f"{action_text}{auto_label}\n\n"
             f"📊 Price: {price:,.0f}\n"
             f"💵 Modal: {idr_amount:,.0f} IDR\n"
             f"📦 Amount: {amount:,.2f}"
             f"{sltp_summary or tp_info + sl_info}\n"
             f"{detail}{balance_text}"
         )
+
+    async def cmd_buy_auto(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Buy wrapper that auto-fills default TP/SL for manual scalping."""
+        if context.args and len(context.args) == 3:
+            try:
+                price = float(context.args[1])
+            except (TypeError, ValueError):
+                return await self.cmd_buy(update, context)
+            context.args = list(context.args) + [
+                str(price * (1 + ScalperConfig.DEFAULT_TP_PCT)),
+                str(price * (1 - ScalperConfig.DEFAULT_SL_PCT)),
+            ]
+        return await self.cmd_buy(update, context)
 
     async def _initiate_buy(self, query, pair: str):
         """Initiate buy process - get price and show confirmation"""
@@ -2793,6 +2970,10 @@ class ScalperModule:
         elif tp_pct == 0:
             pos['sl'] = entry
 
+        # Manual TP/SL overrides auto mode
+        pos.pop('auto_sltp', None)
+        pos.pop('trailing_high', None)
+
         self.active_positions[pair] = pos
         self._save_positions()
 
@@ -2888,16 +3069,23 @@ class ScalperModule:
                 self.balance -= idr_amount
                 self._save_positions()
 
+                # ── AUTO TP/SL: apply if no manual TP/SL was provided ──
+                self._auto_apply_tp_sl(pair)
+
                 # Add to pairs list if not already
                 if pair not in self.pairs:
                     self.pairs.append(pair)
                     ScalperConfig.save_pairs(self.pairs)
 
-                tp_info = f"\n🎯 TP: {tp:,.0f}" if tp and tp > 0 else ""
-                sl_info = f"\n🛑 SL: {sl:,.0f}" if sl and sl > 0 else ""
+                # Read back TP/SL (may have been set by auto)
+                final_tp = self.active_positions.get(pair, {}).get('tp')
+                final_sl = self.active_positions.get(pair, {}).get('sl')
+                tp_info = f"\n🎯 TP: {final_tp:,.0f}" if final_tp and final_tp > 0 else ""
+                sl_info = f"\n🛑 SL: {final_sl:,.0f}" if final_sl and final_sl > 0 else ""
+                auto_label = " 🤖" if self.active_positions.get(pair, {}).get('auto_sltp') else ""
 
                 await query.edit_message_text(
-                    f"{action_text}\n\n"
+                    f"{action_text}{auto_label}\n\n"
                     f"📊 Price: `{Utils.format_price(price)}` IDR\n"
                     f"💵 Modal: `{idr_amount:,.0f}` IDR\n"
                     f"📦 Amount: `{actual_amount:,.2f}`\n"
@@ -3054,6 +3242,9 @@ class ScalperModule:
             pos['sl'] = sl
         elif 'sl' in pos:
             del pos['sl']
+        # Manual TP/SL overrides auto mode
+        pos.pop('auto_sltp', None)
+        pos.pop('trailing_high', None)
         self.active_positions[pair] = pos
         self._save_positions()
         summary = "\n".join(self._sltp_summary_lines(
@@ -3068,6 +3259,143 @@ class ScalperModule:
             f"📊 Entry: `{Utils.format_price(pos['entry'])}` IDR\n"
             f"{summary}",
             parse_mode='Markdown',
+        )
+
+    async def cmd_auto_sltp(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Configure AUTO TP/SL mode for scalper positions.
+
+        Usage:
+          /s_auto_sltp           — show current config + toggle
+          /s_auto_sltp on|off    — enable/disable auto TP/SL
+          /s_auto_sltp tp <pct>  — set auto TP percentage
+          /s_auto_sltp sl <pct>  — set auto SL percentage
+          /s_auto_sltp trailing on|off — toggle trailing stop
+          /s_auto_sltp apply <pair>    — apply auto TP/SL to existing position
+        """
+        if not self._is_admin(update.effective_user.id):
+            await update.effective_message.reply_text("❌ Akses Ditolak")
+            return
+
+        args = context.args or []
+
+        # No args: show current config
+        if not args:
+            status = "✅ ON" if ScalperConfig.AUTO_TP_SL_ENABLED else "❌ OFF"
+            trailing = "✅ ON" if ScalperConfig.AUTO_TRAILING_STOP_ENABLED else "❌ OFF"
+            text = (
+                f"🤖 **AUTO TP/SL Configuration**\n\n"
+                f"Status: {status}\n"
+                f"TP: `{ScalperConfig.AUTO_TP_PCT*100:.1f}%`\n"
+                f"SL: `{ScalperConfig.AUTO_SL_PCT*100:.1f}%`\n"
+                f"Min R/R: `{ScalperConfig.AUTO_RISK_REWARD_RATIO:.1f}`\n"
+                f"Trailing Stop: {trailing}\n"
+                f"Trailing Distance: `{ScalperConfig.AUTO_TRAILING_DISTANCE_PCT*100:.1f}%`\n\n"
+                f"**Commands:**\n"
+                f"`/s_auto_sltp on` — Aktifkan AUTO TP/SL\n"
+                f"`/s_auto_sltp off` — Nonaktifkan AUTO TP/SL\n"
+                f"`/s_auto_sltp tp 4` — Set auto TP 4%\n"
+                f"`/s_auto_sltp sl 2.5` — Set auto SL 2.5%\n"
+                f"`/s_auto_sltp trailing on` — Aktifkan trailing stop\n"
+                f"`/s_auto_sltp apply {list(self.active_positions.keys())[0] if self.active_positions else 'PAIR'}` — Apply ke posisi"
+            )
+            await update.effective_message.reply_text(text, parse_mode='Markdown')
+            return
+
+        cmd = args[0].lower()
+
+        # Toggle on/off
+        if cmd in ('on', 'off'):
+            ScalperConfig.AUTO_TP_SL_ENABLED = cmd == 'on'
+            state = "✅ Diaktifkan" if cmd == 'on' else "❌ Dinonaktifkan"
+            await update.effective_message.reply_text(
+                f"🤖 AUTO TP/SL: {state}\n"
+                f"Semua buy baru akan {'dengan' if cmd == 'on' else 'tanpa'} auto TP/SL.",
+                parse_mode='Markdown'
+            )
+            return
+
+        # Set TP percentage
+        if cmd == 'tp' and len(args) >= 2:
+            try:
+                pct = float(args[1])
+                if pct <= 0 or pct > 50:
+                    raise ValueError
+                ScalperConfig.AUTO_TP_PCT = pct / 100
+                await update.effective_message.reply_text(
+                    f"✅ Auto TP diatur ke `{pct}%`",
+                    parse_mode='Markdown'
+                )
+                return
+            except (ValueError, TypeError):
+                await update.effective_message.reply_text("⚠️ Format: `/s_auto_sltp tp <persen>` (0-50)", parse_mode='Markdown')
+                return
+
+        # Set SL percentage
+        if cmd == 'sl' and len(args) >= 2:
+            try:
+                pct = float(args[1])
+                if pct <= 0 or pct > 50:
+                    raise ValueError
+                ScalperConfig.AUTO_SL_PCT = pct / 100
+                await update.effective_message.reply_text(
+                    f"✅ Auto SL diatur ke `{pct}%`",
+                    parse_mode='Markdown'
+                )
+                return
+            except (ValueError, TypeError):
+                await update.effective_message.reply_text("⚠️ Format: `/s_auto_sltp sl <persen>` (0-50)", parse_mode='Markdown')
+                return
+
+        # Toggle trailing stop
+        if cmd == 'trailing' and len(args) >= 2:
+            trailing_cmd = args[1].lower()
+            if trailing_cmd in ('on', 'off'):
+                ScalperConfig.AUTO_TRAILING_STOP_ENABLED = trailing_cmd == 'on'
+                state = "✅ Diaktifkan" if trailing_cmd == 'on' else "❌ Dinonaktifkan"
+                await update.effective_message.reply_text(
+                    f"📐 Trailing Stop: {state}\n"
+                    f"Distance: `{ScalperConfig.AUTO_TRAILING_DISTANCE_PCT*100:.1f}%`",
+                    parse_mode='Markdown'
+                )
+                return
+            await update.effective_message.reply_text("⚠️ Format: `/s_auto_sltp trailing on|off`", parse_mode='Markdown')
+            return
+
+        # Apply auto TP/SL to existing position
+        if cmd == 'apply' and len(args) >= 2:
+            pair = self._normalize_pair(args[1])
+            if pair not in self.active_positions:
+                await update.effective_message.reply_text(f"⚠️ Tidak ada posisi di **{pair.upper()}**.", parse_mode='Markdown')
+                return
+            pos = self.active_positions[pair]
+            if pos.get('auto_sltp'):
+                await update.effective_message.reply_text(f"🤖 **{pair.upper()}** sudah dalam mode AUTO TP/SL.", parse_mode='Markdown')
+                return
+            # Clear manual TP/SL first
+            pos.pop('tp', None)
+            pos.pop('sl', None)
+            pos.pop('auto_sltp', None)
+            pos.pop('trailing_high', None)
+            self.active_positions[pair] = pos
+            self._save_positions()
+            # Apply auto
+            self._auto_apply_tp_sl(pair)
+            final = self.active_positions.get(pair, {})
+            tp_val = final.get('tp', 0)
+            sl_val = final.get('sl', 0)
+            await update.effective_message.reply_text(
+                f"🤖 **AUTO TP/SL Applied: {pair.upper()}**\n\n"
+                f"Entry: `{Utils.format_price(pos['entry'])}` IDR\n"
+                f"🎯 TP: `{Utils.format_price(tp_val)}` (+{ScalperConfig.AUTO_TP_PCT*100:.1f}%)\n"
+                f"🛑 SL: `{Utils.format_price(sl_val)}` (-{ScalperConfig.AUTO_SL_PCT*100:.1f}%)\n\n"
+                f"Mode: 🤖 AUTO",
+                parse_mode='Markdown'
+            )
+            return
+
+        await update.effective_message.reply_text(
+            "⚠️ Format tidak dikenal. Gunakan `/s_auto_sltp` untuk melihat bantuan.",
+            parse_mode='Markdown'
         )
 
     async def cmd_cancel(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3344,12 +3672,14 @@ class ScalperModule:
                     if metrics['rr'] is not None:
                         detail_bits.append(f"R/R `{metrics['rr']:.2f}`")
                     gap_text = " | ".join(detail_bits) if detail_bits else "TP/SL belum diset"
+                    sltp_mode = self._auto_sltp_status_text(pos)
 
                     msg += (
                         f"\n\n{emoji} **{pair.upper()}**\n"
                         f"Entry `{entry_str}` → Now `{current_str}`\n"
                         f"P/L `{pnl:+.2f}%` (`{profit:+,.0f}` IDR)\n"
-                        f"{tp_str} / {sl_str} | {gap_text}"
+                        f"{tp_str} / {sl_str} | {gap_text}\n"
+                        f"Mode: {sltp_mode}"
                     )
                     if price_is_fallback:
                         msg += "\n_Harga live belum tersedia; memakai entry sebagai estimasi._"
@@ -4864,11 +5194,13 @@ class ScalperModule:
                     if metrics['rr'] is not None:
                         detail_bits.append(f"R/R `{metrics['rr']:.2f}`")
                     gap_text = " | ".join(detail_bits) if detail_bits else "TP/SL belum diset"
+                    sltp_mode = self._auto_sltp_status_text(pos)
                     msg += (
                         f"\n\n{emoji} **{pair.upper()}**\n"
                         f"Entry `{entry_str}` → Now `{current_str}`\n"
                         f"P/L `{pnl:+.2f}%` (`{profit:+,.0f}` IDR)\n"
-                        f"{tp_str} / {sl_str} | {gap_text}"
+                        f"{tp_str} / {sl_str} | {gap_text}\n"
+                        f"Mode: {sltp_mode}"
                     )
                     if price_is_fallback:
                         msg += "\n_Harga live belum tersedia; memakai entry sebagai estimasi._"

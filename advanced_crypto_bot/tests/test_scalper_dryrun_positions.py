@@ -225,6 +225,50 @@ class TestScalperDryRunPositions(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("Tidak ada posisi", sell_update.effective_message.replies[-1][0])
         self.assertGreater(scalper.balance, 45_000_000)
 
+    async def test_buy_auto_sets_default_tp_sl_when_not_provided(self):
+        # BUY tanpa param tp/sl → posisi/konfirmasi harus dapat tp/sl dari config default
+        scalper = self._scalper()
+        entry = 1_000
+        idr_amount = 500_000
+        expected_tp = entry * (1 + ScalperConfig.DEFAULT_TP_PCT)
+        expected_sl = entry * (1 - ScalperConfig.DEFAULT_SL_PCT)
+
+        dryrun_update = self._update()
+        await scalper.cmd_buy_auto(
+            dryrun_update,
+            SimpleNamespace(args=["HYPEIDR", str(entry), str(idr_amount)]),
+        )
+
+        position = scalper.active_positions["hypeidr"]
+        # Verifikasi: position['tp'] == entry * (1 + DEFAULT_TP_PCT)
+        self.assertEqual(position["tp"], expected_tp)
+        # Verifikasi: position['sl'] == entry * (1 - DEFAULT_SL_PCT)
+        self.assertEqual(position["sl"], expected_sl)
+
+        saved = json.loads(self.positions_file.read_text(encoding="utf-8"))
+        saved_position = saved["positions"]["hypeidr"]
+        self.assertEqual(saved_position["tp"], position["tp"])
+        self.assertEqual(saved_position["sl"], position["sl"])
+        reply = dryrun_update.effective_message.replies[-1][0]
+        self.assertIn("TP", reply)
+        self.assertIn("SL", reply)
+
+        # Verifikasi: REAL manual scalping juga auto-set TP/SL di callback konfirmasi
+        real_scalper = self._scalper(real=True, indodax=_FakeIndodax())
+        real_update = self._update()
+        await real_scalper.cmd_buy_auto(
+            real_update,
+            SimpleNamespace(args=["HYPEIDR", str(entry), str(idr_amount)]),
+        )
+
+        self.assertNotIn("hypeidr", real_scalper.active_positions)
+        reply_markup = real_update.effective_message.replies[-1][1]["reply_markup"]
+        confirm_callback = reply_markup.inline_keyboard[0][0].callback_data
+        self.assertEqual(
+            confirm_callback,
+            f"s_confirm_buy:hypeidr:1000:500000:{expected_tp}:{expected_sl}",
+        )
+
     async def test_pairs_dashboard_uses_same_order_for_list_and_buttons(self):
         scalper = self._scalper()
         scalper.pairs = ["solidr", "btcidr"]

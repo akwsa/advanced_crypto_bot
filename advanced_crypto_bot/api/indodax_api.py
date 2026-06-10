@@ -412,6 +412,7 @@ class IndodaxAPI:
         if max_slippage is None:
             max_slippage = Config.SLIPPAGE_MAX_PCT
         
+        response = None
         try:
             pair_symbol = self._private_pair_symbol(pair)
             
@@ -482,8 +483,11 @@ class IndodaxAPI:
             return data
         except Exception as e:
             logger.error(f"Error creating order: {e}")
-            logger.error(f"Response status: {response.status_code if 'response' in dir() else 'N/A'}")
-            logger.error(f"Response text: {response.text if 'response' in dir() else 'N/A'}")
+            if response is not None:
+                logger.error(f"Response status: {response.status_code}")
+                logger.error(f"Response text: {response.text}")
+            else:
+                logger.error("No response received from Indodax API")
         return None
 
     def cancel_order(self, pair, order_id):

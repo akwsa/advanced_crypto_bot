@@ -12,6 +12,7 @@
 """
 
 import asyncio
+import json
 import os
 import threading
 import time
@@ -291,6 +292,9 @@ class AdvancedCryptoBot:
         # Scalper no longer inherits AUTO_TRADE_DRY_RUN; AutoTrade/SmartHunter/
         # AutoHunter still do.
         self._enable_startup_dryrun_autotrade()
+
+        # Cleanup broken DRY RUN trades with amount=0 (legacy bug, fixed 2026-06-07)
+        self._cleanup_broken_dryrun_trades()
 
         # Rebuild SL/TP monitoring for open trades that survived restart
         self.price_monitor.rebuild_from_open_trades(self.db, self.trading_engine)
@@ -1343,6 +1347,17 @@ class AdvancedCryptoBot:
                         logger.info(f"🔨 [SQ-WORKER] Processing {signal_type} {pair} @ {price:,.0f}")
                         last_processed[key] = now
 
+                        # FIX 2026-06-07: Clear stale inflight tasks from other
+                        # event loops before running check_trading_opportunity.
+                        # _get_cached_signal stores asyncio tasks in
+                        # _signal_inflight_tasks — if a task was created in the
+                        # main Telegram event loop and the worker tries to await
+                        # it from its own loop, it raises "attached to a
+                        # different loop". Clearing the dict prevents this.
+                        inflight = getattr(self, '_signal_inflight_tasks', None)
+                        if isinstance(inflight, dict):
+                            inflight.clear()
+
                         # FIX: Do NOT pass a minimal signal skeleton; let
                         # check_trading_opportunity regenerate the full signal via
                         # _get_cached_signal so notifications carry real indicators,
@@ -1427,7 +1442,7 @@ class AdvancedCryptoBot:
                             if recommendation in ['STRONG_BUY', 'BUY', 'STRONG_SELL', 'SELL']:
                                 if not price or price <= 0:
                                     logger.debug(f"Skipped {pair}: price is 0 or invalid")
-                                elif abs(ta_strength) < 0.45:
+                                elif abs(ta_strength) < 0.05:
                                     logger.debug(f"Skipped {pair}: TA strength too low ({ta_strength:.2f})")
                                 else:
                                     strong_signals.append({
@@ -1971,7 +1986,42 @@ class AdvancedCryptoBot:
         """
         self.is_trading = True
         self._save_auto_trade_mode(True)
-        logger.info("🟡 Startup command applied automatically: /autotrade dryrun")
+        # Ensure signal notifications are ON so DRY RUN signals appear in Telegram
+        self.signal_notifications_enabled = True
+        try:
+            self.db.set_signal_notifications_enabled(True)
+        except Exception:
+            pass
+        logger.info("🟡 Startup command applied automatically: /autotrade dryrun (notifications ON)")
+
+    def _cleanup_broken_dryrun_trades(self):
+        """Close DRY RUN trades with amount=0 (legacy bug before 2026-06-07 fix)."""
+        try:
+            user_id = Config.ADMIN_IDS[0] if Config.ADMIN_IDS else 1
+            open_trades = self.db.get_open_trades(user_id)
+            closed_count = 0
+            for trade in open_trades:
+                trade_dict = dict(trade) if hasattr(trade, 'keys') else trade
+                amount = float(trade_dict.get('amount', 0) or 0)
+                notes = str(trade_dict.get('notes', '') or '').lower()
+                if amount <= 0 and 'dry run' in notes:
+                    trade_id = trade_dict.get('id')
+                    self.db.close_trade(
+                        trade_id=trade_id,
+                        sell_price=trade_dict.get('price', 0),
+                        sell_amount=0,
+                        order_id='CLEANUP',
+                        reason='BROKEN_AMOUNT_ZERO'
+                    )
+                    try:
+                        self.price_monitor.remove_price_level(user_id, trade_id)
+                    except Exception:
+                        pass
+                    closed_count += 1
+            if closed_count > 0:
+                logger.info(f"🧹 Cleaned up {closed_count} broken DRY RUN trades (amount=0)")
+        except Exception as e:
+            logger.debug(f"⚠️ Cleanup broken trades skipped: {e}")
 
     def _normalize_official_pair_key(self, pair: str) -> str:
         """Normalize a pair to the Indodax official no-separator key, e.g. btcidr."""
@@ -2936,14 +2986,23 @@ class AdvancedCryptoBot:
         """Helper to send message for both command and callback query.
         Logs all failures so bugs are visible in logs.
 
+<<<<<<< Updated upstream
         For parse_mode='HTML', sanitize text proactively to prevent
         Telegram 'Can't parse entities' errors caused by stray <, >, & or
         non-whitelisted tags in dynamic content (Bug Critical #4 — audit
         2026-06-07).
+=======
+        FIX 2026-06-07 v2: Robust error recovery —
+        - HTML parse-mode fallback (html_escape retry)
+        - Markdown parse-mode fallback (strip **, `, _ → plain text)
+        - Event-loop mismatch fallback (RuntimeError 'different event loop' → retry on main loop if available)
+        - Bare-text last-resort (strips ALL kwargs, no parse_mode)
+>>>>>>> Stashed changes
         """
         edit_error = None
         reply_error = None
 
+<<<<<<< Updated upstream
         # Proactive HTML sanitization: pre-clean text so Telegram doesn't
         # reject the message in the first place. Preserves whitelisted tags
         # (b/i/u/code/pre/a/etc), escapes everything else.
@@ -2964,6 +3023,36 @@ class AdvancedCryptoBot:
                     await target_message.reply_text(safe_text)
                 except Exception as bare_err:
                     logger.warning("_send_message bare fallback failed: %s", bare_err)
+=======
+        async def _try_escaped_fallback(target_message, safe_kwargs, safe_text):
+            """Multi-layer fallback: try with safe_kwargs, then bare, then fire-and-forget."""
+            for attempt, (use_kwargs, label) in enumerate([
+                (safe_kwargs, "safe_kwargs"),
+                ({}, "bare"),
+            ]):
+                try:
+                    await target_message.reply_text(safe_text, **use_kwargs)
+                    return True
+                except Exception as fb_err:
+                    fb_str = str(fb_err)
+                    if attempt == 0:
+                        logger.debug("_send_message escape fallback lvl%d (%s) failed: %s",
+                                     attempt + 1, label, fb_str)
+                    # If event-loop mismatch even on bare, try scheduling on main loop
+                    if 'different event loop' in fb_str.lower() or 'different loop' in fb_str.lower():
+                        try:
+                            loop_ref = getattr(self, '_telegram_loop', None)
+                            if loop_ref and not loop_ref.is_closed():
+                                import asyncio as _asyncio
+                                _asyncio.run_coroutine_threadsafe(
+                                    target_message.reply_text(safe_text),
+                                    loop_ref
+                                )
+                                return True
+                        except Exception:
+                            pass
+            return False
+>>>>>>> Stashed changes
 
         if update.callback_query:
             try:
@@ -2971,25 +3060,37 @@ class AdvancedCryptoBot:
                 return
             except Exception as e:
                 edit_error = str(e)
-                # Fallback: send as a new reply message
                 try:
                     await update.callback_query.message.reply_text(text, **kwargs)
                     return
                 except Exception as e2:
                     reply_error = str(e2)
-                    if kwargs.get('parse_mode') == 'HTML' and 'parse entities' in reply_error.lower():
-                        await _send_html_escaped_fallback(update.callback_query.message)
-                        return
+                    pm = kwargs.get('parse_mode')
+                    if pm == 'HTML':
+                        safe_kwargs = {k: v for k, v in kwargs.items()
+                                       if k not in ('parse_mode',)}
+                        safe_text = html_escape(str(text))
+                        if await _try_escaped_fallback(
+                            update.callback_query.message, safe_kwargs, safe_text
+                        ):
+                            return
+                    elif pm == 'Markdown':
+                        safe_kwargs = {k: v for k, v in kwargs.items()
+                                       if k not in ('parse_mode',)}
+                        safe_text = str(text).replace('**', '').replace('`', '').replace('_', '')
+                        if await _try_escaped_fallback(
+                            update.callback_query.message, safe_kwargs, safe_text
+                        ):
+                            return
 
         # Command or fallback path
         try:
-            if update.message:
-                await update.message.reply_text(text, **kwargs)
-                return
-            elif update.effective_message:
-                await update.effective_message.reply_text(text, **kwargs)
+            target = update.message or update.effective_message
+            if target:
+                await target.reply_text(text, **kwargs)
                 return
         except Exception as e:
+<<<<<<< Updated upstream
             # Unconditional HTML fallback: any error with parse_mode='HTML'
             # triggers html_escape retry (not just 'parse entities').
             # Also handles event-loop mismatch by detecting the error pattern.
@@ -3007,20 +3108,62 @@ class AdvancedCryptoBot:
                     import asyncio as _asyncio
                     loop_ref = getattr(self, '_telegram_loop', None)
                     if loop_ref and not loop_ref.is_closed():
+=======
+            err_str = str(e).lower()
+            pm = kwargs.get('parse_mode')
+            is_html_mode = pm == 'HTML'
+            is_md_mode = pm == 'Markdown'
+            is_parse_err = 'parse entities' in err_str or "can't parse" in err_str
+            is_event_loop_err = 'different event loop' in err_str or 'different loop' in err_str
+            target = update.message or update.effective_message
+
+            if is_html_mode and target:
+                # Strip parse_mode + risky kwargs, html_escape, retry
+                safe_kwargs = {k: v for k, v in kwargs.items()
+                               if k not in ('parse_mode',)}
+                safe_text = html_escape(str(text))
+                if await _try_escaped_fallback(target, safe_kwargs, safe_text):
+                    return
+            elif is_md_mode and target:
+                # Strip Markdown markup, retry as plain text
+                safe_kwargs = {k: v for k, v in kwargs.items()
+                               if k not in ('parse_mode',)}
+                safe_text = str(text).replace('**', '').replace('`', '').replace('_', '')
+                if await _try_escaped_fallback(target, safe_kwargs, safe_text):
+                    return
+            elif is_event_loop_err and target:
+                # Event loop mismatch — schedule on main loop
+                try:
+                    loop_ref = getattr(self, '_telegram_loop', None)
+                    if loop_ref and not loop_ref.is_closed():
+                        import asyncio as _asyncio
+>>>>>>> Stashed changes
                         _asyncio.run_coroutine_threadsafe(
                             target.reply_text(html_escape(str(text))),
                             loop_ref
                         )
+<<<<<<< Updated upstream
                         return
                 except Exception:
                     pass
 
             logger.warning("_send_message failed (edit=%s, reply=%s, fallback=%s)",
                            edit_error, reply_error, str(e)[:120])
+=======
+                        logger.debug("_send_message rescheduled on main loop after event-loop mismatch")
+                        return
+                except Exception as loop_fix_err:
+                    logger.warning("_send_message loop-fix also failed: %s", loop_fix_err)
+
+            logger.warning("_send_message failed (edit=%s, reply=%s, fallback=%s)",
+                           edit_error, reply_error, str(e)[:120])
+            # Don't raise — prevent cascading failures in command handlers
+>>>>>>> Stashed changes
             return
 
         if edit_error or reply_error:
-            logger.warning(f"_send_message fallback used: edit_err={edit_error}, reply_err={reply_error}")
+            logger.warning("_send_message fallback used: edit_err=%s, reply_err=%s",
+                           edit_error, reply_error)
 
     async def _send_photo(self, update, photo, **kwargs):
         """Helper to send a photo for both command and callback query."""
@@ -4730,6 +4873,8 @@ class AdvancedCryptoBot:
                 # Convert sqlite3.Row to dict for safe access
                 closed_trades = []
                 open_trades = self.db.get_open_trades(user_id)
+                # Filter out broken trades with amount=0 (legacy bug)
+                open_trades = [t for t in open_trades if float(t['amount'] if 'amount' in t.keys() else 0) > 0]
                 total_pnl = 0
                 winning_count = 0
 
@@ -6687,6 +6832,11 @@ market conditions are extremely dangerous.
         self._save_auto_trade_mode(is_dry_run)
         logger.info("🟡 Auto-trading ENABLED in %s mode via /autotrade", 'DRY RUN' if is_dry_run else 'REAL')
 
+        # Auto-enable signal notifications so DRY RUN signals appear in Telegram
+        if not self._are_signal_notifications_enabled():
+            self._set_signal_notifications_enabled(True)
+            logger.info("🔔 Signal notifications auto-enabled for DRY RUN visibility")
+
         # Ambil user_id admin pemanggil dan existing watchlist
         user_id = update.effective_user.id
         imported_pairs = []
@@ -6895,11 +7045,16 @@ market conditions are extremely dangerous.
                     text += f"• {pair_label} [{bucket}] — {reason}\n"
                 text += "\n"
 
-            text += "✅ **Langkah untuk menguji Auto-Trade DRY RUN:**\n"
-            text += "1. Tambah beberapa pair likuid ke watchlist: `/watch btcidr, ethidr`\n"
-            text += "2. Pastikan mode: `/autotrade dryrun` (cek di sini: DRY RUN)\n"
-            text += "3. Biarkan bot berjalan beberapa jam agar pipeline sinyal bekerja\n"
-            text += "4. Lihat kembali `/autotrade_status` dan `/trades` untuk hasil simulasi\n\n"
+            # Context-aware tips based on current state
+            if active_pairs:
+                text += f"📌 Watchlist sudah aktif ({len(active_pairs)} pair). "
+                text += "Bot akan otomatis entry saat sinyal BUY valid muncul.\n"
+                text += "💡 Cek `/trades` untuk hasil simulasi atau tunggu notifikasi entry DRY RUN.\n\n"
+            else:
+                text += "✅ **Langkah untuk memulai Auto-Trade DRY RUN:**\n"
+                text += "1. Tambah pair ke watchlist: `/watch btcidr, ethidr`\n"
+                text += "2. Pastikan mode: `/autotrade dryrun`\n"
+                text += "3. Bot akan otomatis entry saat sinyal BUY valid muncul\n\n"
 
         if dry_run_trades:
             text += f"  - 🧪 Dry Run: {len(dry_run_trades)}\n"
@@ -6943,6 +7098,9 @@ market conditions are extremely dangerous.
             # Convert sqlite3.Row to dict
             trade_dict = dict(trade) if hasattr(trade, 'keys') else trade
             if trade_dict.get('signal_source') == 'auto':
+                # Skip broken trades with amount=0 (bug lama, sudah difix)
+                if float(trade_dict.get('amount', 0) or 0) <= 0:
+                    continue
                 auto_open.append(trade_dict)
                 notes = str(trade_dict.get('notes', '')).lower()
                 if 'dry run' in notes:
@@ -8497,23 +8655,76 @@ It uses its own analysis (RSI, MACD, Volume, MA, Bollinger).
                 is_dry_run = order_id.startswith('DRY-')
 
                 if is_dry_run:
-                    # Dry run simulation: check if market price <= limit price
+                    # DRY RUN realistic fill simulation:
+                    # Use ASK price (not last) — limit BUY only fills when ask <= limit
                     current_price_data = self.price_data.get(pair, {})
-                    market_price = current_price_data.get('last')
+                    market_price = None
+                    try:
+                        ticker = self.indodax.get_ticker(pair)
+                        if ticker:
+                            # Prefer ask (sell) for BUY fill realism
+                            ask_price = ticker.get('sell') or ticker.get('ask')
+                            last_price = ticker.get('last')
+                            market_price = float(ask_price) if ask_price else (float(last_price) if last_price else None)
+                    except Exception:
+                        pass
                     if market_price is None:
-                        try:
-                            ticker = self.indodax.get_ticker(pair)
-                            market_price = ticker['last'] if ticker else None
-                        except Exception:
-                            pass
+                        market_price = current_price_data.get('last')
 
                     if market_price and market_price <= limit_price:
-                        # Simulate fill
+                        meta = {}
+                        try:
+                            raw_notes = order.get('notes') if hasattr(order, 'get') else None
+                            if raw_notes:
+                                meta = json.loads(raw_notes)
+                        except Exception:
+                            meta = {}
+                        # Calculate realistic fill price with slippage for all cases
+                        slippage_pct = float(getattr(Config, 'DRYRUN_SLIPPAGE_PCT', 0.001) or 0.001)
+                        fill_price = float(limit_price) * (1 + slippage_pct)
+                        if not trade_id:
+                            fee_rate = float(getattr(Config, 'TRADING_FEE_RATE', 0.003) or 0.003)
+                            amount = float(order.get('amount') or 0)
+                            # Fee applied on fill (entry side)
+                            fee = fill_price * amount * fee_rate
+                            ml_conf = float(meta.get('ml_confidence', 0.5) or 0.5)
+                            signal_source = str(meta.get('signal_source') or 'auto')
+                            trade_id = self.db.add_trade(
+                                user_id=order['user_id'],
+                                pair=pair,
+                                trade_type='BUY',
+                                price=fill_price,
+                                amount=amount,
+                                total=fill_price * amount,
+                                fee=fee,
+                                signal_source=signal_source,
+                                ml_confidence=ml_conf,
+                                notes=f"[DRY RUN] Filled limit order_id: {order_id} @ {fill_price:,.0f} (limit={float(limit_price):,.0f}, slip={slippage_pct*100:.2f}%, fee={fee:,.0f})",
+                            )
+                            stop_loss = meta.get('stop_loss')
+                            take_profit_1 = meta.get('take_profit_1')
+                            take_profit_2 = meta.get('take_profit_2')
+                            atr_value = meta.get('atr')
+                            try:
+                                tp_data = self.trading_engine.calculate_stop_loss_take_profit(fill_price, 'BUY', atr_value=atr_value)
+                                stop_loss = tp_data.get('stop_loss', stop_loss)
+                                take_profit_1 = tp_data.get('take_profit_1', take_profit_1)
+                                take_profit_2 = tp_data.get('take_profit_2', take_profit_2)
+                            except Exception:
+                                pass
+                            try:
+                                if stop_loss and take_profit_1 and take_profit_2:
+                                    self.price_monitor.set_price_level(order['user_id'], trade_id, pair, fill_price, float(stop_loss), float(take_profit_1), float(take_profit_2), amount)
+                            except Exception:
+                                pass
+                        # Simulate fill with realistic price
                         self.db.update_pending_order_filled(
-                            db_id, fill_price=limit_price,
-                            notes=f"[DRY RUN] Simulated fill @ {limit_price:,.0f} (market {market_price:,.0f})"
+                            db_id,
+                            fill_price=fill_price,
+                            notes=f"[DRY RUN] Simulated fill @ {fill_price:,.0f} (limit={limit_price:,.0f}, market={market_price:,.0f}, slip={slippage_pct*100:.2f}%)",
+                            trade_id=trade_id,
                         )
-                        logger.info(f"[PENDING_ORDER] DRY RUN filled: {pair} @ {limit_price:,.0f}")
+                        logger.info(f"[PENDING_ORDER] DRY RUN filled: {pair} @ {fill_price:,.0f} (limit={limit_price:,.0f}, market={market_price:,.0f})")
                     elif market_price and market_price >= limit_price * (1 + Config.LIMIT_ORDER_CANCEL_DISTANCE_PCT / 100.0):
                         self.db.update_pending_order_cancelled(
                             db_id,

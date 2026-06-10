@@ -255,9 +255,11 @@ class PricePoller:
                 except Exception as e:
                     logger.error(f"❌ Error monitoring signal for {pair}: {e}")
 
-                # Auto-trigger trade if enabled
-                if self.bot.is_trading:
-                    asyncio.create_task(self.bot._check_trading_opportunity(pair))
+                # NOTE: _check_trading_opportunity REMOVED from price poller.
+                # SignalQueue worker (bot.py:_start_signal_queue_worker) and
+                # WebSocket handler (bot.py:process_price_update_signal_tasks)
+                # are the canonical paths for triggering trades. Keeping it here
+                # caused dual-execution race conditions (e.g., ethidr duplicate).
 
         except Exception as e:
             error_str = str(e)
@@ -349,9 +351,11 @@ class PricePoller:
                 except Exception as e:
                     logger.error(f"❌ Error monitoring signal for {pair}: {e}")
 
-                # Auto-trigger trade if enabled
-                if self.bot.is_trading:
-                    asyncio.create_task(self.bot._check_trading_opportunity(pair))
+                # NOTE: _check_trading_opportunity REMOVED from price poller.
+                # SignalQueue worker (bot.py:_start_signal_queue_worker) and
+                # WebSocket handler (bot.py:process_price_update_signal_tasks)
+                # are the canonical paths for triggering trades. Keeping it here
+                # caused dual-execution race conditions (e.g., ethidr duplicate).
 
         except Exception as e:
             error_str = str(e)

@@ -232,16 +232,59 @@ Strong signal detected
         ↓
 check_trading_opportunity(pair, signal)  [autotrade/runtime.py]
         ├─→ Check Config.AUTO_TRADING_ENABLED & is_trading
+        ├─→ Decision Layer: display_recommendation check
+        │       ├─→ PANTAU + exploration thresholds met → entry 20% size
+        │       ├─→ BELI_BERTAHAP → entry 50% size
+        │       ├─→ BUY / STRONG_BUY → full entry
+        │       └─→ PANTAU below threshold → blocked
         ├─→ RiskManager.validate_trade()
         │       ├─→ Daily loss limit check
         │       ├─→ Max drawdown circuit breaker
         │       └─→ Dynamic correlation portfolio heat
+        ├─→ Market Intelligence (spread, orderbook, volume)
         ├─→ TradingEngine.calculate_position_size()
         │       └─→ BayesianKelly adaptive sizing
-        ├─→ TradingEngine.execute_buy() / execute_sell()
-        │       └─→ DRY RUN: simulasi only, save ke DB dengan flag DRY RUN
+        ├─→ Entry Zone calculation (limit price below market)
+        ├─→ DRY RUN Execution:
+        │       ├─→ Immediate fill if ask within 1% of entry zone
+        │       │       ├─→ Apply slippage (DRYRUN_SLIPPAGE_PCT, default 0.1%)
+        │       │       ├─→ Apply fee (TRADING_FEE_RATE, 0.3%)
+        │       │       └─→ Save trade to DB + setup SL/TP
+        │       └─→ Otherwise → register PENDING order
+        │               └─→ check_pending_orders() fills when ask <= limit
         ├─→ price_monitor.set_price_level() → SL/TP/trailing setup
-        └─→ Send Telegram notification
+        └─→ Send Telegram notification (if signal_notifications ON)
+```
+
+#### DRY RUN Execution Realism (2026-06-04)
+
+DRY RUN profit/loss sekarang **menyertakan fee + slippage** supaya hasil simulasi mendekati real:
+
+| Komponen | Nilai | Keterangan |
+|----------|-------|------------|
+| Entry slippage | +0.1% (BUY pays more) | `DRYRUN_SLIPPAGE_PCT` |
+| Trading fee | 0.3% per side | `TRADING_FEE_RATE` (Indodax standard) |
+| Exit slippage | -0.1% (SELL gets less) | Applied saat auto-sell |
+| Fill rule | Ask ≤ limit price + 1% | Limit order dianggap fill jika market dekat |
+| Timeout | 15 menit | `LIMIT_ORDER_TIMEOUT_MINUTES` |
+
+#### Exploration Mode (PANTAU / BELI_BERTAHAP)
+
+Sinyal yang belum cukup kuat untuk full entry tapi masih layak di-evaluasi:
+
+| Label | Position Size | Syarat |
+|-------|--------------|--------|
+| PANTAU | 20% | conf≥0.45, strength≥0.05, rr≥0.6 |
+| BELI_BERTAHAP | 50% | Otomatis lolos (sudah melewati decision layer) |
+| BUY / STRONG_BUY | 100% | Full size sesuai Kelly/risk |
+
+Config exploration di `.env`:
+```env
+DRYRUN_EXPLORATION_ENABLED=true
+DRYRUN_EXPLORATION_POSITION_FACTOR=0.20
+DRYRUN_EXPLORATION_MIN_CONFIDENCE=0.45
+DRYRUN_EXPLORATION_MIN_STRENGTH=0.05
+DRYRUN_EXPLORATION_MIN_RR=0.6
 ```
 
 ### 5. Real Trade Flow (Scalper Only)

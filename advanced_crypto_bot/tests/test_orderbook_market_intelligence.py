@@ -122,6 +122,7 @@ async def test_analyze_market_intelligence_spread_result_includes_bid_ask_mid():
     assert abs(result["spread_pct"] - (2.0 / 101.0)) < 0.001
 
 
+<<<<<<< Updated upstream
 # ---------------------------------------------------------------------------
 # Regression: Indodax orderbook returning bid prices == 0 must NOT be reported
 # as SPREAD_TOO_WIDE. Root cause (2026-06-09): low-cap pairs (dlcidr, homeidr,
@@ -281,3 +282,18 @@ async def test_analyze_market_intelligence_volume_default_is_zero_when_no_data()
         f"volume_ratio harus 0.0 tanpa data, got {result['volume_ratio']}"
     )
     assert result["volume_spike"] is False
+=======
+@pytest.mark.asyncio
+async def test_analyze_market_intelligence_blocks_entry_when_bid_ask_invalid():
+    bot = _FakeBot(
+        {
+            "bids": [["0", "5.0"], ["0", "3.0"]],
+            "asks": [["0", "2.0"], ["0", "1.0"]],
+        }
+    )
+
+    result = await analyze_market_intelligence(bot, "btcidr", current_price=100.0)
+
+    assert result.get("block_reason") == "SPREAD_INVALID"
+    assert result.get("passes_entry_filter") is False
+>>>>>>> Stashed changes

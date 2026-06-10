@@ -674,15 +674,17 @@ class Database:
             return 0
 
     # Trades
-    def add_trade(self, user_id, pair, trade_type, price, amount, total, fee, signal_source, ml_confidence, notes=None):
+    def add_trade(self, user_id, pair, trade_type, price, amount, total, fee, signal_source, ml_confidence, notes=None, status='OPEN', original_total=None):
         with self.get_connection() as conn:
             cursor = conn.cursor()
+            effective_status = status or 'OPEN'
+            effective_original_total = total if original_total is None else original_total
             cursor.execute('''
                 INSERT INTO trades (user_id, pair, type, price, amount, total, fee,
                                    signal_source, ml_confidence, status, original_total, notes)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (user_id, pair, trade_type, price, amount, total, fee,
-                  signal_source, ml_confidence, 'OPEN', total, notes))
+                  signal_source, ml_confidence, effective_status, effective_original_total, notes))
             return cursor.lastrowid
 
     def get_trade(self, trade_id):
@@ -1187,15 +1189,15 @@ class Database:
                 ''', (status,))
             return cursor.fetchall()
 
-    def update_pending_order_filled(self, db_id, fill_price, notes=None):
+    def update_pending_order_filled(self, db_id, fill_price, notes=None, trade_id=None):
         """Mark pending order as filled."""
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute('''
                 UPDATE pending_orders
-                SET status = 'FILLED', filled_at = CURRENT_TIMESTAMP, fill_price = ?, notes = COALESCE(?, notes)
+                SET status = 'FILLED', filled_at = CURRENT_TIMESTAMP, fill_price = ?, notes = COALESCE(?, notes), trade_id = COALESCE(?, trade_id)
                 WHERE id = ?
-            ''', (fill_price, notes, db_id))
+            ''', (fill_price, notes, trade_id, db_id))
 
     def update_pending_order_cancelled(self, db_id, notes=None):
         """Mark pending order as cancelled."""

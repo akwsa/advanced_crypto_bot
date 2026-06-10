@@ -7,6 +7,7 @@
 """Runtime helpers extracted from bot.py for signal monitoring and auto-trading."""
 
 import asyncio
+import json
 import logging
 import random
 import threading
@@ -165,9 +166,59 @@ def _is_auto_trade_pair(bot, pair):
     )
 
 
+def _get_autotrade_liquidity_blacklist(bot):
+    store = getattr(bot, "_autotrade_liquidity_blacklist", None)
+    if store is None:
+        store = {}
+        bot._autotrade_liquidity_blacklist = store
+    return store
+
+
+def _is_autotrade_liquidity_blacklisted(bot, pair):
+    pair_key = _normalize_pair(pair)
+    store = _get_autotrade_liquidity_blacklist(bot)
+    entry = store.get(pair_key)
+    if not entry:
+        return False
+    expires_at = entry.get("expires_at")
+    if expires_at and datetime.now() > expires_at:
+        store.pop(pair_key, None)
+        return False
+    return True
+
+
+def _blacklist_autotrade_pair(bot, pair, reason):
+    pair_key = _normalize_pair(pair)
+    ttl_minutes = int(getattr(Config, "AUTOTRADE_LIQUIDITY_BLACKLIST_TTL_MINUTES", 180) or 180)
+    expires_at = datetime.now() + timedelta(minutes=ttl_minutes)
+    store = _get_autotrade_liquidity_blacklist(bot)
+    store[pair_key] = {
+        "pair": str(pair or "").upper(),
+        "reason": str(reason or "").strip(),
+        "expires_at": expires_at,
+        "timestamp": datetime.now(),
+    }
+    logger.info(f"🚫 [LIQUIDITY_BLACKLIST] {pair}: {reason} (ttl={ttl_minutes}m)")
+    _remember_autotrade_block_reason(bot, pair, f"LIQUIDITY_BLACKLIST: {reason}")
+
+
+def _extract_bid_ask_from_ticker(ticker):
+    if not ticker:
+        return None, None, None
+    bid = _to_positive_float(ticker.get("bid"))
+    if bid is None:
+        bid = _to_positive_float(ticker.get("buy"))
+    ask = _to_positive_float(ticker.get("ask"))
+    if ask is None:
+        ask = _to_positive_float(ticker.get("sell"))
+    last = _to_positive_float(ticker.get("last"))
+    return bid, ask, last
+
+
+
 def _signal_notifications_enabled(bot):
     """Return whether automatic Telegram signal notifications are enabled."""
-    return getattr(bot, "signal_notifications_enabled", True)
+    return bot._are_signal_notifications_enabled() if hasattr(bot, '_are_signal_notifications_enabled') else getattr(bot, 'signal_notifications_enabled', True)
 
 
 def _signal_passes_filter(bot, recommendation):
@@ -198,16 +249,43 @@ def _is_valid_position_size(amount, total):
 
 
 def _calculate_dry_run_total_from_price(price):
-    """Return DRY RUN nominal based on pair price.
+    """Return DRY RUN total IDR based on pair price.
 
-    Uses a continuous formula: multiplier = round(1M / price), clamped to [10, 1000].
-    This eliminates the 10x discontinuity at old tier boundaries (10k, 100k).
+    Target: 1.000.000 - 2.000.000 IDR per trade, capped at 2.000.000:
+    - Price < 1000 IDR   → min 10.000 koin, cap 2.000.000
+    - 1000-10000 IDR     → min 100 koin, cap 2.000.000
+    - > 10000 IDR        → cap 2.000.000
+
+    FIX 2026-06-07: MAX_TOTAL dinaikkan ke 2.000.000 dan di-hard-cap
+    (sebelumnya 1.500.000). Semua pair termasuk BTC tidak boleh melebihi
+    2.000.000 IDR.
     """
+    TARGET_TOTAL = 1_250_000
+    MIN_TOTAL = 1_000_000
+    MAX_TOTAL = 2_000_000  # FIX: hard cap 2.000.000 for all pairs
+
     price_value = _to_positive_float(price)
     if price_value is None:
         return None
-    multiplier = max(10, min(1000, round(1_000_000 / max(price_value, 1))))
-    return float(price_value * multiplier)
+
+    total = TARGET_TOTAL
+
+    # Pastikan amount koin masuk akal untuk harga rendah
+    amount_coins = total / price_value
+
+    if price_value < 1000:
+        min_amount = 10000
+        if amount_coins < min_amount:
+            amount_coins = min_amount
+            total = amount_coins * price_value
+    elif price_value <= 10000:
+        min_amount = 100
+        if amount_coins < min_amount:
+            amount_coins = min_amount
+            total = amount_coins * price_value
+
+    # Hard cap: never exceed MAX_TOTAL even for expensive coins like BTC
+    return max(MIN_TOTAL, min(MAX_TOTAL, total))
 
 
 async def _get_cached_signal(bot, pair):
@@ -219,7 +297,30 @@ async def _get_cached_signal(bot, pair):
 
     in_flight = getattr(bot, "_signal_inflight_tasks", {}).get(pair)
     if in_flight:
-        return await in_flight
+        # FIX 2026-06-07 v2: Validate event-loop compatibility before awaiting.
+        # If the stored task was created on a different event loop (e.g., main
+        # Telegram loop vs SignalQueue worker loop), we must not await it —
+        # asyncio will raise "attached to a different loop". Instead, clear
+        # the stale entry and create a fresh task on the current loop.
+        try:
+            task_loop = in_flight.get_loop() if hasattr(in_flight, 'get_loop') else None
+        except Exception:
+            task_loop = None
+        if task_loop is not None:
+            import asyncio as _asyncio
+            try:
+                current_loop = _asyncio.get_running_loop()
+            except RuntimeError:
+                current_loop = None
+            if task_loop is not current_loop:
+                logger.debug(
+                    "_get_cached_signal: stale inflight task for %s (task_loop != current), clearing",
+                    pair
+                )
+                bot._signal_inflight_tasks.pop(pair, None)
+                in_flight = None
+            else:
+                return await in_flight
 
     task = asyncio.create_task(generate_signal_for_pair(bot, pair))
     bot._signal_inflight_tasks[pair] = task
@@ -264,6 +365,35 @@ async def process_price_update_signal_tasks(bot, pair):
 def _auto_promote_pair(bot, pair):
     """Auto-add a watched pair to auto_trade_pairs on BUY/STRONG_BUY signal."""
     pair_norm = _normalize_pair(pair)
+    if Config.AUTOTRADE_LIQUIDITY_WHITELIST and pair_norm not in set(Config.AUTOTRADE_LIQUIDITY_WHITELIST):
+        return
+    if _is_autotrade_liquidity_blacklisted(bot, pair):
+        return
+    if getattr(Config, "AUTOTRADE_LIQUIDITY_PROMOTE_REQUIRE_BIDASK", True):
+        # In DRY RUN mode, skip strict bid/ask check at promote stage.
+        # The MI spread gate inside check_trading_opportunity will still
+        # block entry if spread is truly invalid. This ensures DRY RUN
+        # can actually generate trades for evaluation purposes.
+        if Config.AUTO_TRADE_DRY_RUN:
+            logger.debug(f"⏭️ [AUTO-PROMOTE] {pair}: DRY RUN mode, skipping strict bid/ask check at promote")
+        else:
+            try:
+                ticker = bot.indodax.get_ticker(pair)
+                bid, ask, last = _extract_bid_ask_from_ticker(ticker)
+                if bid is None or ask is None:
+                    _blacklist_autotrade_pair(bot, pair, "bid/ask missing or invalid")
+                    return
+                mid = (bid + ask) / 2 if (bid and ask) else None
+                if mid is None or mid <= 0:
+                    _blacklist_autotrade_pair(bot, pair, f"invalid mid price (bid={bid}, ask={ask})")
+                    return
+                spread_pct = (ask - bid) / mid
+                max_spread = float(getattr(Config, "AUTOTRADE_LIQUIDITY_PROMOTE_MAX_SPREAD_PCT", 0.03) or 0.03)
+                if spread_pct > max_spread:
+                    _blacklist_autotrade_pair(bot, pair, f"spread too wide for autotrade promote ({spread_pct*100:.3f}% > {max_spread*100:.2f}%)")
+                    return
+            except Exception as e:
+                logger.debug(f"⚠️ Liquidity promote check skipped for {pair}: {e}")
     user_id = list(bot.subscribers.keys())[0] if bot.subscribers else None
     if user_id is None:
         return
@@ -424,9 +554,19 @@ async def check_trading_opportunity(bot, pair, signal=None):
         return
 
     if not _is_auto_trade_pair(bot, pair):
-        # Auto-promote: in DRY RUN, watched pairs with BUY signal get promoted
-        if Config.AUTO_TRADE_DRY_RUN and _is_watched(bot, pair):
-            _auto_promote_pair(bot, pair)
+        # DRY RUN auto-promote: if pair is in watchlist and signal is BUY/STRONG_BUY,
+        # promote it to auto_trade_pairs and proceed with trade logic.
+        if Config.AUTO_TRADE_DRY_RUN and _is_watched(bot, pair) and signal:
+            pre_sr = signal.get("pre_sr_recommendation") or signal.get("recommendation", "HOLD")
+            if pre_sr in ("BUY", "STRONG_BUY"):
+                _auto_promote_pair(bot, pair)
+                # Re-check after promote
+                if not _is_auto_trade_pair(bot, pair):
+                    await monitor_strong_signal(bot, pair, signal=signal)
+                    return
+            else:
+                await monitor_strong_signal(bot, pair, signal=signal)
+                return
         else:
             logger.debug(f"⏭️ Skipping {pair}: Not in auto-trade list (only in watchlist)")
             if _is_watched(bot, pair):
@@ -434,6 +574,26 @@ async def check_trading_opportunity(bot, pair, signal=None):
             return
 
     pair_key = _normalize_pair(pair)
+
+    # ── Per-pair execution lock ──────────────────────────────────────────
+    # Prevent parallel execution for the same pair from different code paths
+    # (e.g. WebSocket handler vs SignalQueue worker). Without this lock, two
+    # concurrent calls to check_trading_opportunity for the same pair can both
+    # pass position/cooldown checks and create duplicate trades.
+    # Uses asyncio.Lock stored on the bot object; released automatically when
+    # the 'async with' block exits (including on exception).
+    if not hasattr(bot, '_pair_execution_locks'):
+        bot._pair_execution_locks = {}
+    if pair_key not in bot._pair_execution_locks:
+        bot._pair_execution_locks[pair_key] = asyncio.Lock()
+    pair_lock = bot._pair_execution_locks[pair_key]
+    # ─────────────────────────────────────────────────────────────────────
+
+    async with pair_lock:
+        return await _check_trading_opportunity_locked(bot, pair, pair_key, signal)
+
+async def _check_trading_opportunity_locked(bot, pair, pair_key, signal):
+    """Core trading logic — must be called while holding the per-pair lock."""
     user_id = list(bot.subscribers.keys())[0] if bot.subscribers else 1
     open_trades_for_pair = []
     try:
@@ -487,8 +647,6 @@ async def check_trading_opportunity(bot, pair, signal=None):
         # berakhir silent karena log skip-nya di level DEBUG.
         logger.info(f"⏸️ Skipping {pair}: Weak signal ({effective_rec})")
         return
-    # Override recommendation with pre-SR for autotrade execution path
-    signal["recommendation"] = effective_rec
     # NOTE: DRY RUN now allows both BUY and STRONG_BUY for realistic validation.
     # Previously only STRONG_BUY was allowed, making DRY RUN results misleading.
     if is_dry_run and open_trades_for_pair and signal["recommendation"] in ["BUY", "STRONG_BUY"]:
@@ -528,7 +686,31 @@ async def check_trading_opportunity(bot, pair, signal=None):
                 }
                 if action_markup is not None:
                     kwargs["reply_markup"] = action_markup
-                await bot.app.bot.send_message(**kwargs)
+
+                # FIX 2026-06-07 v2: Detect event-loop mismatch and reschedule
+                # on main Telegram loop. When check_trading_opportunity runs
+                # inside the SignalQueue worker's asyncio event loop, the PTB
+                # bot HTTP client is bound to the main loop — await fails with
+                # "bound to a different event loop".
+                try:
+                    await bot.app.bot.send_message(**kwargs)
+                except RuntimeError as runtime_err:
+                    if 'different event loop' in str(runtime_err).lower() or \
+                       'different loop' in str(runtime_err).lower():
+                        # Reschedule on main Telegram loop (fire-and-forget for notification)
+                        import asyncio as _asyncio
+                        _loop = getattr(bot, '_telegram_loop', None)
+                        if _loop and not _loop.is_closed():
+                            _asyncio.run_coroutine_threadsafe(
+                                bot.app.bot.send_message(**kwargs),
+                                _loop
+                            )
+                            logger.info(
+                                "📢 Signal notification rescheduled on main loop for admin %s (%s)",
+                                admin_id, pair
+                            )
+                            continue
+                    raise
                 logger.info(f"📢 Signal notification sent to admin {admin_id} for {pair}")
             except Exception as e:
                 logger.error(f"❌ Failed to send signal notification: {e}")
@@ -596,7 +778,11 @@ async def check_trading_opportunity(bot, pair, signal=None):
             log_fn = logger.warning if is_dry_run else logger.info
             prefix = "🧪 [DRY RUN]" if is_dry_run else "🚫"
             block_reason = market_conditions.get("block_reason", "")
-            if block_reason == "SPREAD_TOO_WIDE":
+            if block_reason == "SPREAD_INVALID":
+                bid = market_conditions.get("best_bid")
+                ask = market_conditions.get("best_ask")
+                log_fn(f"{prefix} Entry blocked for {pair}: SPREAD_INVALID (bid={bid}, ask={ask})")
+            elif block_reason == "SPREAD_TOO_WIDE":
                 spread_pct = market_conditions.get("spread_pct", 0)
                 log_fn(
                     f"{prefix} Entry blocked for {pair}: SPREAD_TOO_WIDE "
@@ -667,6 +853,16 @@ async def check_trading_opportunity(bot, pair, signal=None):
             logger.info(
                 f"🧪 [DRY RUN SIZE] {pair}: using tier nominal {total:,.0f} IDR at price {current_price:,.0f} "
                 f"=> amount={amount:.8f}"
+            )
+
+        # Exploration mode: reduce position to configured factor for PANTAU signals (data collection only)
+        if signal.get("_exploration_mode"):
+            exploration_factor = float(signal.get("_exploration_factor_override") or getattr(Config, "DRYRUN_EXPLORATION_POSITION_FACTOR", 0.20) or 0.20)
+            amount *= exploration_factor
+            total *= exploration_factor
+            logger.info(
+                f"🔬 [EXPLORATION SIZE] {pair}: reduced to {exploration_factor*100:.0f}% "
+                f"=> total={total:,.0f} IDR, amount={amount:.8f}"
             )
 
         # =====================================================================
@@ -742,8 +938,28 @@ async def check_trading_opportunity(bot, pair, signal=None):
             indodax = IndodaxAPI()
             fresh_ticker = indodax.get_ticker(pair)
             if fresh_ticker:
-                current_price = fresh_ticker["last"]
-                logger.info(f"🔄 Fresh execution price for {pair}: {current_price}")
+                fresh_price = _to_positive_float(fresh_ticker.get("last"))
+                if fresh_price is not None:
+                    # FIX 2026-06-07: Validate fresh price against signal price.
+                    # Reject if the fresh price deviates >50% from signal price
+                    # (prevents test data contamination like BTC price=100).
+                    signal_entry_price = _to_positive_float(signal.get("price")) or current_price
+                    if signal_entry_price and signal_entry_price > 0:
+                        deviation = abs(fresh_price - signal_entry_price) / signal_entry_price
+                        if deviation > 0.50:
+                            logger.warning(
+                                f"⚠️ [PRICE VALIDATION] Fresh price {fresh_price:,.0f} deviates "
+                                f"{deviation*100:.0f}% from signal price {signal_entry_price:,.0f} for {pair} — "
+                                f"REJECTED (possible data contamination). Using signal price instead."
+                            )
+                        else:
+                            current_price = fresh_price
+                            logger.info(f"🔄 Fresh execution price for {pair}: {current_price}")
+                    else:
+                        current_price = fresh_price
+                        logger.info(f"🔄 Fresh execution price for {pair}: {current_price}")
+                else:
+                    logger.warning(f"⚠️ Fresh ticker missing 'last' price for {pair}, using signal price")
             else:
                 logger.warning(f"⚠️ Failed to get fresh price for {pair}, using signal price")
         except Exception as e:
@@ -789,14 +1005,19 @@ async def check_trading_opportunity(bot, pair, signal=None):
                 logger.info(f"🤖 [V4_FILTER] {pair}: {v4_pred} ({v4_conf:.1%})")
 
                 if v4_pred.startswith('BAD'):
-                    reason = f"[V4_FILTER] Entry blocked for {pair}: predicted bad outcome ({v4_pred})"
-                    logger.info(f"🚫 {reason}")
-                    _remember_autotrade_block_reason(bot, pair, reason)
-                    return
-
-                if v4_pred.startswith('GOOD') and v4_conf >= 0.65:
+                    if is_dry_run:
+                        # DRY RUN: V4 BAD prediction → reduce position size instead of blocking
+                        # This allows data collection while still respecting the signal
+                        signal["_v4_bad_prediction"] = True
+                        v4_boost = 0.5  # Half size for BAD prediction in DRY RUN
+                        logger.info(f"⚠️ [V4_FILTER] {pair}: BAD prediction in DRY RUN → size reduced 50% (not blocked)")
+                    else:
+                        reason = f"[V4_FILTER] Entry blocked for {pair}: predicted bad outcome ({v4_pred})"
+                        logger.info(f"🚫 {reason}")
+                        _remember_autotrade_block_reason(bot, pair, reason)
+                        return
+                elif v4_pred.startswith('GOOD') and v4_conf >= 0.65:
                     logger.info(f"📈 [V4_FILTER] Boost position for {pair}: good outcome predicted")
-                    # Will apply boost after position size calc
                     v4_boost = 1.2
                 else:
                     v4_boost = 1.0
@@ -882,18 +1103,56 @@ async def check_trading_opportunity(bot, pair, signal=None):
             elite_signal=elite_signal if 'elite_signal' in locals() else None,
         )
         if optimization.should_skip:
-            logger.info(f"🚫 Trade blocked for {pair}: {optimization.reason}")
-            _remember_autotrade_block_reason(bot, pair, optimization.reason)
-            return
+            if is_dry_run:
+                # DRY RUN: profit optimizer skip → proceed with minimum size for data collection
+                logger.info(
+                    f"⚠️ [DRY RUN] {pair}: profit optimizer would skip ({optimization.reason}) "
+                    f"— proceeding with 25% size for data collection"
+                )
+                signal["_optimizer_skip_override"] = True
+                signal.setdefault("_exploration_mode", True)
+                signal.setdefault("_exploration_factor_override", 0.25)
+            else:
+                logger.info(f"🚫 Trade blocked for {pair}: {optimization.reason}")
+                _remember_autotrade_block_reason(bot, pair, optimization.reason)
+                return
 
-        amount *= optimization.position_multiplier
-        total *= optimization.position_multiplier
+        if optimization.should_skip and is_dry_run:
+            # DRY RUN: profit optimizer returned should_skip=True dengan
+            # position_multiplier=0.0. Jangan apply multiplier 0 — pakai 1.0
+            # agar amount tidak jadi 0. Eksplorasi size sudah diatur oleh
+            # exploration_factor_override di atas (25%).
+            logger.debug(f"🧪 [DRY RUN] {pair}: skipping position_multiplier=0 (optimizer skip override)")
+        else:
+            amount *= optimization.position_multiplier
+            total *= optimization.position_multiplier
 
-        # Apply V4 boost (if GOOD prediction with high confidence)
-        if 'v4_boost' in locals() and v4_boost > 1.0:
+        # Apply V4 boost/reduction
+        if 'v4_boost' in locals() and v4_boost != 1.0:
             amount *= v4_boost
             total *= v4_boost
-            logger.info(f"📈 [V4_BOOST] Position size boosted {v4_boost:.0%} for {pair}")
+            if v4_boost < 1.0:
+                logger.info(f"📉 [V4] {pair}: position reduced to {v4_boost*100:.0f}% (BAD prediction in DRY RUN)")
+            else:
+                logger.info(f"📈 [V4_BOOST] Position size boosted {v4_boost:.0%} for {pair}")
+
+        # FIX 2026-06-07: Final safety guard — cap DRY RUN total at MAX 2.000.000 IDR
+        # and ensure amount/total are positive. This guards against:
+        # - Multiple reduction multipliers making amount near-zero
+        # - Bayesian Kelly override inflating position beyond the cap
+        # - Any other mutation that produces invalid position size
+        DRY_RUN_MAX_TOTAL = 2_000_000  # Hard cap for all pairs including BTC
+        if is_dry_run:
+            if amount <= 0 or total <= 0 or total > DRY_RUN_MAX_TOTAL:
+                original_amount = amount
+                original_total = total
+                total = min(max(total, 1_000_000), DRY_RUN_MAX_TOTAL) if total > 0 else DRY_RUN_MAX_TOTAL
+                amount = total / current_price if current_price > 0 else 0
+                logger.warning(
+                    f"🛡️ [DRY RUN GUARD] {pair}: amount={original_amount:.4f}, "
+                    f"total={original_total:,.0f} → corrected to total={total:,.0f}, "
+                    f"amount={amount:.4f}"
+                )
 
         stop_loss = current_price - ((current_price - stop_loss) * optimization.stop_loss_multiplier)
         take_profit_1, take_profit_2 = scale_take_profit_targets(
@@ -911,13 +1170,23 @@ async def check_trading_opportunity(bot, pair, signal=None):
         potential_loss = (net_entry - effective_sl) / net_entry * 100
         rr_after_fees = potential_profit / potential_loss if potential_loss > 0 else 0
         if rr_after_fees < optimization.min_rr_required:
-            reason = (
-                f"optimized R/R after fees too low "
-                f"({rr_after_fees:.2f} < {optimization.min_rr_required:.2f})"
-            )
-            logger.info(f"🚫 Trade blocked for {pair}: {reason}")
-            _remember_autotrade_block_reason(bot, pair, reason)
-            return
+            if is_dry_run:
+                # DRY RUN: allow entry with reduced size for data collection
+                logger.info(
+                    f"⚠️ [DRY RUN] {pair}: R/R after fees low ({rr_after_fees:.2f} < {optimization.min_rr_required:.2f}) "
+                    f"— proceeding with 30% size for data collection"
+                )
+                signal["_rr_reduced"] = True
+                signal.setdefault("_exploration_mode", True)
+                signal.setdefault("_exploration_factor_override", 0.30)
+            else:
+                reason = (
+                    f"optimized R/R after fees too low "
+                    f"({rr_after_fees:.2f} < {optimization.min_rr_required:.2f})"
+                )
+                logger.info(f"🚫 Trade blocked for {pair}: {reason}")
+                _remember_autotrade_block_reason(bot, pair, reason)
+                return
 
         logger.info(
             f"💰 Fee-aware: Entry={net_entry:,.0f}, TP={effective_tp:,.0f}, SL={effective_sl:,.0f}, "
@@ -944,20 +1213,96 @@ async def check_trading_opportunity(bot, pair, signal=None):
 
         if is_dry_run:
             simulated_order_id = f"DRY-{random.randint(100000, 999999)}"
-            trade_id = bot.db.add_trade(
-                user_id=user_id,
-                pair=pair,
-                trade_type="BUY",
-                price=entry_zone_price,
-                amount=amount,
-                total=total,
-                fee=0,
-                signal_source="auto",
-                ml_confidence=confidence,
-                notes=f"[DRY RUN] Simulated limit order_id: {simulated_order_id} @ {entry_zone_price:,.0f}",
+            fill_price = None
+            try:
+                fill_ticker = bot.indodax.get_ticker(pair)
+                _, ask, last = _extract_bid_ask_from_ticker(fill_ticker)
+                fill_price = ask or last or current_price
+            except Exception:
+                fill_price = current_price
+
+            # DRY RUN realism: apply simulated slippage to fill price (BUY pays more)
+            slippage_pct = float(getattr(Config, "DRYRUN_SLIPPAGE_PCT", 0.001) or 0.001)
+            fill_price_raw = fill_price
+            fill_price = fill_price * (1 + slippage_pct)
+            logger.debug(
+                f"🧪 [DRY RUN SLIPPAGE] {pair}: raw={fill_price_raw:,.0f} → "
+                f"slipped={fill_price:,.0f} (+{slippage_pct*100:.2f}%)"
             )
-            bot.price_monitor.set_price_level(user_id, trade_id, pair, entry_zone_price, stop_loss, take_profit_1, take_profit_2, amount)
-            # Register pending order for execution tracking
+
+            # DRY RUN fill logic: fill immediately if market price is within
+            # reasonable distance of entry zone (simulates realistic limit fill).
+            # In real trading, limit orders near market typically fill quickly.
+            # Threshold: fill if ask is within 1% above entry_zone_price.
+            # This is generous to ensure DRY RUN generates enough trades for evaluation.
+            fill_threshold_pct = 0.01  # 1% tolerance for immediate fill in DRY RUN
+            fill_distance = (fill_price - entry_zone_price) / entry_zone_price if entry_zone_price > 0 else 999
+            can_fill_immediately = fill_price <= entry_zone_price or fill_distance <= fill_threshold_pct
+
+            if fill_price is not None and can_fill_immediately:
+                if amount <= 0 or total <= 0:
+                    logger.warning(f"🛡️ [DRY RUN] {pair}: amount={amount} atau total={total} <= 0, skip fill")
+                    return
+                fee_rate = float(getattr(Config, "TRADING_FEE_RATE", 0.0) or 0.0)
+                # DRY RUN realism: fee applied on both entry and exit (round-trip)
+                fee = float(fill_price) * float(amount) * fee_rate
+                tp_fill = bot.trading_engine.calculate_stop_loss_take_profit(fill_price, "BUY", atr_value=atr_value)
+                stop_loss = tp_fill["stop_loss"]
+                take_profit_1 = tp_fill["take_profit_1"]
+                take_profit_2 = tp_fill["take_profit_2"]
+                trade_id = bot.db.add_trade(
+                    user_id=user_id,
+                    pair=pair,
+                    trade_type="BUY",
+                    price=float(fill_price),
+                    amount=amount,
+                    total=float(fill_price) * float(amount),
+                    fee=fee,
+                    signal_source="auto",
+                    ml_confidence=confidence,
+                    notes=f"[DRY RUN] Filled limit order_id: {simulated_order_id} @ {float(fill_price):,.0f}",
+                )
+                bot.price_monitor.set_price_level(user_id, trade_id, pair, float(fill_price), stop_loss, take_profit_1, take_profit_2, amount)
+                text = f"""
+🧪 **DRY RUN: FILLED LIMIT BUY** 🧪
+
+📊 Pair: `{pair}`
+💡 Action: **BUY** (SIMULATED)
+💰 Fill Price: `{Utils.format_price(fill_price)}` IDR
+📊 Limit Price: `{Utils.format_price(entry_zone_price)}` IDR
+📦 Amount: `{amount}`
+💵 Total: `{Utils.format_currency(float(fill_price) * float(amount))}`
+💸 Fee: `{Utils.format_currency(fee)}`
+
+🛡️ Stop Loss: `{Utils.format_price(stop_loss)}` IDR
+🎯 Take Profit: `{Utils.format_price(take_profit_1)}` IDR
+
+🤖 Confidence: {confidence:.0%}
+🆔 Trade ID: `{trade_id}`
+📋 Order ID: `{simulated_order_id}`
+"""
+                await bot._broadcast_to_subscribers(pair, text)
+                logger.info(f"🧪 [DRY RUN] Filled LIMIT BUY for {pair}: {amount} @ {float(fill_price):,.0f} (limit {entry_zone_price:,.0f})")
+                return
+
+            meta = {
+                "ml_confidence": confidence,
+                "atr": atr_value,
+                "stop_loss": stop_loss,
+                "take_profit_1": take_profit_1,
+                "take_profit_2": take_profit_2,
+                "signal_source": "auto",
+            }
+            try:
+                existing = bot.db.get_pending_orders(pair=pair, status="PENDING")
+                for pending in existing or []:
+                    try:
+                        if str(pending.get("trade_type") or pending.get("type") or "").upper() == "BUY":
+                            return
+                    except Exception:
+                        continue
+            except Exception:
+                pass
             try:
                 bot.db.add_pending_order(
                     order_id=simulated_order_id,
@@ -966,9 +1311,9 @@ async def check_trading_opportunity(bot, pair, signal=None):
                     trade_type="BUY",
                     limit_price=entry_zone_price,
                     amount=amount,
-                    total=total,
-                    notes="[DRY RUN] Simulated limit order",
-                    trade_id=trade_id
+                    total=float(entry_zone_price) * float(amount),
+                    notes=json.dumps(meta, separators=(",", ":")),
+                    trade_id=None
                 )
                 logger.info(f"[PENDING_ORDER] Registered simulated limit order {simulated_order_id} for {pair}")
             except Exception as e:
@@ -981,13 +1326,12 @@ async def check_trading_opportunity(bot, pair, signal=None):
 💰 Entry Zone: `{Utils.format_price(entry_zone_price)}` IDR
 📊 Market Price: `{Utils.format_price(current_price)}` IDR
 📦 Amount: `{amount}`
-💵 Total: `{Utils.format_currency(total)}`
+💵 Total: `{Utils.format_currency(float(entry_zone_price) * float(amount))}`
 
 🛡️ Stop Loss: `{Utils.format_price(stop_loss)}` IDR (-2%)
 🎯 Take Profit: `{Utils.format_price(take_profit_1)}` IDR
 
 🤖 Confidence: {confidence:.0%}
-🆔 Trade ID: `{trade_id}`
 📋 Order ID: `{simulated_order_id}`
 """
             await bot._broadcast_to_subscribers(pair, text)
@@ -1266,6 +1610,12 @@ async def analyze_market_intelligence(bot, pair, current_price):
                                     f"📊 Spread OK for {pair}: {spread_pct*100:.3f}% "
                                     f"bid={best_bid:,.0f} ask={best_ask:,.0f}"
                                 )
+                        else:
+                            result["spread_too_wide"] = True
+                            result["block_reason"] = "SPREAD_INVALID"
+                            result["best_bid"] = best_bid
+                            result["best_ask"] = best_ask
+                            result["mid_price"] = mid_price
                 except Exception as spread_err:
                     logger.debug(f"Spread calc skipped for {pair}: {spread_err}")
         except Exception as e:
@@ -1280,7 +1630,12 @@ async def analyze_market_intelligence(bot, pair, current_price):
         if Config.MI_REQUIRE_BULLISH_FOR_ENTRY:
             result["passes_entry_filter"] = result["overall_signal"] == "BULLISH"
         elif Config.MI_ALLOW_MODERATE_ENTRY:
-            result["passes_entry_filter"] = result["overall_signal"] in ["BULLISH", "MODERATE"]
+            # FIX 2026-06-06: Also allow NEUTRAL if MI_ALLOW_NEUTRAL_ENTRY is True
+            allow_neutral = getattr(Config, "MI_ALLOW_NEUTRAL_ENTRY", False)
+            if allow_neutral:
+                result["passes_entry_filter"] = result["overall_signal"] in ["BULLISH", "MODERATE", "NEUTRAL"]
+            else:
+                result["passes_entry_filter"] = result["overall_signal"] in ["BULLISH", "MODERATE"]
         else:
             result["passes_entry_filter"] = True
 
@@ -1309,15 +1664,20 @@ def _calculate_entry_zone(current_price, support=None, signal_price=None):
     """Tier 2: Calculate limit-order entry zone for scalping-style auto-trade.
     Returns entry_zone_price (limit price to place order).
     Logic: buy near support or slightly below current price to avoid chasing.
+
+    FIX 2026-06-06: Uses Config.ENTRY_ZONE_DISTANCE_PCT (default 0.2%) instead of
+    hardcoded 0.5%. Closer to market = more instant fills in trending markets.
     """
+    entry_distance = getattr(Config, 'ENTRY_ZONE_DISTANCE_PCT', 0.002)
+
     if support and support > 0:
-        # Entry slightly above support, but not more than 1% below current
+        # Entry slightly above support, but not more than entry_distance below current
         entry_from_support = support * 1.003
-        entry_from_current = current_price * 0.995
+        entry_from_current = current_price * (1 - entry_distance)
         entry_zone = max(entry_from_support, entry_from_current)
     else:
-        # No support data: use 0.5% below current as default entry zone
-        entry_zone = current_price * 0.995
+        # No support data: use configurable distance below current as default entry zone
+        entry_zone = current_price * (1 - entry_distance)
 
     if signal_price and signal_price > 0:
         # Never enter above signal price + 0.5% (chase prevention)
@@ -1410,12 +1770,33 @@ async def execute_auto_sell(bot, pair, signal, current_price, user_id, is_dry_ru
             except Exception:
                 logger.warning(f"⚠️ Failed to get fresh sell price for {pair}, using signal price")
 
-            pnl = (sell_price - entry_price) * amount
-            pnl_pct = ((sell_price - entry_price) / entry_price) * 100 if entry_price > 0 else 0
+            fee_rate = float(getattr(Config, "TRADING_FEE_RATE", 0.0) or 0.0)
+            slippage_pct = float(getattr(Config, "DRYRUN_SLIPPAGE_PCT", 0.0) or 0.0)
+            slippage_cap = float(getattr(Config, "SLIPPAGE_MAX_PCT", 0.0) or 0.0)
+            effective_slippage = min(max(0.0, slippage_pct), max(0.0, slippage_cap))
+            if is_dry_run and sell_price is not None:
+                sell_price = float(sell_price) * (1 - effective_slippage)
+
+            entry_fee = float(trade_dict.get("fee") or 0)
+            if entry_fee <= 0 and entry_price and amount:
+                entry_fee = float(entry_price) * float(amount) * fee_rate
+            exit_fee = float(sell_price) * float(amount) * fee_rate if sell_price and amount else 0.0
+
+            pnl = (float(sell_price) - float(entry_price)) * float(amount) - entry_fee - exit_fee
+            invested = float(entry_price) * float(amount) if entry_price and amount else 0.0
+            pnl_pct = ((pnl / invested) * 100) if invested > 0 else 0.0
 
             if is_dry_run:
                 simulated_order_id = f"DRY-SELL-{random.randint(100000, 999999)}"
-                bot.db.close_trade(trade_id=trade_id, sell_price=sell_price, sell_amount=amount, order_id=simulated_order_id, reason=f"Auto-SELL ({signal['recommendation']})")
+                bot.db.close_trade(
+                    trade_id=trade_id,
+                    sell_price=sell_price,
+                    sell_amount=amount,
+                    order_id=simulated_order_id,
+                    reason=f"Auto-SELL ({signal['recommendation']})",
+                    pnl=pnl,
+                    pnl_pct=pnl_pct,
+                )
                 bot.price_monitor.remove_price_level(user_id, trade_id)
                 text = f"""
 🧪 **DRY RUN: SIMULATED SELL** 🧪
@@ -1427,6 +1808,7 @@ async def execute_auto_sell(bot, pair, signal, current_price, user_id, is_dry_ru
 
 📈 Entry: `{Utils.format_price(entry_price)}` IDR
 📊 P&L: `{Utils.format_currency(pnl)}` ({pnl_pct:+.2f}%)
+💸 Fee (entry+exit): `{Utils.format_currency(entry_fee + exit_fee)}`
 
 🤖 Signal: {signal['recommendation']}
 🆔 Trade ID: `{trade_id}`

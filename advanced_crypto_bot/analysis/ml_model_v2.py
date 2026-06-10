@@ -179,7 +179,7 @@ class MLTradingModelV2:
         features['returns_20'] = df['close'].pct_change(periods=20)
 
         # =====================================================================
-        # MOVING AVERAGES
+        # MOVING AVERAGES (SMA — existing, preserved for backward compat)
         # =====================================================================
         features['sma_9'] = df['close'].rolling(window=9).mean()
         features['sma_20'] = df['close'].rolling(window=20).mean()
@@ -193,8 +193,33 @@ class MLTradingModelV2:
         # Trend strength (SMA alignment)
         features['trend_strength'] = (
             ((features['sma_9'] > features['sma_20']).astype(int) +
-             (features['sma_20'] > features['sma_50']).astype(int)) / 2
+            (features['sma_20'] > features['sma_50']).astype(int)) / 2
         )
+
+        # =====================================================================
+        # EMA SCALPING SUITE (NEW — Exponential Moving Averages for scalping)
+        # EMA lebih responsif daripada SMA, cocok untuk scalping Indodax.
+        # Period: 5 (ultra-fast), 9 (scalping), 20 (short-term support).
+        # =====================================================================
+        features['ema_5'] = df['close'].ewm(span=5, adjust=False).mean()
+        features['ema_9'] = df['close'].ewm(span=9, adjust=False).mean()
+        features['ema_20'] = df['close'].ewm(span=20, adjust=False).mean()
+
+        # Price-to-EMA ratios (posisi harga relatif terhadap EMA)
+        features['price_ema9_ratio'] = df['close'] / features['ema_9']
+        features['price_ema20_ratio'] = df['close'] / features['ema_20']
+
+        # EMA crossover signal (EMA9 × EMA20) — strategi crossover paling populer
+        # +1 = bullish crossover (EMA9 memotong ke atas EMA20)
+        # -1 = bearish crossover (EMA9 memotong ke bawah EMA20)
+        #  0 = no crossover
+        ema9_above_ema20 = features['ema_9'] > features['ema_20']
+        ema9_above_ema20_prev = ema9_above_ema20.shift(1)
+        features['ema9_ema20_crossover'] = 0.0
+        features.loc[(ema9_above_ema20 == True) & (ema9_above_ema20_prev == False),
+                'ema9_ema20_crossover'] = 1.0   # bullish cross
+        features.loc[(ema9_above_ema20 == False) & (ema9_above_ema20_prev == True),
+                'ema9_ema20_crossover'] = -1.0  # bearish cross
 
         # =====================================================================
         # VOLATILITY FEATURES
@@ -234,6 +259,19 @@ class MLTradingModelV2:
         loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
         rs = gain / (loss + 1e-9)
         features['rsi'] = 100 - (100 / (1 + rs))
+
+        # Fast RSI for scalping. Period 7 is intentionally more reactive than
+        # the existing RSI-14, but remains feature-only: it does not execute or
+        # relax any trading gate by itself.
+        gain_7 = (delta.where(delta > 0, 0)).rolling(window=7).mean()
+        loss_7 = (-delta.where(delta < 0, 0)).rolling(window=7).mean()
+        rs_7 = gain_7 / (loss_7 + 1e-9)
+        features['rsi_7'] = 100 - (100 / (1 + rs_7))
+
+        # Crypto-aggressive RSI levels. These are binary model features only;
+        # no runtime order path consumes them directly.
+        features['rsi_overbought_crypto'] = (features['rsi'] > 80).astype(float)
+        features['rsi_oversold_crypto'] = (features['rsi'] < 20).astype(float)
 
         # RSI divergence (RSI vs Price)
         features['rsi_momentum'] = features['rsi'].diff(5)
@@ -287,6 +325,14 @@ class MLTradingModelV2:
         high_14 = df['high'].rolling(14).max()
         features['stoch_k'] = 100 * (df['close'] - low_14) / (high_14 - low_14 + 1e-9)
         features['stoch_d'] = features['stoch_k'].rolling(3).mean()
+
+        # Stochastic RSI (scalping oscillator). Uses RSI as the input series,
+        # not price, so it can surface momentum turns earlier than standard
+        # stochastic while staying feature-only for the ML model.
+        rsi_min_14 = features['rsi'].rolling(14).min()
+        rsi_max_14 = features['rsi'].rolling(14).max()
+        features['stochrsi_k'] = 100 * (features['rsi'] - rsi_min_14) / (rsi_max_14 - rsi_min_14 + 1e-9)
+        features['stochrsi_d'] = features['stochrsi_k'].rolling(3).mean()
 
         # =====================================================================
         # MARKET REGIME FEATURES (NEW!)

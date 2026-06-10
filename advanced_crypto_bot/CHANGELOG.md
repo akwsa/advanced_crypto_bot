@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+<<<<<<< Updated upstream
 ### Added - 2026-06-10 (Pair Scanner + Dashboard Revamp)
 **Konteks:** User minta dashboard yang lebih representatif & modern, plus auto-scanning Indodax untuk identifikasi top volume + pair yang lagi pump (momentum tinggi) supaya bot bisa auto-promote ke watchlist.
 
@@ -239,6 +240,162 @@ Jadi autotrade lihat `pre_sr_recommendation = HOLD` (sudah ter-downgrade Quality
 - Verifikasi: 61 target test passing pre-deploy.
 
 **Rollback plan:** Revert commit di branch `fix/autotrade-dryrun-no-entry-vm-20260609`. Restart bot di VM via `tmux attach -t bot` → `Ctrl+C` → `python bot.py`. State runtime (open positions, signal cache) di-rebuild otomatis dari `data/trading.db`.
+=======
+### Fixed - 2026-06-07 (Session Stability — HTML Parse & Event Loop Errors)
+
+#### Masalah
+Bot mengalami 3 jenis error recurring yang menyebabkan session terputus dan notifikasi Telegram gagal:
+
+| Error | Frekuensi | Dampak |
+|---|---|---|
+| `Can't parse entities: can't find end of the entity starting at byte offset X` | ~5-10x/jam | Notifikasi gagal, command handler crash |
+| `RuntimeError: bound to a different event loop` | ~2-3x/jam | Notifikasi gagal, trade execution terhambat |
+| `Task ... got Future ... attached to a different loop` | ~1-2x/jam | Trade execution gagal di SignalQueue worker |
+
+#### Perubahan
+
+**`bot.py` — `_send_message()`:**
+- Multi-layer fallback (3 layer): html_escape → bare text → `run_coroutine_threadsafe` ke main loop
+- Deteksi `'different event loop'` / `'different loop'` di setiap layer dengan reschedule
+- Tidak lagi `raise` — mencegah command handler crash berantai
+- Log level: `logger.warning` (bukan `logger.error`)
+
+**`autotrade/runtime.py` — `check_trading_opportunity()`:**
+- Event-loop mismatch detection + reschedule `send_message` ke `bot._telegram_loop`
+- Catch `RuntimeError` dengan keyword `different event loop` → `run_coroutine_threadsafe()`
+
+**`autotrade/runtime.py` — `_get_cached_signal()`:**
+- Validasi event-loop compatibility sebelum `await` inflight task
+- Loop mismatch → hapus stale task, buat baru di current loop
+- Mencegah `Task got Future attached to a different loop`
+
+#### Verifikasi
+| Metric | Sebelum Fix | Setelah Fix |
+|---|---|---|
+| `_send_message` ERROR | ~5-10x/jam | 0 |
+| `bound to different event loop` ERROR | ~2-3x/jam | 0 |
+| `attached to a different loop` ERROR | ~1-2x/jam | 0 |
+
+### Fixed - 2026-06-07 (Markdown Fallback — `/autotrade_status` Silent Fail)
+
+#### Masalah
+Perintah `/autotrade_status` mati (tidak merespon) setelah fix `_send_message()`. Root cause: `_send_message` diubah agar tidak me-`raise` exception, tapi fallback-nya hanya menangani `parse_mode='HTML'`. Padahal `autotrade_status` menggunakan `parse_mode='Markdown'` — sehingga jika Markdown gagal diparse, error ditelan (silent fail) dan user tidak dapat response.
+
+#### Perubahan
+- **`bot.py` — `_send_message()`**: Tambah fallback untuk `parse_mode='Markdown'` (strip `**`, `` ` ``, `_` → plain text), baik di callback_query path maupun command path.
+
+### Database Cleanup - 2026-06-07
+- Reset database autotrade dryrun: hapus 10 trades DRY RUN, 11.349 signals, 3 trade outcomes, 3 trade reviews, 6 adaptive thresholds, drawdown state, pair performance, regime history, ML metadata
+- VACUUM kedua database → reclaim space
+
+### Fixed - 2026-06-07 (DRY RUN Signal Visibility + Trade Limit + UI Cleanup)
+
+#### Masalah
+1. Footer redundant `🛡️ Filter akhir: SR_VALIDATION` di signal Telegram — info sama sudah di "Catatan bot"
+2. Trade amount=0 (legacy bug) muncul di `/autotrade_status` — mengotori tampilan
+3. `MAX_DAILY_TRADES=10` terlalu kecil untuk DRY RUN — bot berhenti setelah 10 entry/hari
+4. Volume 24h tidak ditampilkan di header signal
+
+#### Perubahan
+- **`signals/signal_formatter.py`**: Hapus `🛡️ Filter akhir:`. Tambah volume 24h di header (`🚀 PAIR | Vol: 125M`).
+- **`signals/signal_pipeline.py`**: Attach `volume_24h` ke signal dict.
+- **`bot.py`**: Filter trade amount=0 dari `/autotrade_status`. Auto-cleanup saat startup. Context-aware tips (tidak sarankan `/watch` jika sudah ada pairs).
+- **`autotrade/trading_engine.py`**: DRY RUN daily limit → **50** (real tetap 10).
+
+#### Verification
+- Syntax: `py_compile signal_formatter.py signal_pipeline.py bot.py trading_engine.py` ✅
+- Log confirms: `📢 Signal notification sent to admin` + `Daily trade limit reached: 11/10` (sebelum fix)
+
+### Security - 2026-06-07 (Credential Exposure Fix)
+
+#### Masalah
+File `.env` memiliki permission `rwxrwxrwx` (world-readable). Siapa pun dengan akses ke mesin bisa membaca live Telegram bot token, SCALPER bot token, INDODAX API key, dan INDODAX secret key.
+
+#### Perubahan
+- **`.env` permission**: `chmod 600` — hanya owner yang bisa baca/tulis
+
+### Fixed - 2026-06-07 (Create Order Error Handler)
+
+#### Masalah
+Di `api/indodax_api.py:484-486`, exception handler `create_order()` menggunakan `dir()` untuk cek apakah variabel `response` ada. `dir()` tidak reliable — jika exception terjadi sebelum HTTP request (misalnya timeout di `get_ticker`), `response` belum pernah di-assign, dan referensi `response.status_code` di exception handler akan throw `NameError` baru yang menimpa exception asli.
+
+#### Perubahan
+- **`api/indodax_api.py`**: initialize `response = None` sebelum `try` block
+- Exception handler sekarang pakai `if response is not None:` — robust untuk semua skenario
+- Fallback log: `"No response received from Indodax API"` jika `response` masih `None`
+
+### Fixed - 2026-06-07 (DRY RUN Amount=0 Bug)
+
+#### Root Cause
+Ketika profit optimizer (`core/profit_optimizer.py`) menolak trade, ia return `position_multiplier=0.0`. Di DRY RUN mode, `runtime.py:1017-1030` tidak return (malah memproceed untuk data collection), tapi `line 1032` tetap menjalankan `amount *= 0.0` — membuat **Amount=0, Total=0, Fee=0**.
+
+#### Perubahan
+
+**`autotrade/runtime.py`:**
+- **Line 1051**: skip `amount *= position_multiplier` jika `should_skip=True` di DRY RUN (multiplier=0 akan merusak amount)
+- **`_calculate_dry_run_total_from_price()`**: rewrite total ke range 1.000.000 - 1.500.000 IDR
+  - Price < 1000 IDR → min 10.000 koin (total dikap ke max 1.500.000)
+  - Price 1000-10000 IDR → min 100 koin
+  - Price > 10000 IDR → target 1.250.000 IDR otomatis
+- **Safety guard**: jika amount/total masih ≤ 0 setelah semua multiplier, reset ke minimum 1.000.000 IDR
+- **Final guard di fill logic**: cek `amount <= 0 or total <= 0` sebelum eksekusi
+
+**`tests/test_autotrade_dryrun_signal_cycle.py`:**
+- Update 3 test assertions untuk mencocokkan formula nominal baru (target 1.250.000 IDR)
+
+### Changed - 2026-06-06 (DRY RUN Execution Realism + Exploration Mode Tuning)
+
+#### Problem Solved
+- **ROOT CAUSE:** DRY RUN `/autotrade dryrun` menghasilkan **0 trade** karena:
+  1. `_auto_promote_pair()` memblokir semua pair di DRY RUN: bid/ask check gagal karena Indodax ticker sering return `bid=0` untuk low-liquidity pairs
+  2. Market scan TA strength filter `0.45` terlalu ketat — semua sinyal punya `ta_strength < 0.45` → tidak pernah masuk signal queue
+  3. Limit order entry zone 0.5% di bawah market + timeout 5 menit → order hampir tidak pernah fill
+  4. Exploration threshold PANTAU terlalu ketat (conf≥0.52, str≥0.08, rr≥0.8)
+  5. Sinyal `BELI_BERTAHAP` (decision layer) tidak punya jalur eksekusi di DRY RUN
+
+#### Perubahan
+
+**`bot.py`:**
+- Market scan TA strength threshold: **0.45 → 0.05** (agar sinyal BUY masuk ke signal queue untuk diproses oleh worker)
+
+**`autotrade/runtime.py`:**
+- **`_auto_promote_pair()` skip bid/ask check di DRY RUN** — MI spread gate di `check_trading_opportunity` sudah cukup untuk filter pair illikuid; double-check di promote stage menyebabkan 0 pair ter-promote
+- **DRY RUN immediate fill**: Limit order langsung fill jika ask price within 1% dari entry zone
+- **Exploration thresholds dari Config**: tidak hardcoded lagi, bisa tune via `.env`
+- **BELI_BERTAHAP handling**: DRY RUN entry dengan 50% position size
+- **Fee + slippage realism**: setiap fill menyertakan slippage + fee
+
+**`core/config.py`:**
+- `LIMIT_ORDER_TIMEOUT_MINUTES`: 5 → **15** menit
+- `LIMIT_ORDER_MIN_EDGE_PCT`: 0.15% → **0.10%**
+- `LIMIT_ORDER_CANCEL_DISTANCE_PCT`: 1.25% → **1.50%**
+- Tambah `DRYRUN_EXPLORATION_MIN_CONFIDENCE=0.45`, `DRYRUN_EXPLORATION_MIN_STRENGTH=0.05`, `DRYRUN_EXPLORATION_MIN_RR=0.6`
+
+**`tests/test_autotrade_dryrun_signal_cycle.py`:**
+- Relax strict total assertions ke `assertAlmostEqual` karena fill sekarang termasuk slippage (konsisten dengan fee realism).
+
+#### Safety
+- `AUTO_TRADE_DRY_RUN=true` default tetap berlaku; tidak ada perubahan ke real-trading path.
+- `MAX_DRAWDOWN_PCT`, `MAX_DAILY_LOSS_PCT`, circuit breaker, dan API key gate **TIDAK BERUBAH**.
+- Exploration mode hanya aktif di DRY RUN; position size sangat kecil (20-50%) untuk data collection.
+- Semua 17 entry gates (MI filter, V4 filter, R/R check, correlation, dll) tetap berlaku.
+
+#### Verification
+- Syntax: `python -m py_compile autotrade/runtime.py core/config.py bot.py` ✅.
+- Tests: `pytest tests/test_autotrade_dryrun_signal_cycle.py tests/test_dryrun_safety.py tests/test_signal_notification_controls.py tests/test_orderbook_market_intelligence.py tests/test_signal_thresholds_priority1.py tests/test_batch3_rule_rejections.py tests/test_bot_pending_orders.py` ✅ **70 passed**.
+- Log analysis 2026-06-06: confirmed `snxidr` BUY signal reaches Telegram but auto-promote fails at bid/ask check → fix verified in code.
+
+#### Rollback Plan
+1. `bot.py`: kembalikan TA strength filter ke `abs(ta_strength) < 0.45`.
+2. `autotrade/runtime.py`: kembalikan `_auto_promote_pair` bid/ask check tanpa DRY RUN bypass. Kembalikan fill condition ke `fill_price <= entry_zone_price`. Hapus blok `elif display_rec == "BELI_BERTAHAP"`. Kembalikan exploration thresholds ke hardcoded `0.52/0.08/0.8`.
+3. `core/config.py`: kembalikan `LIMIT_ORDER_TIMEOUT_MINUTES=5.0`, `LIMIT_ORDER_MIN_EDGE_PCT=0.15`, `LIMIT_ORDER_CANCEL_DISTANCE_PCT=1.25`. Hapus 3 baris `DRYRUN_EXPLORATION_MIN_*`.
+4. `tests/test_autotrade_dryrun_signal_cycle.py`: kembalikan `assertAlmostEqual` ke `assertEqual` dengan exact values.
+
+### Added - 2026-05-30 (Scalper DRY RUN `/s_buy_auto` default TP/SL)
+- `scalper/scalper_module.py`: Tambah `/s_buy_auto <PAIR> <PRICE> <IDR>` dan alias `/buy_auto` untuk DRY RUN BUY dengan default TP +3% dan SL -2%.
+- Safety: default TP/SL otomatis hanya aktif saat `is_real_trading=False`; di REAL mode wrapper mendelegasikan ke `/s_buy` tanpa auto-set TP/SL sehingga confirmation callback tetap `tp=0/sl=0` jika user tidak memberi TP/SL eksplisit.
+- `COMMANDS.md`: Dokumentasikan command, contoh, dan dampak safety.
+>>>>>>> Stashed changes
 
 ### Fixed - 2026-05-25 (AutoTrade DRY RUN Auto-Promote & Signal Queue Path)
 - `autotrade/runtime.py`: Auto-promote watched pairs ke `auto_trade_pairs` saat sinyal BUY/STRONG_BUY terdeteksi (DRY RUN mode) baik dari WebSocket maupun signal queue worker.
