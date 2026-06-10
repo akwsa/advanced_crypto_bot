@@ -105,7 +105,7 @@ class IndodaxAPI:
                             'last': float(t.get('last', 0)),
                             'high': float(t.get('high', 0)),
                             'low': float(t.get('low', 0)),
-                            'volume': float(t.get('vol', t.get('volume', 0))),
+                            'volume': float(t.get('vol_btc', t.get('vol', t.get('volume', 0)))),
                             'bid': float(t.get('buy', 0)),
                             'ask': float(t.get('sell', 0)),
                             'timestamp': time.time()
