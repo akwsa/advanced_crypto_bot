@@ -9,7 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-<<<<<<< Updated upstream
+### Fixed - 2026-06-11 (Autotrade pre_sr override hilang setelah merge → 0 entry)
+**Konteks:** Setelah deploy kemarin, bot di VM mati malam-pagi (12:35 WIB Jun 10). Saat restart Jun 11 paginya, ditemukan dua issue tumpuk:
+
+1. **Redis tidak ter-install di VM** → `signal_queue.push_signal()` jadi no-op silent. Market scan menemukan 17→26 strong signal per cycle, tapi worker queue gak pernah pop apapun, akibatnya `check_trading_opportunity` (dan downstream `analyze_market_intelligence`) gak pernah dipanggil sama sekali. Ini menjelaskan kenapa kemarin "0 entry" walau code 2 bug fundamental sudah dipatch.
+
+   **Fix:** Install `redis-server` (Debian package) + enable systemd service. Connection: `127.0.0.1:6379`. State manager, signal queue, price cache, task queue semua sekarang connected (bukan dict fallback).
+
+2. **`pre_sr_recommendation` override hilang setelah merge** branch `scalper-sltp` + `autotrade-dryrun-no-entry-vm-20260609`. CHANGELOG 2026-05-29 ("Fix 3") menyebutkan override `signal["recommendation"]` ke `pre_sr_recommendation` di `check_trading_opportunity()` agar autotrade gak ikut keblok oleh SR_VALIDATION (yang adalah filter notifikasi Telegram, bukan filter autotrade). Tapi setelah merge konflik, override-nya hilang.
+
+   **Akibat:** Signal STRONG_BUY → di-downgrade SR_VALIDATION ke HOLD → gate weak-signal di runtime.py:644 lolos via `effective_rec` (read pre_sr) → tapi semua gate setelahnya cek `signal["recommendation"]` yang masih HOLD → 0 panggilan ke `analyze_market_intelligence`, 0 panggilan ke `should_execute_trade`, 0 entry walau pre-SR menyetujui.
+
+   **Fix:** `autotrade/runtime.py::_check_trading_opportunity_locked()` setelah weak-signal gate sekarang:
+   - Cek 3 explicit veto flag dari pipeline upstream: `duplicate_filtered`, `execution_allowed=False`, `display_recommendation="PANTAU"` — sebelumnya incidentally nge-blok via signal=HOLD, sekarang harus eksplisit.
+   - Override `signal["recommendation"] = effective_rec` (= `pre_sr_recommendation` if set else original) sebelum gate-gate berikutnya jalan, dengan log audit `📝 [autotrade] {pair}: recommendation override HOLD → STRONG_BUY (pre-SR snapshot)`.
+
+**Files changed:**
+- `autotrade/runtime.py` — tambah veto checks + pre_sr override (~30 LOC)
+- `tests/test_autotrade_dryrun_signal_cycle.py` — 2 test baru (override promotes, override doesn't promote when pre_sr=HOLD); resolve merge conflict marker dari sebelumnya; update assertion test `test_watched_buy_signal_auto_promotes_and_saves_dryrun_trade_to_db` untuk reflect new behavior (HOLD+pre_sr=STRONG_BUY → trade tereksekusi)
+- `tests/test_orderbook_market_intelligence.py` — resolve merge conflict marker (keep upstream side, lebih komprehensif & match runtime.py current state)
+
+**Verification:**
+- 69 test relevan pass: `test_autotrade_dryrun_signal_cycle.py` (12), `test_orderbook_market_intelligence.py` (8), `test_pre_sr_recommendation_bypasses_quality_engine.py` (3), `test_mi_threshold_tuning.py` (8), plus signal notification, dispatch, pair delete cleanup tests.
+- VM live test: bot restart dengan Redis available, SQ-Worker mulai pop signal, `analyze_market_intelligence` mulai dipanggil, override log muncul. Pending: monitor 30-60 menit untuk lihat entry pertama.
+
+**Trading/safety risk:** Low. Bot dalam DRY RUN mode (database mark, no real order). Real-trading path punya gate yang sama + `should_execute_trade` final check. Override hanya mengembalikan behavior yang sudah didokumentasikan di CHANGELOG 2026-05-29.
+
+**Rollback plan:** Revert commit ini. Bot akan kembali ke 0-entry behavior (sama seperti sebelum fix), tapi tetap operational (signal generation + Telegram notification + dashboard masih jalan).
+
 ### Added - 2026-06-10 (Pair Scanner + Dashboard Revamp)
 **Konteks:** User minta dashboard yang lebih representatif & modern, plus auto-scanning Indodax untuk identifikasi top volume + pair yang lagi pump (momentum tinggi) supaya bot bisa auto-promote ke watchlist.
 
@@ -240,7 +267,7 @@ Jadi autotrade lihat `pre_sr_recommendation = HOLD` (sudah ter-downgrade Quality
 - Verifikasi: 61 target test passing pre-deploy.
 
 **Rollback plan:** Revert commit di branch `fix/autotrade-dryrun-no-entry-vm-20260609`. Restart bot di VM via `tmux attach -t bot` → `Ctrl+C` → `python bot.py`. State runtime (open positions, signal cache) di-rebuild otomatis dari `data/trading.db`.
-=======
+
 ### Fixed - 2026-06-07 (Session Stability — HTML Parse & Event Loop Errors)
 
 #### Masalah
@@ -395,7 +422,6 @@ Ketika profit optimizer (`core/profit_optimizer.py`) menolak trade, ia return `p
 - `scalper/scalper_module.py`: Tambah `/s_buy_auto <PAIR> <PRICE> <IDR>` dan alias `/buy_auto` untuk DRY RUN BUY dengan default TP +3% dan SL -2%.
 - Safety: default TP/SL otomatis hanya aktif saat `is_real_trading=False`; di REAL mode wrapper mendelegasikan ke `/s_buy` tanpa auto-set TP/SL sehingga confirmation callback tetap `tp=0/sl=0` jika user tidak memberi TP/SL eksplisit.
 - `COMMANDS.md`: Dokumentasikan command, contoh, dan dampak safety.
->>>>>>> Stashed changes
 
 ### Fixed - 2026-05-25 (AutoTrade DRY RUN Auto-Promote & Signal Queue Path)
 - `autotrade/runtime.py`: Auto-promote watched pairs ke `auto_trade_pairs` saat sinyal BUY/STRONG_BUY terdeteksi (DRY RUN mode) baik dari WebSocket maupun signal queue worker.

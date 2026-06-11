@@ -647,6 +647,51 @@ async def _check_trading_opportunity_locked(bot, pair, pair_key, signal):
         # berakhir silent karena log skip-nya di level DEBUG.
         logger.info(f"⏸️ Skipping {pair}: Weak signal ({effective_rec})")
         return
+    # FIX 2026-06-11: Explicit veto checks sebelum pre_sr override.
+    # Beberapa flag dari pipeline upstream menandakan bahwa signal TIDAK
+    # boleh dieksekusi walau pre_sr-nya kuat:
+    #   - duplicate_filtered: signal ini duplikat dari alert sebelumnya
+    #     (cooldown anti-spam alert) — execution akan trigger dari alert
+    #     pertama yang asli, bukan dari yang ini.
+    #   - execution_allowed=False: decision layer (signal_pipeline V4 outcome
+    #     filter, dll) sudah menolak signal ini secara eksplisit.
+    #   - display_recommendation=PANTAU: pipeline final-nya watch-only.
+    # Sebelum override pre_sr ada, flag-flag ini incidentally diblokir karena
+    # signal["recommendation"] = HOLD. Sekarang kita perlu cek eksplisit.
+    if signal.get("duplicate_filtered"):
+        logger.info(
+            f"⏸️ Skipping {pair}: duplicate_filtered=True "
+            f"({signal.get('duplicate_filtered_reason', 'no reason')})"
+        )
+        return
+    if signal.get("execution_allowed") is False:
+        logger.info(
+            f"⏸️ Skipping {pair}: execution_allowed=False "
+            f"({signal.get('decision_reason', 'no reason')})"
+        )
+        return
+    if signal.get("display_recommendation") == "PANTAU":
+        logger.info(
+            f"⏸️ Skipping {pair}: display_recommendation=PANTAU "
+            f"({signal.get('display_reason', 'no reason')})"
+        )
+        return
+    # FIX 2026-06-11: Apply pre_sr override on signal['recommendation']
+    # so downstream gates (DRY RUN open-position check, MI filter, V4,
+    # execution path) see the autotrade-relevant recommendation. Without
+    # this, BUY/STRONG_BUY signals downgraded to HOLD by SR_VALIDATION
+    # pass the weak-signal gate (via effective_rec) but then fail every
+    # subsequent `signal["recommendation"]` check at L762, so
+    # `analyze_market_intelligence` and `should_execute_trade` are never
+    # called. CHANGELOG noted this fix at 2026-05-29 ("Fix 3") but the
+    # override line was lost during merge of branches scalper-sltp +
+    # autotrade-dryrun-no-entry-vm-20260609.
+    if signal["recommendation"] != effective_rec:
+        logger.info(
+            f"📝 [autotrade] {pair}: recommendation override "
+            f"{signal['recommendation']} → {effective_rec} (pre-SR snapshot)"
+        )
+        signal["recommendation"] = effective_rec
     # NOTE: DRY RUN now allows both BUY and STRONG_BUY for realistic validation.
     # Previously only STRONG_BUY was allowed, making DRY RUN results misleading.
     if is_dry_run and open_trades_for_pair and signal["recommendation"] in ["BUY", "STRONG_BUY"]:

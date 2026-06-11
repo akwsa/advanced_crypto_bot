@@ -177,6 +177,64 @@ class TestAutoTradeDryRunSignalCycle(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(db.get_open_trades(123), [])
         bot.trading_engine.should_execute_trade.assert_not_called()
 
+    async def test_pre_sr_override_promotes_hold_to_buy_and_opens_dryrun_trade(self):
+        """REGRESSION 2026-06-11: signal[recommendation]=HOLD with
+        pre_sr_recommendation=BUY/STRONG_BUY must be overridden so the
+        downstream gates (`should_execute_trade`, MI filter, execution
+        path) treat it as the autotrade-relevant pre-SR recommendation.
+
+        Without the override, signals downgraded by SR_VALIDATION
+        (which is a Telegram-notification filter, not an autotrade
+        filter) silently bypassed every gate after the weak-signal
+        check, resulting in 0 entries despite valid pre-SR BUY signals.
+        """
+        bot, db, optimization = self._make_dryrun_bot("btcidr")
+
+        await self._run_dryrun_signal(
+            bot,
+            "btcidr",
+            {
+                "pair": "btcidr",
+                "recommendation": "HOLD",
+                "pre_sr_recommendation": "STRONG_BUY",
+                "display_recommendation": "STRONG_BUY",
+                "ml_confidence": 0.8,
+                "price": 100.0,
+                "indicators": {},
+            },
+            optimization,
+        )
+
+        # Override harus aktif: gate `should_execute_trade` dipanggil
+        # (artinya signal["recommendation"] di-promote dari HOLD ke STRONG_BUY).
+        bot.trading_engine.should_execute_trade.assert_called()
+        # Posisi DRY RUN terbuka.
+        self.assertEqual(len(db.get_open_trades(123)), 1)
+
+    async def test_pre_sr_override_does_not_promote_when_pre_sr_is_hold(self):
+        """Sanity: pre_sr_recommendation=HOLD harus tetap di-skip sebagai
+        weak signal — override hanya berlaku saat pre_sr ∈ BUY/STRONG_BUY/SELL/STRONG_SELL.
+        """
+        bot, db, optimization = self._make_dryrun_bot("btcidr")
+
+        await self._run_dryrun_signal(
+            bot,
+            "btcidr",
+            {
+                "pair": "btcidr",
+                "recommendation": "HOLD",
+                "pre_sr_recommendation": "HOLD",
+                "display_recommendation": "HOLD",
+                "ml_confidence": 0.8,
+                "price": 100.0,
+                "indicators": {},
+            },
+            optimization,
+        )
+
+        bot.trading_engine.should_execute_trade.assert_not_called()
+        self.assertEqual(db.get_open_trades(123), [])
+
     async def test_pantau_display_signal_does_not_open_dryrun_trade_even_when_pre_sr_buy(self):
         bot, db, optimization = self._make_dryrun_bot("btcidr")
 
@@ -460,8 +518,12 @@ class TestAutoTradeDryRunSignalCycle(unittest.IsolatedAsyncioTestCase):
         """Saat /autotrade dryrun aktif, BUY/STRONG_BUY dari pair watchlist
         harus otomatis masuk auto_trade_pairs. Jika recommendation final adalah
         BUY/STRONG_BUY (bukan HOLD), trade DRY RUN juga harus tersimpan di DB.
-        Jika recommendation=HOLD (misal karena SR_VALIDATION menolak), pair
-        tetap di-promote tapi trade TIDAK dieksekusi."""
+
+        FIX 2026-06-11: Bahkan ketika recommendation=HOLD (misal di-downgrade
+        oleh SR_VALIDATION) tapi pre_sr_recommendation=STRONG_BUY, trade tetap
+        dieksekusi karena override pre_sr di check_trading_opportunity.
+        SR_VALIDATION adalah filter notifikasi Telegram, bukan filter autotrade —
+        autotrade punya 17 entry gate sendiri yang lebih appropriate."""
         db = _FakeDryRunDB()
         bot = SimpleNamespace(
             is_trading=True,
@@ -530,24 +592,24 @@ class TestAutoTradeDryRunSignalCycle(unittest.IsolatedAsyncioTestCase):
              patch("autotrade.runtime.detect_market_regime", Mock(return_value={"regime": "RANGE", "volatility": 0.01, "is_high_vol": False, "is_trending": False, "trend_direction": "NEUTRAL"})), \
              patch("autotrade.runtime.get_support_resistance_for_pair", AsyncMock(return_value=None)), \
              patch("autotrade.runtime.evaluate_autotrade_setup", Mock(return_value=optimization)):
-            # Signal with recommendation=HOLD (rejected by SR_VALIDATION).
-            # Pair should auto-promote, but NO trade should execute.
+            # Signal with recommendation=HOLD (di-downgrade oleh SR_VALIDATION).
+            # FIX 2026-06-11: pre_sr_recommendation=STRONG_BUY harus override
+            # signal["recommendation"] supaya autotrade execution path tetap
+            # jalan (SR_VALIDATION adalah filter notifikasi Telegram, bukan
+            # filter autotrade).
             await check_trading_opportunity(
                 bot,
                 "testidr",
                 signal={"pair": "testidr", "recommendation": "HOLD", "pre_sr_recommendation": "STRONG_BUY", "ml_confidence": 0.8, "price": 100.0, "indicators": {}},
             )
 
-<<<<<<< Updated upstream
+        # Auto-promote should happen (pair added to auto_trade_pairs).
         self.assertEqual(bot.auto_trade_pairs[123], ["testidr"])
-=======
-        # Auto-promote should still happen (pair added to auto_trade_pairs)
-        self.assertEqual(bot.auto_trade_pairs[123], ["btcidr"])
-        # But no trade should execute because recommendation is HOLD
->>>>>>> Stashed changes
+        # FIX 2026-06-11: Trade DRY RUN HARUS terbuka karena pre_sr override
+        # mempromosikan recommendation HOLD → STRONG_BUY untuk autotrade path.
         open_trades = db.get_open_trades(123)
-        self.assertEqual(len(open_trades), 0)
-        bot.price_monitor.set_price_level.assert_not_called()
+        self.assertEqual(len(open_trades), 1)
+        bot.price_monitor.set_price_level.assert_called()
 
     async def test_low_price_pair_uses_price_times_1000_as_dryrun_nominal(self):
         db = _FakeDryRunDB()
