@@ -202,7 +202,7 @@ class Config:
     ML_MODEL_PATH = os.getenv('ML_MODEL_PATH', 'models/trading_model.pkl')
     ML_SEQUENCE_LENGTH = 60  # 60 candles
     ML_RETRAIN_INTERVAL = timedelta(hours=24)
-    CONFIDENCE_THRESHOLD = 0.35  # Lower for more signals
+    CONFIDENCE_THRESHOLD = 0.50  # Global fallback; per-direction thresholds in signal_rules.py take priority
     
     # Risk Management
     # (MAX_DAILY_LOSS_PCT and MAX_DRAWDOWN_PCT defined earlier — kept as fractions for consistency)

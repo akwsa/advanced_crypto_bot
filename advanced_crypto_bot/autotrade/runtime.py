@@ -9,6 +9,7 @@
 import asyncio
 import json
 import logging
+import os
 import random
 import threading
 from datetime import datetime, timedelta
@@ -22,6 +23,40 @@ from core.utils import Utils
 from signals.signal_pipeline import generate_signal_for_pair
 
 logger = logging.getLogger("crypto_bot")
+
+# 2026-06-12: Pair blacklist gate — auto-skip pairs with consecutive losses.
+# Analysis of 24 trades showed ethidr (0/3) and xlmidr (0/3) as systematic losers.
+# Block any pair that has >= PAIR_LOSS_STREAK_BLOCK consecutive losses in recent history.
+PAIR_LOSS_STREAK_BLOCK = 2
+# Pairs temporarily blacklisted pending recovery evidence (override env).
+PAIR_TEMPORARY_BLACKLIST = {
+    p.strip().lower()
+    for p in (os.getenv('AUTOTRADE_TEMPORARY_BLACKLIST', 'ethidr,xlmidr') or 'ethidr,xlmidr').split(',')
+    if p.strip()
+}
+
+
+def _check_pair_loss_streak(bot, pair_key: str) -> bool:
+    """Return True if the pair should be skipped due to recent consecutive losses.
+
+    Checks the last N completed trades for this pair. If they are all losing
+    trades and count >= PAIR_LOSS_STREAK_BLOCK, skip the pair.
+    """
+    try:
+        user_id = list(bot.subscribers.keys())[0] if bot.subscribers else 1
+        recent = bot.db.get_recent_closed_trades_for_pair(user_id, pair_key, limit=PAIR_LOSS_STREAK_BLOCK)
+        if not recent or len(recent) < PAIR_LOSS_STREAK_BLOCK:
+            return False
+        losses = [t for t in recent if (t.get('profit_loss') or 0) <= 0]
+        if len(losses) >= PAIR_LOSS_STREAK_BLOCK:
+            logger.warning(
+                f"🛑 [PAIR_STREAK] {pair_key}: {len(losses)} consecutive losses "
+                f"— auto-skipping (block threshold: {PAIR_LOSS_STREAK_BLOCK})"
+            )
+            return True
+    except Exception as e:
+        logger.debug(f"⚠️ [PAIR_STREAK] Could not check loss streak for {pair_key}: {e}")
+    return False
 
 
 def _classify_autotrade_block_reason(reason):
@@ -807,7 +842,19 @@ async def _check_trading_opportunity_locked(bot, pair, pair_key, signal):
     if signal["recommendation"] in ["BUY", "STRONG_BUY"]:
         # Authoritative pre-entry gate. Previously this runtime bypassed
         # TradingEngine.should_execute_trade(), so real entries could ignore
-        # duplicate-position, max-daily-trade, min-balance, trading-hours, and
+        # 2026-06-12: Pair loss-streak gate + temporary blacklist.
+        # Skips pairs that have >=2 consecutive losses in recent history.
+        # Also skips pairs in the temporary blacklist (env-overridable).
+        if pair_key in PAIR_TEMPORARY_BLACKLIST:
+            logger.warning(
+                f"🛑 [PAIR_BLACKLIST] {pair}: temporarily blacklisted "
+                f"(env: AUTOTRADE_TEMPORARY_BLACKLIST) — skipping"
+            )
+            return
+        if _check_pair_loss_streak(bot, pair_key):
+            return
+
+        # Pre-entry checks: duplicate-position, max-daily-trade, min-balance, trading-hours, and
         # correlation-cooldown checks.
         should_trade, gate_reason = bot.trading_engine.should_execute_trade(user_id, signal, current_price)
         if not should_trade:

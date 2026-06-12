@@ -932,6 +932,23 @@ class Database:
             ''', (user_id, pair))
             return cursor.fetchall()
 
+    def get_recent_closed_trades_for_pair(self, user_id, pair, limit=5):
+        """Get last N CLOSED trades for a specific pair, ordered by closed_at DESC.
+
+        Used by the pair loss-streak gate to detect consecutive losers.
+        Returns list of dict-like rows with profit_loss field.
+        """
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT * FROM trades
+                WHERE user_id = ? AND pair = ? AND status = 'CLOSED'
+                ORDER BY closed_at DESC
+                LIMIT ?
+            ''', (user_id, pair, limit))
+            rows = cursor.fetchall()
+            return [dict(r) for r in rows]
+
     def get_trade_history(self, user_id, limit=20):
         with self.get_connection() as conn:
             cursor = conn.cursor()

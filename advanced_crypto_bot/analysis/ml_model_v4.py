@@ -238,8 +238,8 @@ class MLTradingModelV4:
 
         # Filter hanya actionable (exclude NEUTRAL untuk binary model, tapi keep untuk multi-class)
         actionable = df[df['label'].isin(CLASSES)].copy()
-        if len(actionable) < 50:
-            logger.warning(f"⚠️ Only {len(actionable)} actionable outcomes, need 50+")
+        if len(actionable) < 15:
+            logger.warning(f"⚠️ Only {len(actionable)} actionable outcomes, need 15+")
             return False
 
         logger.info(f"📊 Training V4 with {len(actionable)} labeled outcomes")

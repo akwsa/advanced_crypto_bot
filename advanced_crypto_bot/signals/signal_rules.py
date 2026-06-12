@@ -6,9 +6,11 @@ SELL_SIGNALS = {"SELL", "STRONG_SELL"}
 
 # Asymmetric confidence thresholds (profit-oriented):
 # Keep BUY relatively permissive, but make SELL stricter to reduce bear bias.
-BUY_MIN_CONFIDENCE = 0.50
-STRONG_BUY_MIN_CONFIDENCE = 0.64
-SELL_MIN_CONFIDENCE = 0.58
+# 2026-06-12: Raised BUY 0.50→0.65 and STRONG_BUY 0.64→0.70 after trade-outcome
+# analysis showed <60% confidence trades lose 80% of the time (5 trades: 4 BAD).
+BUY_MIN_CONFIDENCE = 0.65
+STRONG_BUY_MIN_CONFIDENCE = 0.70
+SELL_MIN_CONFIDENCE = 0.65
 STRONG_SELL_MIN_CONFIDENCE = 0.70
 
 # Legacy aliases kept for backward compatibility with external callers.
