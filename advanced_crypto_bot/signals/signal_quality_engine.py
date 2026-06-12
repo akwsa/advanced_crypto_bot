@@ -153,6 +153,151 @@ class SignalQualityEngine:
         except Exception as e:
             logger.debug(f"Regime detection error: {e}")
             return 'UNKNOWN', 1.0
+
+    # ========================================================================
+    # NEW 2026-06-12: Higher-Timeframe (HTF) Trend Filter
+    # ========================================================================
+    # Konteks: data di `price_history` adalah TICK (polling 3-5 menit) bukan
+    # candle 15m. open=high=low=close=last_price untuk tiap row, jadi indikator
+    # range-based (ATR, BB width, candle pattern) degenerate di TF native.
+    #
+    # Solusi: resample ticks ke 1h aggregation. Ini menghasilkan OHLC real
+    # (high=max tick dalam jam itu, low=min tick, dst). Sekaligus melebarkan
+    # horizon — 200 ticks ≈ 10-16h jadi 10-16 candle 1h, cukup buat SMA pendek.
+    # ========================================================================
+
+    def compute_higher_tf_trend(
+        self,
+        df: pd.DataFrame,
+        target_minutes: int = 60,
+        sma_fast: int = 5,
+        sma_slow: int = 10,
+        trend_threshold_pct: float = 1.0,
+    ) -> Dict:
+        """Hitung trend direction di higher timeframe via resample tick → OHLC.
+
+        Args:
+            df: DataFrame tick dengan kolom timestamp + OHLCV (open=high=low=close
+                untuk tick mode, tapi method ini juga jalan untuk candle real).
+            target_minutes: Target candle size hasil resample. Default 60 (1h).
+            sma_fast: Period SMA cepat di HTF. Default 5 candle (= 5 jam @ 1h).
+            sma_slow: Period SMA lambat di HTF. Default 10 candle (= 10 jam @ 1h).
+            trend_threshold_pct: Selisih SMA fast vs slow (%) untuk vonis trend.
+                Default 1.0 (1%) — di bawah ini = SIDEWAYS.
+
+        Returns:
+            Dict {
+                'trend': 'UP' | 'DOWN' | 'SIDEWAYS' | 'INSUFFICIENT_DATA',
+                'sma_fast': float | None,
+                'sma_slow': float | None,
+                'spread_pct': float | None,   # (fast-slow)/slow * 100
+                'htf_candles': int,           # jumlah candle hasil resample
+                'tf': str,                    # label e.g. '1h'
+            }
+        """
+        result = {
+            'trend': 'INSUFFICIENT_DATA',
+            'sma_fast': None,
+            'sma_slow': None,
+            'spread_pct': None,
+            'htf_candles': 0,
+            'tf': f'{target_minutes}min' if target_minutes < 60 else f'{target_minutes // 60}h',
+        }
+
+        if df is None or len(df) == 0:
+            return result
+
+        try:
+            work = df.copy()
+            # Pastikan timestamp sebagai index untuk resample.
+            if 'timestamp' in work.columns:
+                work['timestamp'] = pd.to_datetime(work['timestamp'], errors='coerce')
+                work = work.dropna(subset=['timestamp']).set_index('timestamp')
+            elif not isinstance(work.index, pd.DatetimeIndex):
+                # Tidak bisa resample tanpa timestamp valid.
+                return result
+
+            # Resample. Kalau tick mode (high=low=close), OHLC tetap benar
+            # (max/min lintas tick = high/low real); kalau candle real, hasil
+            # tetap valid.
+            agg = {}
+            if 'open' in work.columns:
+                agg['open'] = 'first'
+            if 'high' in work.columns:
+                agg['high'] = 'max'
+            if 'low' in work.columns:
+                agg['low'] = 'min'
+            if 'close' in work.columns:
+                agg['close'] = 'last'
+            if 'volume' in work.columns:
+                agg['volume'] = 'sum'
+
+            if 'close' not in agg:
+                return result
+
+            rule = f'{target_minutes}min'
+            htf = work.resample(rule).agg(agg).dropna(subset=['close'])
+            result['htf_candles'] = len(htf)
+
+            min_candles = max(sma_slow, sma_fast) + 1
+            if len(htf) < min_candles:
+                return result  # insufficient
+
+            close = htf['close']
+            fast = float(close.rolling(sma_fast).mean().iloc[-1])
+            slow = float(close.rolling(sma_slow).mean().iloc[-1])
+
+            if pd.isna(fast) or pd.isna(slow) or slow <= 0:
+                return result
+
+            spread_pct = (fast - slow) / slow * 100
+            result['sma_fast'] = fast
+            result['sma_slow'] = slow
+            result['spread_pct'] = spread_pct
+
+            if spread_pct > trend_threshold_pct:
+                result['trend'] = 'UP'
+            elif spread_pct < -trend_threshold_pct:
+                result['trend'] = 'DOWN'
+            else:
+                result['trend'] = 'SIDEWAYS'
+
+            return result
+
+        except Exception as e:
+            logger.debug(f"[HTF TREND] Resample/compute failed: {e}")
+            return result
+
+    def htf_alignment_score(self, signal_direction: str, htf_trend: str) -> int:
+        """Confluence bonus/penalty dari alignment HTF trend dengan signal direction.
+
+        Skema (kontribusi ke confluence_score):
+            - BUY  + HTF UP        → +1  (aligned)
+            - BUY  + HTF SIDEWAYS  →  0  (neutral)
+            - BUY  + HTF DOWN      → -1  (counter-trend, hati-hati)
+            - SELL + HTF DOWN      → +1  (aligned)
+            - SELL + HTF SIDEWAYS  →  0
+            - SELL + HTF UP        → -1
+            - INSUFFICIENT_DATA    →  0  (jangan menghukum kalau data kurang)
+
+        Sengaja tidak BLOCK signal — hanya nge-rank. Threshold `actionable`
+        downstream akan reject signal yang skornya jatuh di bawah minimum
+        confluence (CONFLUENCE_MINIMUM_BUY/SELL).
+        """
+        if htf_trend == 'INSUFFICIENT_DATA':
+            return 0
+        if signal_direction == 'BUY':
+            if htf_trend == 'UP':
+                return 1
+            if htf_trend == 'DOWN':
+                return -1
+            return 0
+        # SELL
+        if htf_trend == 'DOWN':
+            return 1
+        if htf_trend == 'UP':
+            return -1
+        return 0
     
     def check_volatility_filter(self, df, pair: Optional[str] = None) -> Tuple[bool, str]:
         """
@@ -383,14 +528,44 @@ class SignalQualityEngine:
             except Exception as e:
                 logger.debug(f"[QUANT MR] {pair}: Analysis skipped: {e}")
 
+        # NEW 2026-06-12: Higher-Timeframe trend filter (1h aggregation).
+        # Tick data → resample → 1h candles → SMA fast/slow direction.
+        htf_bonus = 0
+        htf_info = None
+        if df is not None and len(df) > 0:
+            try:
+                htf_info = self.compute_higher_tf_trend(
+                    df,
+                    target_minutes=60,
+                    sma_fast=5,
+                    sma_slow=10,
+                    trend_threshold_pct=1.0,
+                )
+                htf_bonus = self.htf_alignment_score(signal_direction, htf_info['trend'])
+                logger.info(
+                    f"📈 [HTF TREND] {pair}: tf={htf_info['tf']} trend={htf_info['trend']} "
+                    f"spread={htf_info['spread_pct']:+.2f}%" if htf_info['spread_pct'] is not None
+                    else f"📈 [HTF TREND] {pair}: tf={htf_info['tf']} trend={htf_info['trend']} "
+                    f"(htf_candles={htf_info['htf_candles']})"
+                )
+                if htf_bonus != 0:
+                    logger.info(
+                        f"📈 [HTF ALIGN] {pair}: signal={signal_direction} vs htf={htf_info['trend']} "
+                        f"→ score{'+' if htf_bonus > 0 else ''}{htf_bonus}"
+                    )
+            except Exception as e:
+                logger.debug(f"[HTF TREND] {pair}: skipped: {e}")
+
         confluence_score = self._calculate_confluence_score(
             rsi, macd, ma_trend, bollinger, volume, ml_confidence, ta_strength,
             signal_direction=signal_direction,
             mean_reversion_bonus=mean_reversion_bonus,
+            htf_alignment_bonus=htf_bonus,
         )
 
         logger.info(
-            f"📊 [CONFLUENCE] {pair}: Score={confluence_score} (MR bonus=+{mean_reversion_bonus}), "
+            f"📊 [CONFLUENCE] {pair}: Score={confluence_score} "
+            f"(MR=+{mean_reversion_bonus}, HTF={'+' if htf_bonus >= 0 else ''}{htf_bonus}), "
             f"ML={ml_signal_class}, TA={ta_strength:.2f}"
         )
 
@@ -421,6 +596,7 @@ class SignalQualityEngine:
         ta_strength: float,
         signal_direction: str = 'BUY',  # 'BUY' or 'SELL'
         mean_reversion_bonus: int = 0,  # NEW: bonus from z-score analysis
+        htf_alignment_bonus: int = 0,   # NEW 2026-06-12: HTF trend alignment
     ) -> int:
         """
         Hitung confluence score (0-10 poin).
@@ -485,6 +661,14 @@ class SignalQualityEngine:
 
         # NEW: Mean Reversion Z-Score bonus (+0 to +2)
         score += mean_reversion_bonus
+
+        # NEW 2026-06-12: Higher-Timeframe trend alignment (-1 to +1)
+        # Aligned: +1, sideways/insufficient: 0, counter-trend: -1.
+        # Floor at 0 supaya counter-trend tidak bisa bikin negative score
+        # (downstream confluence comparisons asumsi non-negative).
+        score += htf_alignment_bonus
+        if score < 0:
+            score = 0
 
         return score
 

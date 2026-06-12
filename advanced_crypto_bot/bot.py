@@ -10023,11 +10023,14 @@ Contoh: <code>/signal BTCIDR</code>
         logger.info(f"📡 Watch request for {pair} (WebSocket disabled, will poll via REST API)")
         return
     
-    async def _load_historical_data(self, pair, limit=200):
+    async def _load_historical_data(self, pair, limit=None):
         """
         Load historical price data for ML analysis
         OPTIMIZED: Non-blocking async API calls
+        Lookback default dari Config.HISTORICAL_DATA_LIMIT (default 500 tick).
         """
+        if limit is None:
+            limit = getattr(Config, 'HISTORICAL_DATA_LIMIT', 200)
         logger.info(f"📚 Loading historical data for {pair} (limit: {limit})")
 
         # Try from database first (async operation)
@@ -10590,10 +10593,11 @@ Contoh: <code>/signal BTCIDR</code>
     def _update_historical_data(self, pair, price_data):
         """Update in-memory historical data with new price"""
         # MEMORY SAFEGUARD: Limit tracked pairs to prevent memory exhaustion on VPS
-        # Each pair keeps ~200 candles × ~6 columns × 8 bytes = ~9.6KB per pair
-        # 100 pairs = ~1MB total, safe for 4GB VPS
+        # Each pair keeps ~HISTORICAL_DATA_LIMIT candles × ~6 columns × 8 bytes
+        # = ~24KB per pair @ 500 cap. 100 pairs = ~2.4MB total, safe for 4GB VPS
         MAX_TRACKED_PAIRS = 100  # Increased from 50 to support more pairs
-        
+        IN_MEMORY_CAP = getattr(Config, 'HISTORICAL_DATA_LIMIT', 200)
+
         if pair not in self.historical_data and len(self.historical_data) >= MAX_TRACKED_PAIRS:
             # Only log at DEBUG level - this is normal when many pairs are polled
             logger.debug(f"⏭️ Max tracked pairs ({MAX_TRACKED_PAIRS}) reached. {pair} saved to DB only (not in-memory)")
@@ -10612,8 +10616,8 @@ Contoh: <code>/signal BTCIDR</code>
             df = self.historical_data[pair]
             df.loc[len(df)] = new_candle
 
-            if len(df) > 200:
-                self.historical_data[pair] = df.tail(200).reset_index(drop=True)
+            if len(df) > IN_MEMORY_CAP:
+                self.historical_data[pair] = df.tail(IN_MEMORY_CAP).reset_index(drop=True)
         else:
             self.historical_data[pair] = pd.DataFrame([new_candle])
     

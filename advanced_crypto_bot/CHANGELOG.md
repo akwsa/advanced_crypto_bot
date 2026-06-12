@@ -9,6 +9,116 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed/Added - 2026-06-12 (ML pipeline overhaul: volume bug + HTF trend + lookback)
+
+**Konteks:** Follow-up dari kejanggalan user: signal Telegram seharusnya lewat ML yang
+membaca pergerakan multi-day. Investigasi menunjukkan ML memang dipanggil
+(`signal_pipeline.generate_signal_for_pair` → `bot.ml_model.predict(df)`) tapi ada 3
+masalah berurutan yang mengikis kualitas keputusan ML:
+
+1. **Volume corrupt 100%** di `price_history` (180,903 row, semua volume=0.0)
+2. **Klaim multi-timeframe palsu** — docstring `signal_quality_engine` bilang "15m
+   primary, 4h trend filter" tapi kode cuma SMA di df 15m yang sama, tidak resample
+3. **Lookback pendek** — 200 row tick (~10-16 jam), tidak cukup untuk HTF resample
+
+#### Phase C — Volume normalisasi (root cause table volume=0)
+
+**Bug:** `api/indodax_api.py::get_ticker()` cuma cek key `vol_btc → vol → volume`.
+Indodax sebenarnya return `vol_<basecoin>` per pair (vol_btc, vol_eth, vol_ada, vol_sol,
+dst) plus `vol_idr` (volume IDR, selalu ada untuk pair IDR). Akibatnya semua pair
+non-BTC tersimpan volume=0 di DB, ML feature volume jadi konstan = noise.
+
+**Fix:** Strategi cascading — coba `vol_idr` dulu (paling konsisten antar pair, unit
+IDR), fallback ke `vol_<base>` (deteksi base coin dari pair name), fallback ke any
+`vol_*` non-zero, fallback legacy. Test live 2026-06-12 confirms: btcidr=18.2B,
+ethidr=9.4B, adaidr=744M, solidr=5.7B, dogeidr=3.6B (semua > 0).
+
+**Files:**
+- `api/indodax_api.py` — get_ticker() volume cascading
+- `tests/test_indodax_ticker_volume_normalization.py` — 7 test baru (vol_idr preferred,
+  vol_<base> fallback, scan vol_* fallback, defensive zero, legacy compat, invalid
+  string, case-insensitive pair)
+
+#### Phase B — Higher-Timeframe trend filter (real, bukan klaim)
+
+**Konteks:** Data di `price_history` adalah TICK (polling 3-5 menit), bukan candle
+15m. Setiap row open=high=low=close=last_price → indikator range-based (ATR, BB
+width, candle pattern) degenerate di TF native. Klaim docstring "Multi-timeframe
+analysis (15m primary, 4h trend filter)" tidak ada implementasinya — `detect_market_regime`
+cuma SMA di df yang sama.
+
+**Fix:** Tambah `compute_higher_tf_trend()` di `SignalQualityEngine` yang resample tick
+ke candle 1h via `df.resample('60min').agg(open=first, high=max, low=min, close=last,
+volume=sum)`. Hasil aggregation menghasilkan OHLC real (high=max tick, low=min tick).
+Lalu hitung SMA fast(5)/slow(10) di HTF, vonis trend UP/DOWN/SIDEWAYS dengan
+threshold 1% spread.
+
+`htf_alignment_score()` menerjemahkan trend → confluence bonus:
+- BUY + UP, SELL + DOWN → +1 (aligned)
+- BUY + DOWN, SELL + UP → -1 (counter-trend)
+- SIDEWAYS atau INSUFFICIENT_DATA → 0
+- Skor floor di 0 (counter-trend tidak bisa bikin score negative)
+
+Wired ke `generate_signal()` flow: HTF dihitung setelah Mean Reversion, lalu
+`htf_alignment_bonus` di-pass ke `_calculate_confluence_score()`. Log baru:
+`📈 [HTF TREND]` dan `📈 [HTF ALIGN]`.
+
+Sengaja TIDAK BLOCK signal — hanya nge-rank confluence. Threshold actionable
+downstream (CONFLUENCE_MINIMUM_BUY/SELL = 1) yang putuskan reject. Ini hindari
+over-filter yang bisa bikin 0 entry lagi.
+
+**Files:**
+- `signals/signal_quality_engine.py` — `compute_higher_tf_trend()`,
+  `htf_alignment_score()`, wire ke generate_signal + _calculate_confluence_score
+- `tests/test_signal_quality_engine_htf_trend.py` — 10 test (UP/DOWN/SIDEWAYS
+  detection, INSUFFICIENT_DATA graceful, alignment scoring, confluence integration,
+  floor-zero pada counter-trend extreme)
+
+#### Phase A — Lookback extension
+
+**Fix:** Tambah `Config.HISTORICAL_DATA_LIMIT` (default 500, env override
+`HISTORICAL_DATA_LIMIT`). Naik dari 200 → 500 tick (~25-40 jam) supaya HTF resample
+1h punya cukup candle untuk SMA 5/10 tanpa kena INSUFFICIENT_DATA pada pair yang
+baru di-track. Memory cost: ~24KB/pair × 100 pair = ~2.4MB total (acceptable di 4GB
+VPS).
+
+`bot._load_historical_data()` dan `bot._update_historical_data()` sekarang ambil cap
+dari Config. Tetap backward-compatible: `_load_historical_data(pair, limit=N)` bisa
+override per call site.
+
+**Files:**
+- `core/config.py` — `HISTORICAL_DATA_LIMIT = _safe_int_env('HISTORICAL_DATA_LIMIT', 500)`
+- `bot.py` — `_load_historical_data` default `None` → fallback Config; `_update_historical_data`
+  tail cap dari Config
+
+#### Verification
+
+- 71 test pass: 17 test baru (volume + HTF), 27 integration regression
+  (signal_pipeline_integration_decision_layer, autotrade_dryrun_signal_cycle,
+  orderbook_market_intelligence), 24 cross-cutting (v4_pipeline,
+  sr_validation_corrupt_guard, signal_thresholds_priority1, near_miss_signals,
+  autotrade_status_watchlist), 3 pre_sr_recommendation_bypasses_quality_engine
+- API compile clean: config.py, bot.py, signal_quality_engine.py, indodax_api.py
+- Live API check: 5 pair sample volumes >0 (18B IDR btcidr, 9B IDR ethidr, dst)
+
+#### Trading/safety risk: RENDAH
+
+- Bot dalam DRY RUN mode (database mark, no real order)
+- Tidak menyentuh real-trade execution path
+- HTF bonus hanya menambah confluence score, threshold actionable tetap rendah
+  (CONFLUENCE_MINIMUM_BUY=1) → unlikely over-filter
+- Volume fix forward-only (data lama di DB tetap volume=0, baru fix dari restart
+  ke depan; ML akan re-train saat outcome cukup terkumpul)
+
+#### Rollback plan
+
+Revert single commit. Tiga perubahan saling independen tapi commit-nya gabungan
+untuk traceability follow-up; kalau perlu rollback parsial:
+- Volume fix: revert hunks di api/indodax_api.py
+- HTF: hapus `compute_higher_tf_trend()` + `htf_alignment_score()` + remove
+  `htf_alignment_bonus` param (fallback default 0 = no-op)
+- Lookback: set `HISTORICAL_DATA_LIMIT=200` di env
+
 ### Fixed - 2026-06-11 (Autotrade pre_sr override hilang setelah merge → 0 entry)
 **Konteks:** Setelah deploy kemarin, bot di VM mati malam-pagi (12:35 WIB Jun 10). Saat restart Jun 11 paginya, ditemukan dua issue tumpuk:
 

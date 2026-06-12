@@ -100,12 +100,44 @@ class IndodaxAPI:
                     data = response.json()
                     if 'ticker' in data:
                         t = data['ticker']
+                        # FIX 2026-06-12: volume normalisasi.
+                        # Indodax return `vol_<basecoin>` per pair (vol_btc, vol_eth, vol_ada, dst)
+                        # plus `vol_idr` (volume dalam IDR, selalu ada untuk pair IDR).
+                        # Sebelumnya cuma cek `vol_btc → vol → volume` → semua pair non-btc
+                        # tersimpan volume=0 → ML feature volume rusak (constant noise).
+                        # Strategi:
+                        #   1. Coba `vol_idr` dulu (paling konsisten antar pair, unit IDR).
+                        #   2. Fallback ke `vol_<base>` (deteksi base coin dari pair, e.g. btcidr → vol_btc).
+                        #   3. Fallback ke `vol_btc/vol/volume` (legacy).
+                        # ML feature pakai volume RELATIF (delta vs SMA) jadi unit konsisten lebih penting
+                        # daripada unit native; vol_idr menang.
+                        vol = t.get('vol_idr')
+                        if vol in (None, '', 0, '0'):
+                            base = pair_symbol.replace('idr', '') if pair_symbol.endswith('idr') else pair_symbol
+                            base_key = f'vol_{base}'
+                            vol = t.get(base_key)
+                        if vol in (None, '', 0, '0'):
+                            # Last resort: scan any vol_* key yang nilainya non-zero.
+                            for k, v in t.items():
+                                if k.startswith('vol_') and k != 'vol_idr':
+                                    try:
+                                        if float(v) > 0:
+                                            vol = v
+                                            break
+                                    except (TypeError, ValueError):
+                                        continue
+                        if vol in (None, '', 0, '0'):
+                            vol = t.get('vol_btc', t.get('vol', t.get('volume', 0)))
+                        try:
+                            volume_f = float(vol) if vol is not None else 0.0
+                        except (TypeError, ValueError):
+                            volume_f = 0.0
                         return {
                             'pair': pair,
                             'last': float(t.get('last', 0)),
                             'high': float(t.get('high', 0)),
                             'low': float(t.get('low', 0)),
-                            'volume': float(t.get('vol_btc', t.get('vol', t.get('volume', 0)))),
+                            'volume': volume_f,
                             'bid': float(t.get('buy', 0)),
                             'ask': float(t.get('sell', 0)),
                             'timestamp': time.time()

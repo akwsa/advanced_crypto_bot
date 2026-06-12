@@ -215,6 +215,15 @@ class Config:
     SR_NEAR_RESISTANCE_PCT = 1.0  # Reject SELL if price within N% of resistance (2026-06-09: relaxed 2.5→1.0; 851/1103 BUY (77%) di-downgrade jadi HOLD oleh threshold lama untuk pair low-cap di mana 0.5%-2% di bawah R1 sudah dianggap "at resistance". Autotrade bypass via pre_sr_recommendation, threshold ini sekarang murni untuk filter notif Telegram.)
     ENABLE_SR_VALIDATION = True  # Enable/disable S/R validation gate
 
+    # ML / Signal Pipeline — Historical Data Lookback
+    # Berapa banyak tick (row price_history) yang di-load per pair untuk feed ML+TA.
+    # Konteks: data di `price_history` adalah TICK polling (3-5 menit interval),
+    # bukan candle 15m. 200 tick ≈ 10-16 jam, 500 tick ≈ 25-40 jam, 1000 tick ≈ 2-3 hari.
+    # Naik dari 200 → 500 supaya HTF resample 1h punya cukup candle untuk SMA 5/10
+    # tanpa kena INSUFFICIENT_DATA setiap kali pair baru di-track.
+    # Memory cost per pair: ~500 × 6 cols × 8 bytes = ~24KB. 100 pair = ~2.4MB total.
+    HISTORICAL_DATA_LIMIT = _safe_int_env('HISTORICAL_DATA_LIMIT', 500)
+
     # Entry Quality
     AUTOTRADE_CHASE_THRESHOLD_PCT = 1.5  # Skip BUY if price moved >1.5% from signal price
     # FIX 2026-06-06: Entry zone distance relaxed from 0.5%→0.2% for more instant fills in trending markets
