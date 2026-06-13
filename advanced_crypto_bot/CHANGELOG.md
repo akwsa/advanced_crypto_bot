@@ -9,6 +9,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed - 2026-06-13 (HTF INSUFFICIENT_DATA selamanya — lookback masih kurang)
+
+**Konteks:** Follow-up commit `4eb1388` (HTF trend filter). Setelah deploy 16+ jam,
+log VM menunjukkan 100% sample HTF stuck di `INSUFFICIENT_DATA`:
+
+```
+HTF candle distribution (last 5000 lines):
+    173  htf_candles=10
+     46  htf_candles=9
+    220  trend=INSUFFICIENT_DATA  (semua, 0 verdict UP/DOWN/SIDEWAYS)
+```
+
+**Root cause: cadence polling Indodax aktual ~64 detik per tick, bukan 3-5 menit.**
+
+Diukur live di VM 2026-06-13 (btcidr, 20 tick gap consecutive):
+```
+min=62.9s  avg=64.2s  max=67.9s
+=> 500 ticks × 64s = 8.9 jam coverage
+=> max 9 candle 1h hasil resample
+=> SMA slow=10 butuh ≥11 candle → INSUFFICIENT_DATA permanen
+```
+
+Asumsi cadence 3-5 menit yang ditulis di komentar `core/config.py` saat patch
+2026-06-12 ternyata SALAH. Polling Indodax sebenarnya jauh lebih cepat (~1 menit).
+
+**Fix:**
+- `core/config.py:225` — naik default `HISTORICAL_DATA_LIMIT` dari 500 → 800.
+  - 800 × 64s ≈ 14.2 jam coverage → ~14 candle 1h
+  - Headroom 3 candle di atas minimum SMA slow=10
+  - Memory cost: 800 × 6 cols × 8 bytes × 50 pair tracked ≈ 1.9MB total
+- Update komentar dengan angka cadence aktual hasil pengukuran live.
+
+**Trading/safety risk:** RENDAH.
+- Tidak menyentuh execution path real trade
+- Cuma load lebih banyak data historical untuk feed ML+TA
+- Pengaruh ke sinyal: HTF trend mulai vonis UP/DOWN/SIDEWAYS dalam ~14 jam setelah
+  restart (sebelumnya stuck INSUFFICIENT_DATA selamanya). Confluence bonus ±1
+  mulai aktif kontribusi ke skor.
+
+**Files changed:**
+- `core/config.py:217-227` — default 500→800, komentar update
+
+**Rollback plan:** Set env `HISTORICAL_DATA_LIMIT=500` di VM, atau revert commit.
+
+---
+
 ### Fixed/Added - 2026-06-12 (ML pipeline overhaul: volume bug + HTF trend + lookback)
 
 **Konteks:** Follow-up dari kejanggalan user: signal Telegram seharusnya lewat ML yang
