@@ -86,7 +86,24 @@ def _apply_final_rejection(signal, source, reason):
 
 async def generate_signal_for_pair(bot, pair):
     """Generate comprehensive trading signal using bot dependencies."""
+    # FIX 2026-06-13: Guard against under-filled in-memory cache.
+    # Polling thread bisa append 1-N tick ke historical_data[pair] sebelum bootstrap
+    # dari DB sempat jalan. Akibatnya: pipeline pakai df pendek (5-10 row) → HTF
+    # resample 1h → 5 candle → INSUFFICIENT_DATA permanen walau DB punya 800+ tick.
+    # Re-load dari DB kalau cache kurang dari setengah target supaya HTF SMA slow=10
+    # (butuh ≥11 candle 1h ≈ ≥660 tick @ 64s cadence) bisa jalan.
+    cache_target = getattr(__import__('core.config', fromlist=['Config']).Config,
+                           'HISTORICAL_DATA_LIMIT', 800)
+    cache_min = cache_target // 2  # 400 tick = ~7 jam, masih kurang tapi best effort
+
     if pair not in bot.historical_data:
+        if hasattr(bot, '_load_historical_data'):
+            await bot._load_historical_data(pair)
+    elif len(bot.historical_data[pair]) < cache_min and hasattr(bot, '_load_historical_data'):
+        logger.info(
+            f"📚 [REFILL] {pair}: cache only {len(bot.historical_data[pair])} rows "
+            f"(< {cache_min}), reloading from DB"
+        )
         await bot._load_historical_data(pair)
 
     if pair not in bot.historical_data or bot.historical_data[pair].empty:

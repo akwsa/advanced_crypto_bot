@@ -9,6 +9,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed - 2026-06-13 (HTF stuck di 5 candle — REFILL guard di signal_pipeline)
+
+**Konteks:** Setelah commit `5c13173` (bootstrap from DB di `_update_historical_data`),
+HTF MASIH stuck di 4-6 candle. Diagnostic membuktikan dengan presisi:
+
+```
+DB query 800 rows           ✓ (verified live di VM)
+Span timestamp 14.1 jam     ✓
+Timestamp parsing 0 NaN     ✓
+RESAMPLE → 16 candles 1h    ✓ (di atas minimum 11)
+```
+
+DB + resample logic sehat. Yang sampai ke `compute_higher_tf_trend` di production
+BUKAN df 800 row dari DB — tapi cache in-memory yang hanya 5-7 row.
+
+**Root cause: race condition polling vs signal scan.**
+
+Trace presisi:
+1. Bot restart → `historical_data = {}` kosong
+2. `price_poller` thread async append 1-2 tick lebih dulu
+3. Bootstrap di `_update_historical_data` (commit 5c13173) baru jalan saat
+   tick KE-N untuk pair tersebut, BUKAN tick pertama. Tapi karena polling
+   loop scan banyak pair, tick pertama untuk satu pair sering datang sebelum
+   bootstrap branch ke-eksekusi
+4. Akibatnya `historical_data[pair]` punya 1-2 row dari polling
+5. `signal_pipeline:89` cek `if pair not in bot.historical_data` → FALSE
+   (cache "ada" walaupun cuma 2 row)
+6. `_load_historical_data` (yang query DB 800 row) **tetap tidak dipanggil**
+7. df 5-7 row → resample 1h → 5 candle → INSUFFICIENT_DATA permanen
+
+**Fix — `signals/signal_pipeline.py:88-105`:**
+- Tambah REFILL guard: kalau cache < `HISTORICAL_DATA_LIMIT/2` (= 400 row),
+  panggil `_load_historical_data(pair)` untuk re-load dari DB.
+- `hasattr(bot, '_load_historical_data')` guard supaya test mock tidak break.
+- Log `📚 [REFILL] {pair}: cache only N rows (< 400), reloading from DB`
+  untuk visibility.
+
+Sebelumnya 800 lookback config + bootstrap fix DB = baru pondasi. Patch ini
+yang bikin pondasi itu beneran kepakai oleh signal pipeline.
+
+**Trading/safety risk:** RENDAH.
+- Tidak menyentuh execution path real trade
+- Cuma trigger DB re-query untuk pair yang cache-nya tipis
+- Pengaruh ke sinyal: REFILL jalan setiap scan untuk pair yang cache < 400.
+  Setelah _load_historical_data isi cache penuh 800, refill skip otomatis.
+- Cost: 1 SQLite query per pair per scan saat cache-tipis. Setelah filled,
+  zero overhead.
+
+**Files changed:**
+- `signals/signal_pipeline.py:87-110` — REFILL guard
+
+**Tests:** 24/24 pass (HTF + volume + pre_sr + decision layer).
+
+**Rollback plan:** Revert single commit.
+
+---
+
 ### Fixed - 2026-06-13 (HTF stuck di 5 candle — bootstrap cache dari DB)
 
 **Konteks:** Setelah commit `2571d4a` (lookback 500→800), HTF malah TURUN dari
