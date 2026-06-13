@@ -9,6 +9,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed - 2026-06-13 (HTF stuck di 5 candle — bootstrap cache dari DB)
+
+**Konteks:** Setelah commit `2571d4a` (lookback 500→800), HTF malah TURUN dari
+9-10 candle ke 5-6 candle setelah restart. Distribution 500 sample log:
+
+```
+484  htf_candles=5
+ 16  htf_candles=6
+  0  htf_candles>=11  (perlu untuk SMA slow=10)
+```
+
+**Root cause: in-memory cache `bot.historical_data` tidak di-bootstrap dari DB.**
+
+Trace flow saat restart:
+1. Bot start → `bot.historical_data = {}` kosong
+2. `price_poller` tick pertama untuk `btcidr` → `_update_historical_data()` jalan
+3. `pair not in self.historical_data` → fall through ke `else` → bikin
+   DataFrame dengan **1 row**: `pd.DataFrame([new_candle])`
+4. Tick berikutnya append ke df yang baru 1 row itu → 2 row → 3 row → ...
+5. Polling cadence ~64 detik → butuh ~14 jam buat akumulasi 800 row in-memory
+6. Sementara itu `signal_pipeline.generate_signal_for_pair`:
+   - Line 89: `if pair not in bot.historical_data` → FALSE (cache sudah ada)
+   - `_load_historical_data` (yang query DB 800 row) **tidak pernah dipanggil**
+7. Pipeline pakai df 5-7 row → resample 1h → 5 candle → INSUFFICIENT_DATA
+
+DB sebetulnya punya 7,397 tick btcidr (verified live), tapi tidak terbaca.
+
+**Fix — `bot.py::_update_historical_data`:**
+- Saat first-sight per pair (else branch), bootstrap dari DB via
+  `self.db.get_price_history(pair, limit=IN_MEMORY_CAP)`.
+- Append fresh tick yang baru datang, lalu cap di `IN_MEMORY_CAP`.
+- Fallback ke fresh DataFrame kalau DB query gagal.
+- Log info `📚 [BOOTSTRAP] {pair}: loaded N ticks from DB + 1 fresh tick`
+  supaya bisa di-grep saat verifikasi deploy.
+
+**Trading/safety risk:** RENDAH.
+- Tidak menyentuh execution path real trade
+- Bootstrap sekali per pair per session (hanya saat first-seen)
+- Pengaruh ke sinyal: HTF trend langsung aktif vonis UP/DOWN/SIDEWAYS pada
+  scan pertama setelah restart (sebelumnya butuh 14+ jam akumulasi tick)
+- DB bootstrap di-wrap try/except — kalau gagal, fall back ke perilaku lama
+
+**Files changed:**
+- `bot.py:10619-10644` — bootstrap from DB pada first-sight pair
+
+**Rollback plan:** Revert single commit. Bot di VM bisa restart cepat.
+
+---
+
 ### Fixed - 2026-06-13 (HTF INSUFFICIENT_DATA selamanya — lookback masih kurang)
 
 **Konteks:** Follow-up commit `4eb1388` (HTF trend filter). Setelah deploy 16+ jam,

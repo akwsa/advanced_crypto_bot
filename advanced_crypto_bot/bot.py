@@ -10619,7 +10619,26 @@ Contoh: <code>/signal BTCIDR</code>
             if len(df) > IN_MEMORY_CAP:
                 self.historical_data[pair] = df.tail(IN_MEMORY_CAP).reset_index(drop=True)
         else:
-            self.historical_data[pair] = pd.DataFrame([new_candle])
+            # FIX 2026-06-13: Bootstrap from DB on first sight of pair.
+            # Tanpa ini, restart bot → cache kosong → polling cuma append 1 tick
+            # per cycle → df stuck di ~5-10 row selama berjam-jam → HTF resample
+            # ke 1h jadi cuma 5 candle → INSUFFICIENT_DATA permanen (butuh ≥11).
+            # Bootstrap sekali per pair (hanya saat first-seen) supaya signal
+            # pipeline langsung punya history lengkap dari DB.
+            try:
+                from_db = self.db.get_price_history(pair, limit=IN_MEMORY_CAP)
+                if from_db is not None and not from_db.empty:
+                    from_db = from_db.copy()
+                    from_db.loc[len(from_db)] = new_candle
+                    self.historical_data[pair] = from_db.tail(IN_MEMORY_CAP).reset_index(drop=True)
+                    logger.info(
+                        f"📚 [BOOTSTRAP] {pair}: loaded {len(from_db)-1} ticks from DB + 1 fresh tick"
+                    )
+                else:
+                    self.historical_data[pair] = pd.DataFrame([new_candle])
+            except Exception as e:
+                logger.debug(f"DB bootstrap for {pair} failed, starting fresh: {e}")
+                self.historical_data[pair] = pd.DataFrame([new_candle])
     
     async def _send_price_update(self, pair):
         """Send price update to subscribers"""
