@@ -96,6 +96,7 @@ It is **NOT** a get-rich-quick tool. The real-trading path is locked behind a ma
 | **Scalper**            | Only path to real-money trades; manual confirm + position size guard     |
 | **Risk Manager**       | Stop loss, take profit, trailing stop, drawdown circuit breaker          |
 | **Telegram Interface** | 80+ commands (status, autotrade dryrun, stats, logs, halt, resume, ...)  |
+| **Multi-User**         | Register via invite code (`/register <code>`), per-user watchlist + auto-trade |
 
 ---
 
@@ -105,7 +106,7 @@ It is **NOT** a get-rich-quick tool. The real-trading path is locked behind a ma
 - **ML / Quant**: scikit-learn, pandas, numpy, ta-lib indicators
 - **Data**: SQLite (price history, trades, model metadata), Redis (signal queue, optional)
 - **Network**: requests, aiohttp, rss-parser
-- **Bot framework**: python-telegram-bot
+- **Bot framework**: python-telegram-bot (multi-user with invite-code registration)
 - **Web layer**: FastAPI dashboard (port 8091) + legacy TMA (8090)
 - **Ops**: systemd, tmux, structured logging, GCP Compute Engine
 - **Testing**: pytest (71 tests passing)
@@ -264,7 +265,8 @@ Highlights:
 
 ## Status & disclaimer
 
-- **Status**: Active development. Service running on GCP, dry-run only.
+|- **Status**: Active development. Service running on GCP, dry-run only.
+- **Multi-User**: Two Telegram bots running — admin bot + member bot (`@isnatradebot`), each with isolated DB and systemd service. Users register via `/register <invite_code>`.
 - **Disclaimer**: Not financial advice. The bot is a learning project. Real trading is locked behind a manual Scalper module that requires explicit confirmation per trade. Use at your own risk if you fork it.
 - **Roadmap**: V2 retraining with real volume features (after enough post-fix data accumulates), gradual extraction of `bot.py` into smaller modules, FastAPI dashboard hardening.
 
