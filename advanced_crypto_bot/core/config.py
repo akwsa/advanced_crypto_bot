@@ -100,7 +100,7 @@ class Config:
     DRYRUN_EXPLORATION_ENABLED = os.getenv('DRYRUN_EXPLORATION_ENABLED', 'true').lower() == 'true'
     DRYRUN_EXPLORATION_POSITION_FACTOR = _safe_float_env('DRYRUN_EXPLORATION_POSITION_FACTOR', 0.20)
     # Exploration thresholds (relaxed to generate more sample trades for evaluation)
-    DRYRUN_EXPLORATION_MIN_CONFIDENCE = _safe_float_env('DRYRUN_EXPLORATION_MIN_CONFIDENCE', 0.45)
+    DRYRUN_EXPLORATION_MIN_CONFIDENCE = _safe_float_env('DRYRUN_EXPLORATION_MIN_CONFIDENCE', 0.60)
     DRYRUN_EXPLORATION_MIN_STRENGTH = _safe_float_env('DRYRUN_EXPLORATION_MIN_STRENGTH', 0.05)
     DRYRUN_EXPLORATION_MIN_RR = _safe_float_env('DRYRUN_EXPLORATION_MIN_RR', 0.6)
     
@@ -122,7 +122,7 @@ class Config:
     MAX_POSITION_SIZE = 0.20  # Max 20% per trade (was 25%)
     
     # Stop Loss & Take Profit (dari .env)
-    STOP_LOSS_PCT = _safe_float_env('STOP_LOSS_PCT', 1.5)      # Cut Loss %
+    STOP_LOSS_PCT = _safe_float_env('STOP_LOSS_PCT', 2.5)      # Cut Loss %
     TAKE_PROFIT_PCT = _safe_float_env('TAKE_PROFIT_PCT', 6.0)  # Take Profit % (was 5%)
     
     # Trailing Stop - MORE AGGRESSIVE
