@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed - 2026-06-13 (Sinkronisasi: `_is_price_sane_for_pair` — Critical #1 Price Guard)
+
+**Konteks:** Audit 2026-06-07 menemukan BTC diperdagangkan di harga 100 IDR (data palsu dari test fixture).
+Test file `test_runtime_price_guard.py` sudah ada (dibuat Hermes) tapi fungsi belum diimplementasi di runtime.py → import error.
+
+**Fix:**
+- `autotrade/runtime.py`: Implementasi `_PAIR_PRICE_FLOOR_IDR` (BTC>100M, ETH>10M, BNB>1M, SOL>100K) dan `_is_price_sane_for_pair(pair, price)` yang menolak harga di bawah floor.
+- `autotrade/runtime.py`: Integrasikan price guard di fresh price fetch section — sekarang harga BTC=100 akan ditolak dengan log `🚫 [PRICE GUARD]`.
+- Cross-loop guard `_get_cached_signal` sudah ada (fix sebelumnya).
+
+**Verification:** `test_runtime_price_guard.py` → **11 passed**. Core tests → **25 passed**, 0 regressions.
+
+---
+
 ### Fixed - 2026-06-13 (HTF stuck di 5 candle — REFILL guard di signal_pipeline)
 
 **Konteks:** Setelah commit `5c13173` (bootstrap from DB di `_update_historical_data`),

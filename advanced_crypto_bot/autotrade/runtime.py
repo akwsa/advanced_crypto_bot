@@ -28,6 +28,50 @@ logger = logging.getLogger("crypto_bot")
 # Analysis of 24 trades showed ethidr (0/3) and xlmidr (0/3) as systematic losers.
 # Block any pair that has >= PAIR_LOSS_STREAK_BLOCK consecutive losses in recent history.
 PAIR_LOSS_STREAK_BLOCK = 2
+
+# =============================================================================
+# PRICE SANITY GUARD — Bug Critical #1 (BTC=100 IDR data palsu)
+# =============================================================================
+# Absolute minimum price floors for major pairs. Prevents test data contamination
+# (fixture price=100) or API glitch from polluting DRY RUN simulations.
+# Only pairs with known high value are listed; unknown/small-cap pairs are NOT
+# blocked (they may legitimately trade at 1 IDR).
+_PAIR_PRICE_FLOOR_IDR = {
+    "btcidr": 100_000_000,       # BTC > 100M IDR (currently ~1.5B)
+    "ethidr": 10_000_000,        # ETH > 10M IDR (currently ~50M)
+    "bnbidr": 1_000_000,         # BNB > 1M IDR (currently ~10M)
+    "solidr": 100_000,           # SOL > 100K IDR (currently ~1.4M)
+}
+
+
+def _is_price_sane_for_pair(pair, price):
+    """Return True if price is plausible for the given pair.
+
+    Guards against:
+    - None/zero/negative prices (always invalid)
+    - Test fixture contamination (BTC=100) for major pairs with known floors
+    - Unknown pairs pass through (no false-blocking small-cap coins at 1 IDR)
+    """
+    if price is None:
+        return False
+    try:
+        price = float(price)
+    except (TypeError, ValueError):
+        return False
+    if price <= 0:
+        return False
+
+    # Normalize pair key
+    normalized = str(pair or "").strip().lower().replace("/", "").replace("_", "").replace("-", "")
+    if not normalized.endswith("idr") and normalized:
+        normalized += "idr"
+
+    # Check absolute floor for known major pairs
+    floor = _PAIR_PRICE_FLOOR_IDR.get(normalized)
+    if floor is not None and price < floor:
+        return False
+
+    return True
 # Pairs temporarily blacklisted pending recovery evidence (override env).
 PAIR_TEMPORARY_BLACKLIST = {
     p.strip().lower()
@@ -1032,24 +1076,29 @@ async def _check_trading_opportunity_locked(bot, pair, pair_key, signal):
             if fresh_ticker:
                 fresh_price = _to_positive_float(fresh_ticker.get("last"))
                 if fresh_price is not None:
-                    # FIX 2026-06-07: Validate fresh price against signal price.
-                    # Reject if the fresh price deviates >50% from signal price
-                    # (prevents test data contamination like BTC price=100).
-                    signal_entry_price = _to_positive_float(signal.get("price")) or current_price
-                    if signal_entry_price and signal_entry_price > 0:
-                        deviation = abs(fresh_price - signal_entry_price) / signal_entry_price
-                        if deviation > 0.50:
-                            logger.warning(
-                                f"⚠️ [PRICE VALIDATION] Fresh price {fresh_price:,.0f} deviates "
-                                f"{deviation*100:.0f}% from signal price {signal_entry_price:,.0f} for {pair} — "
-                                f"REJECTED (possible data contamination). Using signal price instead."
-                            )
+                    # FIX 2026-06-07: Absolute floor guard for major pairs.
+                    if not _is_price_sane_for_pair(pair, fresh_price):
+                        logger.error(
+                            f"🚫 [PRICE GUARD] {pair}: Fresh price {fresh_price:,.4f} below absolute floor — "
+                            f"rejected. Keeping {current_price}."
+                        )
+                    else:
+                        # Relative deviation check vs signal price
+                        signal_entry_price = _to_positive_float(signal.get("price")) or current_price
+                        if signal_entry_price and signal_entry_price > 0:
+                            deviation = abs(fresh_price - signal_entry_price) / signal_entry_price
+                            if deviation > 0.50:
+                                logger.warning(
+                                    f"⚠️ [PRICE VALIDATION] Fresh price {fresh_price:,.0f} deviates "
+                                    f"{deviation*100:.0f}% from signal price {signal_entry_price:,.0f} for {pair} — "
+                                    f"REJECTED (possible data contamination). Using signal price instead."
+                                )
+                            else:
+                                current_price = fresh_price
+                                logger.info(f"🔄 Fresh execution price for {pair}: {current_price}")
                         else:
                             current_price = fresh_price
                             logger.info(f"🔄 Fresh execution price for {pair}: {current_price}")
-                    else:
-                        current_price = fresh_price
-                        logger.info(f"🔄 Fresh execution price for {pair}: {current_price}")
                 else:
                     logger.warning(f"⚠️ Fresh ticker missing 'last' price for {pair}, using signal price")
             else:

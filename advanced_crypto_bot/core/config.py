@@ -102,7 +102,7 @@ class Config:
     # Exploration thresholds (relaxed to generate more sample trades for evaluation)
     DRYRUN_EXPLORATION_MIN_CONFIDENCE = _safe_float_env('DRYRUN_EXPLORATION_MIN_CONFIDENCE', 0.60)
     DRYRUN_EXPLORATION_MIN_STRENGTH = _safe_float_env('DRYRUN_EXPLORATION_MIN_STRENGTH', 0.05)
-    DRYRUN_EXPLORATION_MIN_RR = _safe_float_env('DRYRUN_EXPLORATION_MIN_RR', 0.6)
+    DRYRUN_EXPLORATION_MIN_RR = _safe_float_env('DRYRUN_EXPLORATION_MIN_RR', 1.2)
     
     # Manual Trading
     MANUAL_TRADING_ENABLED = os.getenv('MANUAL_TRADING_ENABLED', 'false').lower() == 'true'
@@ -127,8 +127,8 @@ class Config:
     
     # Trailing Stop - MORE AGGRESSIVE
     TRAILING_STOP_ENABLED = True
-    TRAILING_STOP_PCT = 0.8  # Trail by 1% (tighter, was 1.5%)
-    TRAILING_ACTIVATION_PCT = 1.0  # Activate after +1% profit (was 2%)
+    TRAILING_STOP_PCT = 1.8  # Trail by 1.8% (17-Jun tuning)
+    TRAILING_ACTIVATION_PCT = 2.5  # Activate after +2.5% profit (17-Jun tuning)
     
     # Risk Management - ADDITIONAL
     BREAK_EVEN_AFTER_PCT = 2.0  # Move stop to breakeven after +2% profit
@@ -153,7 +153,7 @@ class Config:
     MI_SPREAD_MAX_PCT = 0.02  # Max spread % before entry is blocked (2% default)
     MI_REQUIRE_BULLISH_FOR_ENTRY = False  # If True, only enter when MI is BULLISH
     MI_ALLOW_MODERATE_ENTRY = True  # If True, also allow MODERATE MI signal
-    MI_ALLOW_NEUTRAL_ENTRY = True  # NEW: If True, also allow NEUTRAL MI signal (was blocked before)
+    MI_ALLOW_NEUTRAL_ENTRY = False  # Block NEUTRAL MI (17-Jun tuning)
     
     # Portfolio Allocation Dinamis
     PORTFOLIO_MAX_EXPOSURE_PCT = 0.75  # Max 75% of balance in open positions

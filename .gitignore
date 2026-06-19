@@ -98,3 +98,8 @@ advanced_crypto_bot/Meridian-main/
 
 # Local audit/notes outside bot directory (workspace-level only)
 /audit_autotrade_*.md
+
+credentials.json
+state.json
+install_ollama_windows.ps1
+setup_windows.bat
