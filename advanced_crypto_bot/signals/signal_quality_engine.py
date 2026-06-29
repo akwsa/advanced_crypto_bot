@@ -62,9 +62,9 @@ CONFLUENCE_STRONG_SELL = 2    # Sangat rendah
 # Asymmetric thresholds (Opsi B - RELAXED):
 # Both sides relaxed to allow more signals through pipeline.
 # Enhancement layer may reduce confidence, so base thresholds must be lower.
-STRONG_BUY_ML_CONFIDENCE = 0.64
+STRONG_BUY_ML_CONFIDENCE = 0.50  # 2026-06-29: 0.64→0.50
 STRONG_BUY_COMBINED_STRENGTH = -0.05
-BUY_ML_CONFIDENCE = 0.50
+BUY_ML_CONFIDENCE = 0.40  # 2026-06-29: 0.50→0.40
 BUY_COMBINED_STRENGTH = -0.10
 
 STRONG_SELL_ML_CONFIDENCE = 0.70

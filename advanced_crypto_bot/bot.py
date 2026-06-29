@@ -770,6 +770,20 @@ class AdvancedCryptoBot:
             elif candle_count > 0:
                 logger.warning(f"⚠️  {norm_pair.upper()}: only {candle_count} candles (need {min_candles}+)")
 
+        # 2026-06-29: Compute volume tiers across all pairs (percentile-based).
+        # High-liquidity pairs behave differently from low-liquidity.
+        if len(data_frames) >= 5 and all('volume' in df.columns for df in data_frames):
+            pair_vols = {}
+            for i, df in enumerate(data_frames):
+                avg_vol = df['volume'].tail(100).mean() if len(df) >= 20 else df['volume'].mean()
+                if avg_vol > 0: pair_vols[i] = avg_vol
+            if len(pair_vols) >= 5:
+                vols = sorted(pair_vols.values())
+                lo_th = vols[len(vols)//5]; hi_th = vols[4*len(vols)//5]
+                for i, df in enumerate(data_frames):
+                    vol = pair_vols.get(i, 0)
+                    df['volume_tier'] = 3 if vol >= hi_th else (2 if vol >= lo_th else 1)
+
         return data_frames, pairs_with_data
 
     def _runtime_keys_for_pair(self, mapping, pair: str):

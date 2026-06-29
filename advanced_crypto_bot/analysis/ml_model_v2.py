@@ -42,8 +42,8 @@ EXIT_FEE_PCT = Config.TRADING_FEE_RATE   # 0.3% exit fee
 TOTAL_FEE_PCT = ENTRY_FEE_PCT + EXIT_FEE_PCT  # 0.6% round trip
 
 # Target thresholds
-MIN_PROFIT_PCT = 0.02  # 2% minimum profit (net after fees)
-LOOKAHEAD_PERIODS = 5  # Look ahead 5 candles
+MIN_PROFIT_PCT = 0.03  # 2026-06-29: 2%→3% (longer horizon needs bigger target)
+LOOKAHEAD_PERIODS = 20  # 2026-06-29: 5→20 (longer horizon = less noise)
 
 
 def _default_v2_model_path(base_path):
@@ -362,6 +362,25 @@ class MLTradingModelV2:
         )  # 0-3 scale: strong bearish to strong bullish
 
         # =====================================================================
+        # PRICE-ACTION & LIQUIDITY FEATURES (NEW — 2026-06-29, Opsi D)
+        # Capture market microstructure without needing full orderbook data.
+        # =====================================================================
+        # Spread proxy: intra-candle range / price (wider = less liquid pair)
+        features['spread_proxy'] = (df['high'] - df['low']) / df['close']
+        features['spread_proxy_ma20'] = features['spread_proxy'].rolling(20).mean()
+        # Volume surge: current vol / 20-period avg (>1 = unusually active)
+        features['volume_surge'] = df['volume'] / (df['volume'].rolling(20).mean() + 1e-9)
+        # Candle position: (close-low)/(high-low) — buyer vs seller conviction
+        hl_range = (df['high'] - df['low']) + 1e-9
+        features['candle_position'] = (df['close'] - df['low']) / hl_range
+        features['candle_position_ma5'] = features['candle_position'].rolling(5).mean()
+        # Consecutive direction streaks (momentum persistence)
+        up = (df['close'] > df['close'].shift(1)).astype(int)
+        dn = (df['close'] < df['close'].shift(1)).astype(int)
+        features['up_streak'] = up.groupby((up == 0).cumsum()).cumsum()
+        features['down_streak'] = dn.groupby((dn == 0).cumsum()).cumsum()
+
+        # =====================================================================
         # RISK-ADJUSTED RETURNS
         # =====================================================================
         features['sharle_ratio_20'] = features['returns_1'].rolling(20).mean() / (features['returns_1'].rolling(20).std() + 1e-9)
@@ -399,6 +418,9 @@ class MLTradingModelV2:
         # yang dihitung hanya dari training data (anti-lookahead).
         features['target_class'] = 2   # HOLD default
         features['target']       = 0   # non-BUY default
+        # 2026-06-29: Pass through volume_tier from training data (pair-specific learning).
+        if 'volume_tier' in df.columns:
+            features['volume_tier'] = df['volume_tier'].values
         
         # Store helper columns
         features['profit_best']  = profit_pct_best

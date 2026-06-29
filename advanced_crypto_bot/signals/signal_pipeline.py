@@ -427,6 +427,23 @@ async def generate_signal_for_pair(bot, pair):
     # genuine "market unsafe to trade" verdict, not a filter heuristic.
     signal["pre_sr_recommendation"] = signal.get("recommendation", "HOLD")
 
+    # 2026-06-29 (Opsi E): V4 as primary signal gate.
+    # V4 is trained on actual trade outcomes (win/loss), not future returns.
+    # When V4 agrees with V2 direction, boost V2 confidence proportionally.
+    if v4_prediction and v4_confidence and signal["recommendation"] in ACTIONABLE_SIGNALS:
+        v4_dir = "BUY" if "BUY" in str(v4_prediction).upper() else ("SELL" if "SELL" in str(v4_prediction).upper() else None)
+        sig_dir = "BUY" if signal["recommendation"] in BUY_SIGNALS else "SELL"
+        if v4_dir == sig_dir and v4_confidence >= 0.55:
+            boost = min(0.20, v4_confidence * 0.25)
+            old_conf = ml_confidence
+            ml_confidence = min(0.95, ml_confidence + boost)
+            signal["ml_confidence"] = ml_confidence
+            signal["ml_confidence_raw"] = old_conf
+            signal["v4_boost"] = boost
+            logger.info(
+                f"🚀 [V4 BOOST] {pair}: V4 {v4_prediction}({v4_confidence:.0%}) agrees → boosted {old_conf:.2f}→{ml_confidence:.2f}"
+            )
+
     quality_signal = bot.signal_quality_engine.generate_signal(
         pair=pair,
         ta_signals=ta_signals,
