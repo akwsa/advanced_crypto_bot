@@ -30,7 +30,7 @@ class PriceMonitor:
         self.notified_drops = {}  # Track which drop thresholds have been notified per trade
         self.trailing_stops = {}  # Track trailing stops: {key: {'highest': float, 'active': bool}}
 
-    def set_price_level(self, user_id, trade_id, pair, entry_price, stop_loss, take_profit_1, take_profit_2=None, amount=0):
+    def set_price_level(self, user_id, trade_id, pair, entry_price, stop_loss, take_profit_1, take_profit_2=None, amount=0, support_1=0, resistance_1=0):
         """Set price levels to monitor for a trade with Partial Take Profit"""
         key = f"{user_id}_{trade_id}"
         self.price_levels[key] = {
@@ -45,7 +45,13 @@ class PriceMonitor:
             'partial_1_triggered': False,    # Track if first partial TP hit
             'partial_2_triggered': False,    # Track if second partial TP hit
             'created_at': datetime.now(),
-            'triggered': False
+            'triggered': False,
+            # 2026-06-29: S/R-aware stop loss — store entry-time S/R levels
+            'support_1': 0,        # Filled by caller from signal data
+            'resistance_1': 0,     # Filled by caller from signal data
+            'sr_hold_count': 0,    # How many times SL was suppressed by S/R
+            'support_1': support_1,     # Nearest support at entry time
+            'resistance_1': resistance_1,  # Nearest resistance at entry time
         }
         # Initialize drop notification tracking for this trade
         self.notified_drops[key] = set()
@@ -130,7 +136,76 @@ class PriceMonitor:
                     hit_type = 'TRAILING_STOP'
 
             # Check Stop Loss (if not already hit trailing stop)
+            # 2026-06-29: S/R-AWARE STOP LOSS — jangan jual rugi kalau masih
+            # di atas Support 1. Hanya jual kalau S1 jebol (real breakdown).
             if not hit_type and current_price <= level['stop_loss']:
+                s1 = level.get('support_1', 0)
+                r1 = level.get('resistance_1', 0)
+                sr_enabled = getattr(Config, 'SR_AWARE_SL_ENABLED', True)
+                
+                if sr_enabled and s1 > 0 and current_price > s1:
+                    # FEATURE 1: Price hit SL but still above S1 — DON'T SELL
+                    # The support might hold and price could bounce back.
+                    sr_count = level.get('sr_hold_count', 0) + 1
+                    level['sr_hold_count'] = sr_count
+                    # Lower SL to just below S1 for next check
+                    if sr_count <= 3:  # Max 3 S/R holds, then give up
+                        level['stop_loss'] = s1 * getattr(Config, 'SR_AWARE_SL_BUFFER', 0.995)
+                        level['triggered'] = False  # Don't block future checks
+                        logger.info(
+                            f'🛡️ [SR-HOLD #{sr_count}] {pair}: SL={level["stop_loss"]:,.0f} hit '
+                            f'but S1={s1:,.0f} still holding (price={current_price:,.0f}). '
+                            f'New SL moved to S1-buffer={level["stop_loss"]:,.0f}'
+                        )
+                        continue  # Skip — don't trigger sell
+                    else:
+                        # After 3 S/R holds, accept the loss
+                        logger.warning(
+                            f'⚠️ [SR-HOLD MAX] {pair}: S/R held {sr_count}x, '
+                            f'now accepting STOP_LOSS at {current_price:,.0f}'
+                        )
+                        hit_type = 'STOP_LOSS'
+                
+                elif sr_enabled and s1 > 0 and current_price <= s1:
+                    # FEATURE 3: Price below S1 — check volume for real breakdown
+                    vol_enabled = getattr(Config, 'SR_VOLUME_CONFIRM_ENABLED', True)
+                    if vol_enabled:
+                        try:
+                            vol_surge = self._get_volume_surge(pair)
+                            vol_threshold = getattr(Config, 'SR_VOLUME_SURGE_THRESHOLD', 1.5)
+                            if vol_surge is not None and vol_surge < vol_threshold:
+                                # Low volume breakdown = possible false breakout
+                                logger.info(
+                                    f'📉 [VOL-CONFIRM] {pair}: S1={s1:,.0f} broken but '
+                                    f'volume_surge={vol_surge:.1f}x < {vol_threshold}x — '
+                                    f'may be false breakout, holding'
+                                )
+                                continue  # Skip — don't sell on low volume
+                            elif vol_surge is not None:
+                                logger.info(
+                                    f'🚨 [VOL-CONFIRM] {pair}: S1={s1:,.0f} broken with '
+                                    f'volume_surge={vol_surge:.1f}x — REAL breakdown, selling'
+                                )
+                        except Exception:
+                            pass  # If volume check fails, proceed with normal SL
+                    hit_type = 'STOP_LOSS'
+                else:
+                    hit_type = 'STOP_LOSS'
+
+                # FEATURE 2: Time deadline — force exit if trade red > max hours
+                if hit_type != 'STOP_LOSS':
+                    max_hours = getattr(Config, 'SR_MAX_HOLD_HOURS', 24)
+                    created = level.get('created_at')
+                    if created:
+                        hours_open = (datetime.now() - created).total_seconds() / 3600
+                        if hours_open > max_hours:
+                            loss_pct = ((level['entry_price'] - current_price) / level['entry_price']) * 100
+                            logger.warning(
+                                f'⏰ [TIME-EXIT] {pair}: Open {hours_open:.1f}h > {max_hours}h, '
+                                f'loss={loss_pct:.1f}% — force exit'
+                            )
+                            hit_type = 'TIME_EXIT'
+            elif not hit_type and current_price <= level['stop_loss']:
                 hit_type = 'STOP_LOSS'
             # Check Partial Take Profit 1 (first target - sell 50%)
             elif not hit_type and not level.get('partial_1_triggered', False) and current_price >= level.get('take_profit_1', 0):
@@ -383,6 +458,21 @@ f"• SL at `{level['stop_loss']:,.0f}` (-{((entry_price - level['stop_loss'])/e
             if 'level' in dir():
                 level['triggered'] = False
     
+    def _get_volume_surge(self, pair):
+        """Get current volume surge ratio for volume confirmation.
+        Returns volume / 20-period average, or None if unavailable."""
+        try:
+            if self.bot_app and hasattr(self.bot_app, 'historical_data'):
+                df = self.bot_app.historical_data.get(pair)
+                if df is not None and 'volume' in df.columns and len(df) >= 21:
+                    vol_ma20 = df['volume'].tail(21).head(20).mean()
+                    cur_vol = df['volume'].iloc[-1]
+                    if vol_ma20 > 0:
+                        return cur_vol / vol_ma20
+        except Exception:
+            pass
+        return None
+
     async def _send_notification(self, trigger):
         """Send SL/TP notification to user"""
         if not self.bot_app:

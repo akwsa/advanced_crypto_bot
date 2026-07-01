@@ -1403,7 +1403,7 @@ async def _check_trading_opportunity_locked(bot, pair, pair_key, signal):
                     ml_confidence=confidence,
                     notes=f"[DRY RUN] Filled limit order_id: {simulated_order_id} @ {float(fill_price):,.0f}",
                 )
-                bot.price_monitor.set_price_level(user_id, trade_id, pair, float(fill_price), stop_loss, take_profit_1, take_profit_2, amount)
+                bot.price_monitor.set_price_level(user_id, trade_id, pair, float(fill_price), stop_loss, take_profit_1, take_profit_2, amount, support_1=sr_data.get("nearest_support", 0) if sr_data else 0, resistance_1=sr_data.get("nearest_resistance", 0) if sr_data else 0)
                 text = f"""
 🧪 **DRY RUN: FILLED LIMIT BUY** 🧪
 
@@ -1514,7 +1514,7 @@ async def _check_trading_opportunity_locked(bot, pair, pair_key, signal):
                     ml_confidence=confidence,
                     notes=f"Auto-trade limit order_id: {order_id} @ {entry_zone_price:,.0f}",
                 )
-                bot.price_monitor.set_price_level(user_id, trade_id, pair, entry_zone_price, stop_loss, take_profit_1, take_profit_2, amount)
+                bot.price_monitor.set_price_level(user_id, trade_id, pair, float(fill_price), stop_loss, take_profit_1, take_profit_2, amount, support_1=sr_data.get("nearest_support", 0) if sr_data else 0, resistance_1=sr_data.get("nearest_resistance", 0) if sr_data else 0)
                 # Register pending order for execution tracking
                 try:
                     bot.db.add_pending_order(

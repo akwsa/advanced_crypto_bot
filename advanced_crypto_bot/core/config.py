@@ -122,7 +122,15 @@ class Config:
     MAX_POSITION_SIZE = 0.20  # Max 20% per trade (was 25%)
     
     # Stop Loss & Take Profit (dari .env)
-    STOP_LOSS_PCT = _safe_float_env('STOP_LOSS_PCT', 2.5)      # Cut Loss %
+    STOP_LOSS_PCT = _safe_float_env('STOP_LOSS_PCT', 2.5)
+
+    # 2026-06-29: S/R-Aware Stop Loss — don't sell at loss if price is above Support 1.
+    # Makes the bot different: it reads technical structure before cutting loss.
+    SR_AWARE_SL_ENABLED = os.getenv('SR_AWARE_SL_ENABLED', 'true').lower() == 'true'
+    SR_AWARE_SL_BUFFER = _safe_float_env('SR_AWARE_SL_BUFFER', 0.995)  # SL = S1 * 0.995 (0.5% below S1)
+    SR_MAX_HOLD_HOURS = int(os.getenv('SR_MAX_HOLD_HOURS', '24'))  # Max hold time before force exit
+    SR_VOLUME_CONFIRM_ENABLED = os.getenv('SR_VOLUME_CONFIRM_ENABLED', 'true').lower() == 'true'
+    SR_VOLUME_SURGE_THRESHOLD = _safe_float_env('SR_VOLUME_SURGE_THRESHOLD', 1.5)  # 1.5x avg vol = real breakdown      # Cut Loss %
     TAKE_PROFIT_PCT = _safe_float_env('TAKE_PROFIT_PCT', 6.0)  # Take Profit % (was 5%)
     
     # Trailing Stop - MORE AGGRESSIVE

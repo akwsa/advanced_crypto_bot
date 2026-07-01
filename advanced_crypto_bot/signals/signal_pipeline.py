@@ -111,6 +111,13 @@ async def generate_signal_for_pair(bot, pair):
         return None
 
     df = bot.historical_data[pair].copy()
+    # 2026-06-29: Add volume_tier for inference (pair-specific ML feature).
+    # Thresholds are rough IDR-based tiers — computed dynamically from recent volume.
+    if 'volume' in df.columns and len(df) >= 20:
+        avg_vol = df['volume'].tail(100).mean()
+        if avg_vol > 1_000_000_000:      df['volume_tier'] = 3  # HIGH (>1B IDR vol)
+        elif avg_vol > 100_000_000:      df['volume_tier'] = 2  # MEDIUM
+        else:                            df['volume_tier'] = 1  # LOW
     if len(df) < 60:
         logger.warning(f"⚠️ Not enough data for {pair}: {len(df)} candles (need 60+)")
         return None
