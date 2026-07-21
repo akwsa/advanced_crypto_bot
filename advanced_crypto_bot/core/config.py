@@ -130,7 +130,8 @@ class Config:
     SR_AWARE_SL_BUFFER = _safe_float_env('SR_AWARE_SL_BUFFER', 0.995)  # SL = S1 * 0.995 (0.5% below S1)
     SR_MAX_HOLD_HOURS = int(os.getenv('SR_MAX_HOLD_HOURS', '24'))  # Max hold time before force exit
     SR_VOLUME_CONFIRM_ENABLED = os.getenv('SR_VOLUME_CONFIRM_ENABLED', 'true').lower() == 'true'
-    SR_VOLUME_SURGE_THRESHOLD = _safe_float_env('SR_VOLUME_SURGE_THRESHOLD', 1.5)  # 1.5x avg vol = real breakdown      # Cut Loss %
+    SR_VOLUME_SURGE_THRESHOLD = _safe_float_env('SR_VOLUME_SURGE_THRESHOLD', 1.5)  # 1.5x avg vol = real breakdown
+    SR_MAX_HOLD_LOSS_PCT = _safe_float_env('SR_MAX_HOLD_LOSS_PCT', 8.0)  # 2026-07-21: Max loss % before S/R hold gives up and exits
     TAKE_PROFIT_PCT = _safe_float_env('TAKE_PROFIT_PCT', 10.0)  # 2026-07-21: 6->10 wider TP
     
     # Trailing Stop - MORE AGGRESSIVE

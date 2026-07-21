@@ -144,27 +144,36 @@ class PriceMonitor:
                 sr_enabled = getattr(Config, 'SR_AWARE_SL_ENABLED', True)
                 
                 if sr_enabled and s1 > 0 and current_price > s1:
-                    # FEATURE 1: Price hit SL but still above S1 — DON'T SELL
-                    # The support might hold and price could bounce back.
-                    sr_count = level.get('sr_hold_count', 0) + 1
-                    level['sr_hold_count'] = sr_count
-                    # Lower SL to just below S1 for next check
-                    if sr_count <= 3:  # Max 3 S/R holds, then give up
-                        level['stop_loss'] = s1 * getattr(Config, 'SR_AWARE_SL_BUFFER', 0.995)
-                        level['triggered'] = False  # Don't block future checks
-                        logger.info(
-                            f'🛡️ [SR-HOLD #{sr_count}] {pair}: SL={level["stop_loss"]:,.0f} hit '
-                            f'but S1={s1:,.0f} still holding (price={current_price:,.0f}). '
-                            f'New SL moved to S1-buffer={level["stop_loss"]:,.0f}'
-                        )
-                        continue  # Skip — don't trigger sell
-                    else:
-                        # After 3 S/R holds, accept the loss
+                    # 2026-07-21: MAX LOSS CAP — don't hold if loss exceeds cap
+                    _cur_loss = ((level['entry_price'] - current_price) / level['entry_price']) * 100
+                    _max_loss = float(getattr(Config, 'SR_MAX_HOLD_LOSS_PCT', 8.0) or 8.0)
+                    if _cur_loss > _max_loss:
                         logger.warning(
-                            f'⚠️ [SR-HOLD MAX] {pair}: S/R held {sr_count}x, '
-                            f'now accepting STOP_LOSS at {current_price:,.0f}'
+                            f'LOSS-CAP {pair}: loss={_cur_loss:.1f}% > cap {_max_loss:.1f}% - exit despite S1'
                         )
                         hit_type = 'STOP_LOSS'
+                    else:
+                        # FEATURE 1: Price hit SL but still above S1 — DON'T SELL
+                        # The support might hold and price could bounce back.
+                        sr_count = level.get('sr_hold_count', 0) + 1
+                        level['sr_hold_count'] = sr_count
+                        # Lower SL to just below S1 for next check
+                        if sr_count <= 3:  # Max 3 S/R holds, then give up
+                            level['stop_loss'] = s1 * getattr(Config, 'SR_AWARE_SL_BUFFER', 0.995)
+                            level['triggered'] = False  # Don't block future checks
+                            logger.info(
+                                f'🛡️ [SR-HOLD #{sr_count}] {pair}: SL={level["stop_loss"]:,.0f} hit '
+                                f'but S1={s1:,.0f} still holding (price={current_price:,.0f}). '
+                                f'New SL moved to S1-buffer={level["stop_loss"]:,.0f}'
+                            )
+                            continue  # Skip — don't trigger sell
+                        else:
+                            # After 3 S/R holds, accept the loss
+                            logger.warning(
+                                f'⚠️ [SR-HOLD MAX] {pair}: S/R held {sr_count}x, '
+                                f'now accepting STOP_LOSS at {current_price:,.0f}'
+                            )
+                            hit_type = 'STOP_LOSS'
                 
                 elif sr_enabled and s1 > 0 and current_price <= s1:
                     # FEATURE 3: Price below S1 — check volume for real breakdown
@@ -192,28 +201,7 @@ class PriceMonitor:
                 else:
                     hit_type = 'STOP_LOSS'
 
-                # FEATURE 2: Time deadline — force exit if trade red > max hours
-                if hit_type != 'STOP_LOSS':
-                    max_hours = getattr(Config, 'SR_MAX_HOLD_HOURS', 24)
-                    created = level.get('created_at')
-                    if created:
-                        hours_open = (datetime.now() - created).total_seconds() / 3600
-                        if hours_open > max_hours:
-                            _fee_rate_te = float(getattr(Config, 'TRADING_FEE_RATE', 0.003) or 0.003)
-                            _breakeven_te = level['entry_price'] * (1 + 2 * _fee_rate_te)
-                            if current_price < _breakeven_te and s1 > 0 and current_price > s1:
-                                logger.info(
-                                    f'⏰ [TIME-EXIT HOLD] {pair}: {hours_open:.1f}h > {max_hours}h '
-                                    f'but S1={s1:,.0f} holding - extend 6h'
-                                )
-                                level['created_at'] = datetime.now() - timedelta(hours=max_hours - 6)
-                            else:
-                                loss_pct = ((level['entry_price'] - current_price) / level['entry_price']) * 100
-                                logger.warning(
-                                    f'⏰ [TIME-EXIT] {pair}: Open {hours_open:.1f}h > {max_hours}h, '
-                                    f'loss={loss_pct:.1f}% — force exit'
-                                )
-                                hit_type = 'TIME_EXIT'
+                # TIME_EXIT moved to independent check (2026-07-21)
             elif not hit_type and current_price <= level['stop_loss']:
                 hit_type = 'STOP_LOSS'
             # Check Partial Take Profit 1 (first target - sell 50%)
@@ -223,6 +211,28 @@ class PriceMonitor:
             # Check Partial Take Profit 2 (final target - sell remaining 50%)
             elif not hit_type and level.get('partial_1_triggered', False) and not level.get('partial_2_triggered', False) and current_price >= level.get('take_profit_2', 0):
                 hit_type = 'TAKE_PROFIT'  # Final exit
+
+            # 2026-07-21: INDEPENDENT TIME_EXIT
+            if not hit_type:
+                max_hours = getattr(Config, "SR_MAX_HOLD_HOURS", 24)
+                created = level.get("created_at")
+                if created:
+                    hours_open = (datetime.now() - created).total_seconds() / 3600
+                    if hours_open > max_hours:
+                        _loss_te = ((level["entry_price"] - current_price) / level["entry_price"]) * 100
+                        _max_loss_te = float(getattr(Config, "SR_MAX_HOLD_LOSS_PCT", 8.0) or 8.0)
+                        s1_te = level.get("support_1", 0)
+                        _fee_te = float(getattr(Config, "TRADING_FEE_RATE", 0.003) or 0.003)
+                        _be_te = level["entry_price"] * (1 + 2 * _fee_te)
+                        if _loss_te > _max_loss_te:
+                            logger.warning(f"TIME-EXIT {pair}: {hours_open:.1f}h loss={_loss_te:.1f}% > cap - force exit")
+                            hit_type = "TIME_EXIT"
+                        elif current_price < _be_te and s1_te > 0 and current_price > s1_te:
+                            logger.info(f"TIME-EXIT HOLD {pair}: {hours_open:.1f}h S1={s1_te:,.0f} holding - extend 6h")
+                            level["created_at"] = datetime.now() - timedelta(hours=max_hours - 6)
+                        else:
+                            logger.warning(f"TIME-EXIT {pair}: {hours_open:.1f}h loss={_loss_te:.1f}% - force exit")
+                            hit_type = "TIME_EXIT"
                 level['partial_2_triggered'] = True
 
             if hit_type:
