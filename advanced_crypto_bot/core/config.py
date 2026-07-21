@@ -122,7 +122,7 @@ class Config:
     MAX_POSITION_SIZE = 0.20  # Max 20% per trade (was 25%)
     
     # Stop Loss & Take Profit (dari .env)
-    STOP_LOSS_PCT = _safe_float_env('STOP_LOSS_PCT', 2.5)
+    STOP_LOSS_PCT = _safe_float_env('STOP_LOSS_PCT', 5.0)  # 2026-07-21: 2.5->5.0 wider, S/R-aware holds
 
     # 2026-06-29: S/R-Aware Stop Loss — don't sell at loss if price is above Support 1.
     # Makes the bot different: it reads technical structure before cutting loss.
@@ -131,17 +131,17 @@ class Config:
     SR_MAX_HOLD_HOURS = int(os.getenv('SR_MAX_HOLD_HOURS', '24'))  # Max hold time before force exit
     SR_VOLUME_CONFIRM_ENABLED = os.getenv('SR_VOLUME_CONFIRM_ENABLED', 'true').lower() == 'true'
     SR_VOLUME_SURGE_THRESHOLD = _safe_float_env('SR_VOLUME_SURGE_THRESHOLD', 1.5)  # 1.5x avg vol = real breakdown      # Cut Loss %
-    TAKE_PROFIT_PCT = _safe_float_env('TAKE_PROFIT_PCT', 6.0)  # Take Profit % (was 5%)
+    TAKE_PROFIT_PCT = _safe_float_env('TAKE_PROFIT_PCT', 10.0)  # 2026-07-21: 6->10 wider TP
     
     # Trailing Stop - MORE AGGRESSIVE
     TRAILING_STOP_ENABLED = True
-    TRAILING_STOP_PCT = 1.8  # Trail by 1.8% (17-Jun tuning)
-    TRAILING_ACTIVATION_PCT = 2.5  # Activate after +2.5% profit (17-Jun tuning)
+    TRAILING_STOP_PCT = 3.0  # 2026-07-21: 1.8->3.0 wider trail avoids fee-eaten exits
+    TRAILING_ACTIVATION_PCT = 4.0  # 2026-07-21: 2.5->4.0 activate after meaningful profit
     
     # Risk Management - ADDITIONAL
-    BREAK_EVEN_AFTER_PCT = 2.0  # Move stop to breakeven after +2% profit
-    PARTIAL_TAKE_PROFIT_1 = 3.0  # Take 50% profit at +2%
-    PARTIAL_TAKE_PROFIT_2 = 8.0  # Take remaining 50% profit at +5%
+    BREAK_EVEN_AFTER_PCT = 3.0  # 2026-07-21: 2->3 protect after profit covers fees+margin
+    PARTIAL_TAKE_PROFIT_1 = 5.0  # 2026-07-21: 3->5 first exit clears fees comfortably
+    PARTIAL_TAKE_PROFIT_2 = 12.0  # 2026-07-21: 8->12 let runners run for bigger profit
     MAX_DAILY_LOSS_PCT = 3.0  # Stop trading if loss >3% (was 5%)
     MAX_DRAWDOWN_PCT = 0.10  # Circuit breaker drawdown ratio (0.10 = 10%)
     

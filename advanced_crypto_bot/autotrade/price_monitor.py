@@ -3,7 +3,7 @@
 # Dependensi: Database, Indodax/price cache.
 # Main Functions: class PriceMonitor; PriceMonitor._execute_auto_sell.
 # Side Effects: DB read/write alerts; HTTP/cache price reads; real sell order only when dry-run is disabled.
-from datetime import datetime
+from datetime import datetime, timedelta
 from core.config import Config
 import logging
 
@@ -199,12 +199,21 @@ class PriceMonitor:
                     if created:
                         hours_open = (datetime.now() - created).total_seconds() / 3600
                         if hours_open > max_hours:
-                            loss_pct = ((level['entry_price'] - current_price) / level['entry_price']) * 100
-                            logger.warning(
-                                f'⏰ [TIME-EXIT] {pair}: Open {hours_open:.1f}h > {max_hours}h, '
-                                f'loss={loss_pct:.1f}% — force exit'
-                            )
-                            hit_type = 'TIME_EXIT'
+                            _fee_rate_te = float(getattr(Config, 'TRADING_FEE_RATE', 0.003) or 0.003)
+                            _breakeven_te = level['entry_price'] * (1 + 2 * _fee_rate_te)
+                            if current_price < _breakeven_te and s1 > 0 and current_price > s1:
+                                logger.info(
+                                    f'⏰ [TIME-EXIT HOLD] {pair}: {hours_open:.1f}h > {max_hours}h '
+                                    f'but S1={s1:,.0f} holding - extend 6h'
+                                )
+                                level['created_at'] = datetime.now() - timedelta(hours=max_hours - 6)
+                            else:
+                                loss_pct = ((level['entry_price'] - current_price) / level['entry_price']) * 100
+                                logger.warning(
+                                    f'⏰ [TIME-EXIT] {pair}: Open {hours_open:.1f}h > {max_hours}h, '
+                                    f'loss={loss_pct:.1f}% — force exit'
+                                )
+                                hit_type = 'TIME_EXIT'
             elif not hit_type and current_price <= level['stop_loss']:
                 hit_type = 'STOP_LOSS'
             # Check Partial Take Profit 1 (first target - sell 50%)
@@ -298,6 +307,10 @@ class PriceMonitor:
         # Update trailing stop if price is still rising
         if trailing_data['is_active']:
             new_trailing_stop = highest * (1 - Config.TRAILING_STOP_PCT / 100)
+            _fee_rate = float(getattr(Config, "TRADING_FEE_RATE", 0.003) or 0.003)
+            _fee_floor = entry_price * (1 + 2 * _fee_rate)
+            if new_trailing_stop < _fee_floor:
+                new_trailing_stop = _fee_floor
             # Only move trailing stop UP, never down
             if new_trailing_stop > trailing_data['trailing_stop_price']:
                 trailing_data['trailing_stop_price'] = new_trailing_stop
