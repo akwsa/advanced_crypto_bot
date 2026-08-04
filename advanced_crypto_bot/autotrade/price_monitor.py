@@ -211,6 +211,7 @@ class PriceMonitor:
             # Check Partial Take Profit 2 (final target - sell remaining 50%)
             elif not hit_type and level.get('partial_1_triggered', False) and not level.get('partial_2_triggered', False) and current_price >= level.get('take_profit_2', 0):
                 hit_type = 'TAKE_PROFIT'  # Final exit
+                level['partial_2_triggered'] = True
 
             # 2026-07-21: INDEPENDENT TIME_EXIT
             if not hit_type:
@@ -233,8 +234,6 @@ class PriceMonitor:
                         else:
                             logger.warning(f"TIME-EXIT {pair}: {hours_open:.1f}h loss={_loss_te:.1f}% - force exit")
                             hit_type = "TIME_EXIT"
-                level['partial_2_triggered'] = True
-
             if hit_type:
                 # Mark as triggered to prevent duplicate
                 level['triggered'] = True

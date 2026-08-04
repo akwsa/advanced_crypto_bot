@@ -1933,6 +1933,10 @@ class AdvancedCryptoBot:
             logger.info("📋 Telegram bot commands menu registered")
         except Exception as e:
             logger.warning(f"⚠️ Could not register Telegram bot commands: {e}")
+
+        # Keep SL/TP/TIME_EXIT alive for OPEN positions even when their pair is
+        # no longer in WATCH_PAIRS and therefore receives no regular price tick.
+        self._start_open_position_price_sweeper()
         
         # Auto-refresh watchlist untuk semua admin users saat startup
         # Ini memastikan watchlist selalu up-to-date dengan volume real-time Indodax
@@ -1960,6 +1964,77 @@ class AdvancedCryptoBot:
                         "⚠️ Startup watchlist refresh error for admin %d: %s",
                         admin_id, e,
                     )
+
+    def _start_open_position_price_sweeper(self):
+        """Start one async watchdog that checks every OPEN trade by API price."""
+        if getattr(self, '_open_position_sweeper_started', False):
+            return
+        self._open_position_sweeper_started = True
+        self._create_background_task(self._open_position_price_sweeper())
+        interval = getattr(Config, 'OPEN_POSITION_SWEEP_INTERVAL_SECONDS', 120)
+        logger.info("🛡️ Open-position price sweeper started (%ss interval)", interval)
+
+    async def _open_position_price_sweeper(self):
+        """Periodically evaluate SL/TP/TIME_EXIT for all DB OPEN trades."""
+        interval = max(30, int(getattr(Config, 'OPEN_POSITION_SWEEP_INTERVAL_SECONDS', 120) or 120))
+        while not getattr(self, 'shutdown_event', None) or not self.shutdown_event.is_set():
+            try:
+                await self._sweep_open_position_price_levels()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.error("❌ Open-position price sweep failed: %s", e)
+            await asyncio.sleep(interval)
+
+    async def _sweep_open_position_price_levels(self):
+        """Fetch fresh prices for OPEN trades and run PriceMonitor checks.
+
+        Normal price-level checks are tick-driven. If a pair is removed from
+        WATCH_PAIRS, it stops receiving ticks and can otherwise lose SL/TP and
+        TIME_EXIT protection. This sweep is independent of the watchlist.
+        """
+        try:
+            self.price_monitor.rebuild_from_open_trades(self.db, self.trading_engine)
+        except Exception as e:
+            logger.warning("⚠️ Open-position rebuild failed during sweep: %s", e)
+
+        open_pairs = set()
+        for admin_id in getattr(Config, 'ADMIN_IDS', []):
+            try:
+                open_trades = self.db.get_open_trades(admin_id)
+            except Exception as e:
+                logger.warning("⚠️ Failed to load OPEN trades for admin %s: %s", admin_id, e)
+                continue
+            for trade in open_trades:
+                t = dict(trade) if hasattr(trade, 'keys') else trade
+                pair = str(t.get('pair', '')).strip().lower()
+                status = str(t.get('status', '')).upper()
+                if pair and status == 'OPEN':
+                    open_pairs.add(pair)
+
+        if not open_pairs:
+            return
+
+        loop = asyncio.get_running_loop()
+        checked = 0
+        for pair in sorted(open_pairs):
+            try:
+                ticker = await loop.run_in_executor(None, self.indodax.get_ticker, pair)
+                if not ticker:
+                    logger.warning("⚠️ Open-position sweep: no ticker for %s", pair)
+                    continue
+                current_price = float(ticker.get('last') or ticker.get('bid') or ticker.get('ask') or 0)
+                if current_price <= 0:
+                    logger.warning("⚠️ Open-position sweep: invalid ticker price for %s: %s", pair, ticker)
+                    continue
+                await self.price_monitor.check_price_levels(pair, current_price)
+                checked += 1
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.warning("⚠️ Open-position sweep failed for %s: %s", pair, e)
+        if checked:
+            logger.info("🛡️ Open-position sweep checked %d pair(s): %s", checked, ', '.join(sorted(open_pairs)))
     
     def _init_websocket(self):
         """Initialize WebSocket connection to Indodax (DISABLED - Indodax public channels not working)"""
