@@ -78,6 +78,7 @@ from autotrade.runtime import (
     get_support_resistance_for_pair,
     monitor_strong_signal,
     process_price_update_signal_tasks,
+    _is_price_sane_for_pair,
 )
 from scalper.scalper_module import ScalperModule  # Scalper integration
 from autohunter.smart_hunter_integration import SmartHunterBotIntegration  # Smart Hunter integration
@@ -2026,6 +2027,13 @@ class AdvancedCryptoBot:
                 current_price = float(ticker.get('last') or ticker.get('bid') or ticker.get('ask') or 0)
                 if current_price <= 0:
                     logger.warning("⚠️ Open-position sweep: invalid ticker price for %s: %s", pair, ticker)
+                    continue
+                if not _is_price_sane_for_pair(pair, current_price):
+                    logger.warning(
+                        "⚠️ Open-position sweep: rejected insane ticker price for %s: %s",
+                        pair,
+                        current_price,
+                    )
                     continue
                 await self.price_monitor.check_price_levels(pair, current_price)
                 checked += 1

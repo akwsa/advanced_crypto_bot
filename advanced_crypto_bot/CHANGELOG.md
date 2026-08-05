@@ -9,6 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed - 2026-08-05 (AutoTrade DRY RUN safety/risk hardening)
+
+**Konteks:** Audit VM 2026-08-05 menemukan 26 closed DRY RUN autotrade dengan win rate
+34.62% dan P&L simulasi sekitar -1.28 juta IDR. Kerugian ekstrem terutama terkait
+posisi lama yang tidak terus termonitor dan entry dry-run yang masih terlalu
+eksploratif untuk dijadikan bukti profitabilitas.
+
+**Fix:**
+- `autotrade/runtime.py`: BUY/STRONG_BUY sekarang fail-closed bila fresh Indodax
+  ticker tidak tersedia, gagal sanity guard, atau deviasi dari signal price melebihi
+  `AUTOTRADE_FRESH_PRICE_MAX_DEVIATION_PCT` (default 50%). Ini mencegah entry dari
+  signal/tick stale.
+- `autotrade/runtime.py`: V4 `BAD_*` prediction sekarang memblokir DRY RUN entry,
+  bukan hanya mengurangi size 50%. Ini menyelaraskan runtime dengan ekspektasi test
+  V4 lama bahwa BAD_BUY/BAD_SELL harus block.
+- `bot.py`: open-position sweeper sekarang menolak ticker major-pair yang gagal
+  `_is_price_sane_for_pair()` sebelum menjalankan SL/TP/TIME_EXIT check.
+- `core/config.py`: tambah env guard `AUTOTRADE_REQUIRE_FRESH_ENTRY_PRICE` dan
+  `AUTOTRADE_FRESH_PRICE_MAX_DEVIATION_PCT`.
+
+**Tests:**
+- `./scripts/test.sh tests/test_autotrade_dryrun_signal_cycle.py tests/test_open_position_sweep.py tests/test_runtime_price_guard.py -q`
+  → 28 passed.
+- `venv/bin/python -m py_compile autotrade/runtime.py bot.py core/config.py autotrade/price_monitor.py tests/test_autotrade_dryrun_signal_cycle.py tests/test_open_position_sweep.py`
+
+**Safety:** Tidak mengaktifkan real trading, tidak reset circuit breaker/drawdown state,
+dan belum deploy ke VM. Patch ini memperkecil peluang dry-run berikutnya membuka posisi
+dari data stale atau prediksi outcome buruk.
+
 ### Fixed - 2026-06-13 (Sinkronisasi: `_is_price_sane_for_pair` — Critical #1 Price Guard)
 
 **Konteks:** Audit 2026-06-07 menemukan BTC diperdagangkan di harga 100 IDR (data palsu dari test fixture).

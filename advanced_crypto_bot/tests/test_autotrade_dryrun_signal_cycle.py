@@ -57,7 +57,7 @@ class _FakeDryRunDB:
 
 
 class TestAutoTradeDryRunSignalCycle(unittest.IsolatedAsyncioTestCase):
-    def _make_dryrun_bot(self, pair="btcidr"):
+    def _make_dryrun_bot(self, pair="testidr"):
         db = _FakeDryRunDB()
         bot = SimpleNamespace(
             is_trading=True,
@@ -132,13 +132,13 @@ class TestAutoTradeDryRunSignalCycle(unittest.IsolatedAsyncioTestCase):
             await check_trading_opportunity(bot, pair, signal=signal)
 
     async def test_duplicate_filtered_signal_does_not_open_dryrun_trade(self):
-        bot, db, optimization = self._make_dryrun_bot("btcidr")
+        bot, db, optimization = self._make_dryrun_bot("testidr")
 
         await self._run_dryrun_signal(
             bot,
-            "btcidr",
+            "testidr",
             {
-                "pair": "btcidr",
+                "pair": "testidr",
                 "recommendation": "HOLD",
                 "pre_sr_recommendation": "STRONG_BUY",
                 "display_recommendation": "HOLD",
@@ -155,13 +155,13 @@ class TestAutoTradeDryRunSignalCycle(unittest.IsolatedAsyncioTestCase):
         bot.trading_engine.should_execute_trade.assert_not_called()
 
     async def test_execution_allowed_false_signal_does_not_open_dryrun_trade(self):
-        bot, db, optimization = self._make_dryrun_bot("btcidr")
+        bot, db, optimization = self._make_dryrun_bot("testidr")
 
         await self._run_dryrun_signal(
             bot,
-            "btcidr",
+            "testidr",
             {
-                "pair": "btcidr",
+                "pair": "testidr",
                 "recommendation": "BUY",
                 "pre_sr_recommendation": "BUY",
                 "display_recommendation": "BUY",
@@ -188,13 +188,13 @@ class TestAutoTradeDryRunSignalCycle(unittest.IsolatedAsyncioTestCase):
         filter) silently bypassed every gate after the weak-signal
         check, resulting in 0 entries despite valid pre-SR BUY signals.
         """
-        bot, db, optimization = self._make_dryrun_bot("btcidr")
+        bot, db, optimization = self._make_dryrun_bot("testidr")
 
         await self._run_dryrun_signal(
             bot,
-            "btcidr",
+            "testidr",
             {
-                "pair": "btcidr",
+                "pair": "testidr",
                 "recommendation": "HOLD",
                 "pre_sr_recommendation": "STRONG_BUY",
                 "display_recommendation": "STRONG_BUY",
@@ -215,13 +215,13 @@ class TestAutoTradeDryRunSignalCycle(unittest.IsolatedAsyncioTestCase):
         """Sanity: pre_sr_recommendation=HOLD harus tetap di-skip sebagai
         weak signal — override hanya berlaku saat pre_sr ∈ BUY/STRONG_BUY/SELL/STRONG_SELL.
         """
-        bot, db, optimization = self._make_dryrun_bot("btcidr")
+        bot, db, optimization = self._make_dryrun_bot("testidr")
 
         await self._run_dryrun_signal(
             bot,
-            "btcidr",
+            "testidr",
             {
-                "pair": "btcidr",
+                "pair": "testidr",
                 "recommendation": "HOLD",
                 "pre_sr_recommendation": "HOLD",
                 "display_recommendation": "HOLD",
@@ -235,14 +235,59 @@ class TestAutoTradeDryRunSignalCycle(unittest.IsolatedAsyncioTestCase):
         bot.trading_engine.should_execute_trade.assert_not_called()
         self.assertEqual(db.get_open_trades(123), [])
 
-    async def test_pantau_display_signal_does_not_open_dryrun_trade_even_when_pre_sr_buy(self):
-        bot, db, optimization = self._make_dryrun_bot("btcidr")
+    async def test_fresh_price_deviation_blocks_entry_before_execution_gate(self):
+        bot, db, optimization = self._make_dryrun_bot("testidr")
+        bot.indodax.get_ticker.return_value = {"last": 300.0, "bid": 300.0}
 
         await self._run_dryrun_signal(
             bot,
-            "btcidr",
+            "testidr",
             {
-                "pair": "btcidr",
+                "pair": "testidr",
+                "recommendation": "STRONG_BUY",
+                "ml_confidence": 0.8,
+                "price": 100.0,
+                "indicators": {},
+            },
+            optimization,
+        )
+
+        self.assertEqual(db.get_open_trades(123), [])
+        bot.trading_engine.should_execute_trade.assert_not_called()
+
+    async def test_v4_bad_prediction_blocks_dryrun_entry(self):
+        bot, db, optimization = self._make_dryrun_bot("testidr")
+        bot.ml_model_v4 = SimpleNamespace(
+            is_fitted=True,
+            get_status=Mock(return_value={"win_rate": 0.5}),
+            predict=Mock(return_value=("BAD_BUY", 0.9)),
+        )
+
+        await self._run_dryrun_signal(
+            bot,
+            "testidr",
+            {
+                "pair": "testidr",
+                "recommendation": "STRONG_BUY",
+                "ml_confidence": 0.8,
+                "price": 100.0,
+                "indicators": {},
+            },
+            optimization,
+        )
+
+        self.assertEqual(db.get_open_trades(123), [])
+        bot.price_monitor.set_price_level.assert_not_called()
+        self.assertEqual(bot._autotrade_block_reasons["testidr"]["bucket"], "V4_FILTER")
+
+    async def test_pantau_display_signal_does_not_open_dryrun_trade_even_when_pre_sr_buy(self):
+        bot, db, optimization = self._make_dryrun_bot("testidr")
+
+        await self._run_dryrun_signal(
+            bot,
+            "testidr",
+            {
+                "pair": "testidr",
                 "recommendation": "BUY",
                 "pre_sr_recommendation": "STRONG_BUY",
                 "display_recommendation": "PANTAU",

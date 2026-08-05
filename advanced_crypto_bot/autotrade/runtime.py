@@ -884,6 +884,49 @@ async def _check_trading_opportunity_locked(bot, pair, pair_key, signal):
     confidence = float(signal.get("ml_confidence", 0.5) or 0.5)
 
     if signal["recommendation"] in ["BUY", "STRONG_BUY"]:
+        # Fail-closed entry freshness gate. A stale signal price may still be
+        # useful context, but it must not be the authoritative execution price.
+        try:
+            indodax = getattr(bot, "indodax", None)
+            if indodax is None:
+                from api.indodax_api import IndodaxAPI
+                indodax = IndodaxAPI()
+            fresh_ticker = indodax.get_ticker(pair)
+            fresh_price = _to_positive_float(fresh_ticker.get("last") if fresh_ticker else None)
+        except Exception as e:
+            fresh_ticker = None
+            fresh_price = None
+            logger.warning(f"⚠️ Failed to fetch fresh entry price for {pair}: {e}")
+
+        require_fresh = bool(getattr(Config, "AUTOTRADE_REQUIRE_FRESH_ENTRY_PRICE", True))
+        if fresh_price is None:
+            reason = "fresh entry price unavailable"
+            if require_fresh:
+                logger.warning(f"🚫 Entry blocked for {pair}: {reason}")
+                _remember_autotrade_block_reason(bot, pair, reason)
+                return
+            logger.warning(f"⚠️ {pair}: {reason}; using signal/cached price because strict fresh gate is disabled")
+        elif not _is_price_sane_for_pair(pair, fresh_price):
+            reason = f"fresh entry price failed sanity guard ({fresh_price})"
+            logger.warning(f"🚫 Entry blocked for {pair}: {reason}")
+            _remember_autotrade_block_reason(bot, pair, reason)
+            return
+        else:
+            signal_entry_price = _to_positive_float(signal.get("price")) or current_price
+            max_deviation = float(getattr(Config, "AUTOTRADE_FRESH_PRICE_MAX_DEVIATION_PCT", 50.0) or 50.0) / 100.0
+            if signal_entry_price and signal_entry_price > 0:
+                deviation = abs(fresh_price - signal_entry_price) / signal_entry_price
+                if deviation > max_deviation:
+                    reason = (
+                        f"fresh price deviates {deviation*100:.1f}% from signal price "
+                        f"(max {max_deviation*100:.1f}%)"
+                    )
+                    logger.warning(f"🚫 Entry blocked for {pair}: {reason}")
+                    _remember_autotrade_block_reason(bot, pair, reason)
+                    return
+            current_price = fresh_price
+            logger.info(f"🔄 Fresh execution price for {pair}: {current_price}")
+
         # Authoritative pre-entry gate. Previously this runtime bypassed
         # TradingEngine.should_execute_trade(), so real entries could ignore
         # 2026-06-12: Pair loss-streak gate + temporary blacklist.
@@ -1068,44 +1111,6 @@ async def _check_trading_opportunity_locked(bot, pair, pair_key, signal):
         except Exception as e:
             logger.debug(f"[QUANT MOMENTUM] {pair}: Skipped: {e}")
 
-        try:
-            from api.indodax_api import IndodaxAPI
-
-            indodax = IndodaxAPI()
-            fresh_ticker = indodax.get_ticker(pair)
-            if fresh_ticker:
-                fresh_price = _to_positive_float(fresh_ticker.get("last"))
-                if fresh_price is not None:
-                    # FIX 2026-06-07: Absolute floor guard for major pairs.
-                    if not _is_price_sane_for_pair(pair, fresh_price):
-                        logger.error(
-                            f"🚫 [PRICE GUARD] {pair}: Fresh price {fresh_price:,.4f} below absolute floor — "
-                            f"rejected. Keeping {current_price}."
-                        )
-                    else:
-                        # Relative deviation check vs signal price
-                        signal_entry_price = _to_positive_float(signal.get("price")) or current_price
-                        if signal_entry_price and signal_entry_price > 0:
-                            deviation = abs(fresh_price - signal_entry_price) / signal_entry_price
-                            if deviation > 0.50:
-                                logger.warning(
-                                    f"⚠️ [PRICE VALIDATION] Fresh price {fresh_price:,.0f} deviates "
-                                    f"{deviation*100:.0f}% from signal price {signal_entry_price:,.0f} for {pair} — "
-                                    f"REJECTED (possible data contamination). Using signal price instead."
-                                )
-                            else:
-                                current_price = fresh_price
-                                logger.info(f"🔄 Fresh execution price for {pair}: {current_price}")
-                        else:
-                            current_price = fresh_price
-                            logger.info(f"🔄 Fresh execution price for {pair}: {current_price}")
-                else:
-                    logger.warning(f"⚠️ Fresh ticker missing 'last' price for {pair}, using signal price")
-            else:
-                logger.warning(f"⚠️ Failed to get fresh price for {pair}, using signal price")
-        except Exception as e:
-            logger.error(f"❌ Error fetching fresh price: {e}")
-
         # Chase prevention: abort if price spiked too far from original signal price
         signal_entry_price = _to_positive_float(signal.get("price")) or current_price
         if signal_entry_price and signal_entry_price > 0:
@@ -1146,17 +1151,10 @@ async def _check_trading_opportunity_locked(bot, pair, pair_key, signal):
                 logger.info(f"🤖 [V4_FILTER] {pair}: {v4_pred} ({v4_conf:.1%})")
 
                 if v4_pred.startswith('BAD'):
-                    if is_dry_run:
-                        # DRY RUN: V4 BAD prediction → reduce position size instead of blocking
-                        # This allows data collection while still respecting the signal
-                        signal["_v4_bad_prediction"] = True
-                        v4_boost = 0.5  # Half size for BAD prediction in DRY RUN
-                        logger.info(f"⚠️ [V4_FILTER] {pair}: BAD prediction in DRY RUN → size reduced 50% (not blocked)")
-                    else:
-                        reason = f"[V4_FILTER] Entry blocked for {pair}: predicted bad outcome ({v4_pred})"
-                        logger.info(f"🚫 {reason}")
-                        _remember_autotrade_block_reason(bot, pair, reason)
-                        return
+                    reason = f"[V4_FILTER] Entry blocked for {pair}: predicted bad outcome ({v4_pred})"
+                    logger.info(f"🚫 {reason}")
+                    _remember_autotrade_block_reason(bot, pair, reason)
+                    return
                 elif v4_pred.startswith('GOOD') and v4_conf >= 0.65:
                     logger.info(f"📈 [V4_FILTER] Boost position for {pair}: good outcome predicted")
                     v4_boost = 1.2

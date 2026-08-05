@@ -164,6 +164,8 @@ class Config:
     MI_REQUIRE_BULLISH_FOR_ENTRY = False  # If True, only enter when MI is BULLISH
     MI_ALLOW_MODERATE_ENTRY = True  # If True, also allow MODERATE MI signal
     MI_ALLOW_NEUTRAL_ENTRY = False  # Block NEUTRAL MI (17-Jun tuning)
+    AUTOTRADE_REQUIRE_FRESH_ENTRY_PRICE = os.getenv('AUTOTRADE_REQUIRE_FRESH_ENTRY_PRICE', 'true').lower() == 'true'
+    AUTOTRADE_FRESH_PRICE_MAX_DEVIATION_PCT = _safe_float_env('AUTOTRADE_FRESH_PRICE_MAX_DEVIATION_PCT', 50.0)
     
     # Portfolio Allocation Dinamis
     PORTFOLIO_MAX_EXPOSURE_PCT = 0.75  # Max 75% of balance in open positions

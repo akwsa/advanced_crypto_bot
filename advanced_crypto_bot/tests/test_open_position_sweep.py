@@ -35,6 +35,22 @@ class _FakeIndodax:
         return {"last": 112.0, "bid": 111.0, "ask": 113.0}
 
 
+class _FakeDbOpenBtc:
+    def get_open_trades(self, user_id):
+        return [
+            {"id": 10, "pair": "btcidr", "status": "OPEN", "price": 1_500_000_000, "amount": 0.001},
+        ]
+
+
+class _FakeIndodaxBadMajorPrice:
+    def __init__(self):
+        self.requested = []
+
+    def get_ticker(self, pair):
+        self.requested.append(pair)
+        return {"last": 100.0, "bid": 100.0, "ask": 101.0}
+
+
 class _FakePriceMonitor:
     def __init__(self):
         self.rebuilt = False
@@ -63,6 +79,22 @@ class TestOpenPositionSweep(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(bot.price_monitor.rebuilt)
         self.assertEqual(bot.indodax.requested, ["penguidr"])
         self.assertEqual(bot.price_monitor.checked, [("penguidr", 112.0)])
+
+    async def test_sweep_rejects_insane_major_pair_price(self):
+        from bot import AdvancedCryptoBot
+
+        bot = AdvancedCryptoBot.__new__(AdvancedCryptoBot)
+        bot.db = _FakeDbOpenBtc()
+        bot.trading_engine = object()
+        bot.indodax = _FakeIndodaxBadMajorPrice()
+        bot.price_monitor = _FakePriceMonitor()
+
+        with patch("bot.Config.ADMIN_IDS", [256024600]):
+            await bot._sweep_open_position_price_levels()
+
+        self.assertTrue(bot.price_monitor.rebuilt)
+        self.assertEqual(bot.indodax.requested, ["btcidr"])
+        self.assertEqual(bot.price_monitor.checked, [])
 
     async def test_time_exit_hold_does_not_disable_final_take_profit(self):
         db = _FakeDb()
