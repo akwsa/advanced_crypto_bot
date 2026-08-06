@@ -3,7 +3,7 @@
 Tanggal dokumen: 2026-08-06  
 Project: `advanced_crypto_bot`  
 Branch: `kiro/dryrun-activation-dashboard`  
-Commit deploy terakhir: `0efea5f`  
+Commit deploy terakhir: `fe41498`  
 Environment produksi/dry-run: Google Compute Engine VM `instance-20260609-044439`  
 Service runtime: `crypto-bot.service`
 
@@ -13,12 +13,66 @@ Pekerjaan selesai dan sudah disinkronkan antara WSL lokal, GitHub, dan Google VM
 
 | Komponen | Status | Bukti |
 |---|---:|---|
-| WSL lokal | Sinkron | `HEAD=0efea5f`, worktree clean |
-| GitHub/origin | Sinkron | `origin/kiro/dryrun-activation-dashboard=0efea5f` |
-| Google VM | Sinkron | `HEAD=0efea5f`, worktree clean |
-| Bot service VM | Running | `crypto-bot.service active/running`, PID `1942145`, `NRestarts=0` |
-| Smoke test VM | Lulus | `36 passed in 2.85s` |
-| Backup VM | Ada | `advanced_crypto_bot/data/backups/deploy-0efea5f-20260806T032501Z` |
+| WSL lokal | Sinkron | `HEAD=fe41498`, worktree clean setelah deploy runtime terbaru |
+| GitHub/origin | Sinkron | `origin/kiro/dryrun-activation-dashboard=fe41498` |
+| Google VM | Sinkron | `HEAD=fe41498`, worktree clean |
+| Bot service VM | Running | `crypto-bot.service active/running`, PID `1943140`, `NRestarts=0` |
+| Smoke test VM | Lulus | `42 passed in 3.81s` |
+| Backup VM | Ada | `advanced_crypto_bot/data/backups/deploy-fe41498-20260806T035601Z` |
+
+## Addendum 2026-08-06 — Runtime full quant gates (`fe41498`)
+
+Commit: `fe41498`  
+Message: `feat: promote quant gates into runtime and retrain`
+
+Perubahan tambahan setelah deploy `0efea5f`:
+
+- Runtime meta-label gate `prob_good_trade`:
+  - memakai closed AutoTrade outcomes dari DB;
+  - memblokir hanya jika sample group cukup;
+  - pass eksplisit jika data belum cukup agar tidak memicu regresi 0-entry.
+- Runtime probability calibration gate:
+  - memakai confidence bucket historis;
+  - memblokir bucket yang overconfident setelah sample cukup;
+  - menyimpan `ml_confidence_calibrated` pada signal saat bin valid.
+- Retrain promotion gate:
+  - `scripts/retrain_ml_v2_v4_once.py` sekarang menjalankan evaluator setelah training;
+  - jika promotion gate gagal, model hasil retrain direstore dari backup;
+  - script keluar dengan code `2` untuk menandai retrain berjalan tetapi model tidak dipromote.
+- Adaptive exit:
+  - `autotrade/price_monitor.py` menyesuaikan trailing stop berdasarkan volatilitas historis jika data tersedia;
+  - fallback ke trailing stop lama jika data tidak cukup.
+- Transformer/orderbook exploration:
+  - `analysis/transformer_explorer.py`;
+  - `scripts/explore_transformer_features.py`;
+  - offline only, tidak dipakai untuk keputusan trade runtime.
+
+Status VM setelah addendum:
+
+```text
+HEAD=fe41498
+crypto-bot.service=active
+MainPID=1943140
+NRestarts=0
+meta_label_gate=True
+meta_label_min_trades=8
+calibration_gate=True
+adaptive_exit=True
+promotion_min_trades=20
+```
+
+Verifikasi VM:
+
+```text
+42 passed in 3.81s
+evaluator smoke OK
+transformer explorer smoke OK
+```
+
+Retrain tidak dijalankan pada deploy ini karena DB VM belum memiliki closed AutoTrade
+outcomes baru setelah cleanup. Dengan `AUTOTRADE_PROMOTION_MIN_TRADES=20`, retrain
+sekarang akan ditolak oleh promotion gate sampai sample cukup; memaksa retrain saat
+sample kosong hanya akan menghasilkan rollback otomatis.
 
 ## Tujuan pekerjaan
 
@@ -445,4 +499,3 @@ Catatan: `git reset --hard` adalah tindakan destruktif terhadap perubahan lokal 
    - probability calibration;
    - promotion gate yang terhubung ke `/retrain`;
    - regime-aware adaptive exit.
-
