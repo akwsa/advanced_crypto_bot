@@ -7,10 +7,14 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+import pandas as pd
+
 from autotrade.runtime import (
     _PAIR_PRICE_FLOOR_IDR,
+    _evaluate_entry_quality_filter,
     _get_cached_signal,
     _is_price_sane_for_pair,
+    _passes_cost_aware_gate,
 )
 
 
@@ -141,6 +145,104 @@ class TestGetCachedSignalCrossLoop(unittest.TestCase):
         self.assertEqual(results[0]["recommendation"], "BUY")
         # Generator called only once — second call awaited the inflight task.
         self.assertEqual(call_count["n"], 1)
+
+
+class TestEntryQualityAndCostAwareGate(unittest.TestCase):
+    def _bot_with_close_history(self, closes):
+        return SimpleNamespace(
+            historical_data={
+                "testidr": pd.DataFrame({"close": closes})
+            }
+        )
+
+    def test_entry_quality_blocks_misaligned_multi_timeframe_trend(self):
+        closes = list(range(300, 0, -1))  # all relevant lookbacks trend DOWN
+        bot = self._bot_with_close_history(closes)
+        market_conditions = {
+            "passes_entry_filter": True,
+            "overall_signal": "BULLISH",
+            "volume_spike": True,
+            "volume_ratio": 2.0,
+            "orderbook_pressure": "BULLISH",
+            "buy_sell_ratio": 1.5,
+            "spread_pct": 0.001,
+            "spread_too_wide": False,
+        }
+
+        with patch("autotrade.runtime.Config.AUTOTRADE_ENTRY_QUALITY_FILTER_ENABLED", True), \
+             patch("autotrade.runtime.Config.AUTOTRADE_MTF_MIN_AVAILABLE", 2), \
+             patch("autotrade.runtime.Config.AUTOTRADE_MTF_REQUIRED_ALIGNED", 2):
+            ok, reason, details = _evaluate_entry_quality_filter(
+                bot,
+                "testidr",
+                {"recommendation": "BUY"},
+                market_conditions,
+            )
+
+        self.assertFalse(ok)
+        self.assertIn("MTF trend not aligned", reason)
+        self.assertEqual(details["mtf"]["aligned"], 0)
+
+    def test_entry_quality_passes_with_aligned_trend_volume_and_orderbook(self):
+        closes = list(range(1, 301))  # all relevant lookbacks trend UP
+        bot = self._bot_with_close_history(closes)
+        market_conditions = {
+            "passes_entry_filter": True,
+            "overall_signal": "BULLISH",
+            "volume_spike": True,
+            "volume_ratio": 1.8,
+            "orderbook_pressure": "BULLISH",
+            "buy_sell_ratio": 1.4,
+            "spread_pct": 0.001,
+            "spread_too_wide": False,
+        }
+
+        with patch("autotrade.runtime.Config.AUTOTRADE_ENTRY_QUALITY_FILTER_ENABLED", True), \
+             patch("autotrade.runtime.Config.AUTOTRADE_ENTRY_QUALITY_MIN_SCORE", 2):
+            ok, reason, details = _evaluate_entry_quality_filter(
+                bot,
+                "testidr",
+                {"recommendation": "STRONG_BUY"},
+                market_conditions,
+            )
+
+        self.assertTrue(ok)
+        self.assertIn("pass score", reason)
+        self.assertGreaterEqual(details["score"], 2)
+
+    def test_cost_aware_gate_blocks_edge_below_roundtrip_cost_floor(self):
+        with patch("autotrade.runtime.Config.AUTOTRADE_COST_AWARE_GATE_ENABLED", True), \
+             patch("autotrade.runtime.Config.TRADING_FEE_RATE", 0.003), \
+             patch("autotrade.runtime.Config.DRYRUN_SLIPPAGE_PCT", 0.001), \
+             patch("autotrade.runtime.Config.AUTOTRADE_COST_EDGE_MULTIPLIER", 1.5):
+            ok, reason, details = _passes_cost_aware_gate(
+                current_price=100.0,
+                take_profit_1=101.0,
+                rr_after_fees=1.5,
+                min_rr_required=1.0,
+                market_conditions={"spread_pct": 0.002},
+            )
+
+        self.assertFalse(ok)
+        self.assertIn("round-trip cost floor", reason)
+        self.assertAlmostEqual(details["roundtrip_cost_pct"], 0.010, places=6)
+
+    def test_cost_aware_gate_passes_when_edge_and_rr_clear_costs(self):
+        with patch("autotrade.runtime.Config.AUTOTRADE_COST_AWARE_GATE_ENABLED", True), \
+             patch("autotrade.runtime.Config.TRADING_FEE_RATE", 0.003), \
+             patch("autotrade.runtime.Config.DRYRUN_SLIPPAGE_PCT", 0.001), \
+             patch("autotrade.runtime.Config.AUTOTRADE_COST_EDGE_MULTIPLIER", 1.5):
+            ok, reason, details = _passes_cost_aware_gate(
+                current_price=100.0,
+                take_profit_1=105.0,
+                rr_after_fees=2.0,
+                min_rr_required=1.2,
+                market_conditions={"spread_pct": 0.001},
+            )
+
+        self.assertTrue(ok)
+        self.assertIn("pass edge", reason)
+        self.assertGreater(details["gross_edge_pct"], details["min_edge_pct"])
 
 
 if __name__ == "__main__":

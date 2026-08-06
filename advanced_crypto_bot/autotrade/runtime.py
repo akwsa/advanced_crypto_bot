@@ -106,6 +106,10 @@ def _check_pair_loss_streak(bot, pair_key: str) -> bool:
 def _classify_autotrade_block_reason(reason):
     """Classify a blocked entry reason into a compact diagnostic bucket."""
     text = str(reason or "").upper()
+    if "ENTRY_QUALITY" in text:
+        return "ENTRY_QUALITY"
+    if "COST_AWARE" in text or "ROUND-TRIP COST" in text:
+        return "COST_AWARE"
     if "V4_FILTER" in text or "BAD_BUY" in text or "BAD_SELL" in text:
         return "V4_FILTER"
     if ("R/R AFTER FEES" in text) or ("R/R" in text and "DYNAMIC FLOOR" in text):
@@ -143,6 +147,216 @@ def _remember_autotrade_block_reason(bot, pair, reason):
         "bucket": bucket,
         "timestamp": datetime.now().astimezone() if datetime.now().astimezone else datetime.now(),
     }
+
+
+def _get_close_series(df):
+    """Return numeric close series from historical data, or None if unavailable."""
+    try:
+        if df is None or getattr(df, "empty", True):
+            return None
+        if "close" in df:
+            series = pd.to_numeric(df["close"], errors="coerce").dropna()
+        elif "last" in df:
+            series = pd.to_numeric(df["last"], errors="coerce").dropna()
+        elif "price" in df:
+            series = pd.to_numeric(df["price"], errors="coerce").dropna()
+        else:
+            return None
+        return series if len(series) > 1 else None
+    except Exception:
+        return None
+
+
+def _analyze_multi_timeframe_alignment(bot, pair, recommendation="BUY"):
+    """Approximate 5m/15m/1h/4h trend alignment from in-memory tick history.
+
+    The bot currently stores roughly one market sample per minute on the VM, so
+    the lookbacks below are intentionally simple tick-count approximations. This
+    is a filter, not a signal generator; if history is insufficient, it returns
+    an explicit insufficient-data result so the caller can avoid reintroducing a
+    0-entry bug.
+    """
+    wanted_direction = "DOWN" if str(recommendation or "").upper().endswith("SELL") else "UP"
+    result = {
+        "passes": True,
+        "wanted_direction": wanted_direction,
+        "available": 0,
+        "aligned": 0,
+        "directions": {},
+        "insufficient_data": True,
+    }
+    try:
+        df = getattr(bot, "historical_data", {}).get(pair)
+        series = _get_close_series(df)
+        if series is None:
+            return result
+
+        min_change = float(getattr(Config, "AUTOTRADE_MTF_MIN_CHANGE_PCT", 0.05) or 0.05) / 100.0
+        lookbacks = {"5m": 5, "15m": 15, "1h": 60, "4h": 240}
+        current = float(series.iloc[-1])
+        for label, lookback in lookbacks.items():
+            if len(series) <= lookback:
+                continue
+            base = float(series.iloc[-(lookback + 1)])
+            if base <= 0:
+                continue
+            change = (current - base) / base
+            if change > min_change:
+                direction = "UP"
+            elif change < -min_change:
+                direction = "DOWN"
+            else:
+                direction = "FLAT"
+            result["directions"][label] = {
+                "direction": direction,
+                "change_pct": round(change * 100, 3),
+            }
+
+        result["available"] = len(result["directions"])
+        result["aligned"] = sum(
+            1 for item in result["directions"].values()
+            if item.get("direction") == wanted_direction
+        )
+        min_available = int(getattr(Config, "AUTOTRADE_MTF_MIN_AVAILABLE", 2) or 2)
+        required_aligned = int(getattr(Config, "AUTOTRADE_MTF_REQUIRED_ALIGNED", 2) or 2)
+        result["insufficient_data"] = result["available"] < min_available
+        if not result["insufficient_data"]:
+            result["passes"] = result["aligned"] >= required_aligned
+        return result
+    except Exception as e:
+        logger.debug(f"⚠️ [ENTRY_QUALITY] MTF alignment skipped for {pair}: {e}")
+        return result
+
+
+def _evaluate_entry_quality_filter(bot, pair, signal, market_conditions):
+    """Evaluate simple entry-quality evidence before an autotrade BUY.
+
+    Inputs are deliberately limited to information the bot already collects:
+    multi-timeframe trend alignment, volume spike, orderbook imbalance, and
+    spread/liquidity abnormality. This is a gate layered on top of existing
+    signal logic; it does not generate new BUY/SELL recommendations.
+    """
+    if not bool(getattr(Config, "AUTOTRADE_ENTRY_QUALITY_FILTER_ENABLED", True)):
+        return True, "ENTRY_QUALITY disabled", {}
+
+    recommendation = str(signal.get("recommendation", "")).upper()
+    if recommendation not in {"BUY", "STRONG_BUY"}:
+        return True, "ENTRY_QUALITY sell/non-entry bypass", {}
+
+    market_conditions = market_conditions or {}
+    if market_conditions.get("spread_too_wide") or market_conditions.get("block_reason") in {
+        "SPREAD_INVALID",
+        "SPREAD_TOO_WIDE",
+        "NO_BID_LIQUIDITY",
+    }:
+        reason = f"[ENTRY_QUALITY] spread/liquidity abnormal ({market_conditions.get('block_reason', 'spread_too_wide')})"
+        return False, reason, {"market_conditions": market_conditions}
+
+    mtf = _analyze_multi_timeframe_alignment(bot, pair, recommendation)
+    has_mi_detail = any(
+        key in market_conditions
+        for key in ("volume_spike", "volume_ratio", "orderbook_pressure", "buy_sell_ratio", "spread_pct")
+    )
+
+    volume_ratio = _to_positive_float(market_conditions.get("volume_ratio")) or 0.0
+    volume_ok = bool(market_conditions.get("volume_spike")) or volume_ratio >= float(getattr(Config, "MI_VOLUME_SPIKE_MIN", 1.1) or 1.1)
+    ob_ratio = _to_positive_float(market_conditions.get("buy_sell_ratio")) or 0.0
+    ob_pressure = str(market_conditions.get("orderbook_pressure") or "UNKNOWN").upper()
+    ob_ok = ob_pressure == "BULLISH" or ob_ratio >= float(getattr(Config, "MI_ORDERBOOK_BULLISH_MIN", 1.05) or 1.05)
+
+    # If both granular MI and MTF data are absent, pass with explicit reason.
+    # Existing higher-level gates still apply; this avoids a silent 0-entry
+    # regression when tests/fallback paths provide only overall_signal.
+    if mtf.get("insufficient_data") and not has_mi_detail:
+        details = {"mtf": mtf, "volume_ok": volume_ok, "orderbook_ok": ob_ok, "score": 0}
+        return True, "[ENTRY_QUALITY] insufficient granular data; pass to existing gates", details
+
+    if not mtf.get("passes", True):
+        reason = (
+            f"[ENTRY_QUALITY] MTF trend not aligned "
+            f"({mtf.get('aligned', 0)}/{mtf.get('available', 0)} toward {mtf.get('wanted_direction')})"
+        )
+        return False, reason, {"mtf": mtf, "volume_ok": volume_ok, "orderbook_ok": ob_ok}
+
+    score = 0
+    if not mtf.get("insufficient_data"):
+        score += 1
+    if volume_ok:
+        score += 1
+    if ob_ok:
+        score += 1
+
+    min_score = int(getattr(Config, "AUTOTRADE_ENTRY_QUALITY_MIN_SCORE", 2) or 2)
+    details = {
+        "mtf": mtf,
+        "volume_ok": volume_ok,
+        "volume_ratio": round(volume_ratio, 3),
+        "orderbook_ok": ob_ok,
+        "buy_sell_ratio": round(ob_ratio, 3),
+        "score": score,
+        "min_score": min_score,
+    }
+    if score < min_score:
+        reason = (
+            f"[ENTRY_QUALITY] insufficient confirmation "
+            f"(score={score}/{min_score}, mtf_aligned={mtf.get('aligned', 0)}/{mtf.get('available', 0)}, "
+            f"volume={volume_ratio:.2f}x, ob={ob_pressure}/{ob_ratio:.2f}x)"
+        )
+        return False, reason, details
+    return True, f"[ENTRY_QUALITY] pass score={score}/{min_score}", details
+
+
+def _estimate_roundtrip_cost_pct(market_conditions):
+    """Estimate all-in round-trip cost as a fraction of entry notional."""
+    fee_rate = float(getattr(Config, "TRADING_FEE_RATE", 0.0) or 0.0)
+    slippage_pct = float(getattr(Config, "DRYRUN_SLIPPAGE_PCT", 0.0) or 0.0)
+    try:
+        spread_pct = max(float((market_conditions or {}).get("spread_pct") or 0.0), 0.0)
+    except (TypeError, ValueError):
+        spread_pct = 0.0
+    return max((fee_rate * 2.0) + (slippage_pct * 2.0) + spread_pct, 0.0)
+
+
+def _passes_cost_aware_gate(current_price, take_profit_1, rr_after_fees, min_rr_required, market_conditions):
+    """Return whether the setup has enough gross edge and net R/R after costs."""
+    if not bool(getattr(Config, "AUTOTRADE_COST_AWARE_GATE_ENABLED", True)):
+        return True, "COST_AWARE disabled", {}
+    try:
+        current_price = float(current_price)
+        take_profit_1 = float(take_profit_1)
+    except (TypeError, ValueError):
+        return False, "[COST_AWARE] invalid price/TP for cost gate", {}
+    if current_price <= 0 or take_profit_1 <= current_price:
+        return False, "[COST_AWARE] TP1 does not exceed entry price", {}
+
+    gross_edge_pct = (take_profit_1 - current_price) / current_price
+    roundtrip_cost_pct = _estimate_roundtrip_cost_pct(market_conditions)
+    edge_multiplier = float(getattr(Config, "AUTOTRADE_COST_EDGE_MULTIPLIER", 1.5) or 1.5)
+    min_edge_pct = roundtrip_cost_pct * edge_multiplier
+    details = {
+        "gross_edge_pct": gross_edge_pct,
+        "roundtrip_cost_pct": roundtrip_cost_pct,
+        "min_edge_pct": min_edge_pct,
+        "rr_after_fees": rr_after_fees,
+        "min_rr_required": min_rr_required,
+    }
+    if gross_edge_pct < min_edge_pct:
+        reason = (
+            f"[COST_AWARE] expected TP1 edge {gross_edge_pct*100:.2f}% "
+            f"< round-trip cost floor {min_edge_pct*100:.2f}% "
+            f"(cost={roundtrip_cost_pct*100:.2f}%, multiplier={edge_multiplier:.2f})"
+        )
+        return False, reason, details
+    if rr_after_fees < min_rr_required:
+        reason = (
+            f"[COST_AWARE] R/R after fees too low "
+            f"({rr_after_fees:.2f} < {min_rr_required:.2f})"
+        )
+        return False, reason, details
+    return True, (
+        f"[COST_AWARE] pass edge={gross_edge_pct*100:.2f}% "
+        f"cost_floor={min_edge_pct*100:.2f}% rr={rr_after_fees:.2f}"
+    ), details
 
 
 # =============================================================================
@@ -981,6 +1195,15 @@ async def _check_trading_opportunity_locked(bot, pair, pair_key, signal):
                 log_fn(f"{prefix} Entry blocked for {pair}: MI filter failed (Signal={market_conditions['overall_signal']})")
             return
 
+        quality_ok, quality_reason, quality_details = _evaluate_entry_quality_filter(
+            bot, pair, signal, market_conditions
+        )
+        if not quality_ok:
+            logger.info(f"🚫 Entry blocked for {pair}: {quality_reason}")
+            _remember_autotrade_block_reason(bot, pair, quality_reason)
+            return
+        logger.info(f"✅ {quality_reason} details={quality_details}")
+
         if regime["is_high_vol"]:
             logger.info(f"⚠️ HIGH VOLATILITY regime detected for {pair} - proceeding with caution")
             v4_status = None
@@ -1242,7 +1465,7 @@ async def _check_trading_opportunity_locked(bot, pair, pair_key, signal):
             elite_signal=elite_signal if 'elite_signal' in locals() else None,
         )
         if optimization.should_skip:
-            if is_dry_run:
+            if is_dry_run and not bool(getattr(Config, "AUTOTRADE_COST_AWARE_GATE_ENABLED", True)):
                 # DRY RUN: profit optimizer skip → proceed with minimum size for data collection
                 logger.info(
                     f"⚠️ [DRY RUN] {pair}: profit optimizer would skip ({optimization.reason}) "
@@ -1308,8 +1531,21 @@ async def _check_trading_opportunity_locked(bot, pair, pair_key, signal):
         potential_profit = (effective_tp - net_entry) / net_entry * 100
         potential_loss = (net_entry - effective_sl) / net_entry * 100
         rr_after_fees = potential_profit / potential_loss if potential_loss > 0 else 0
+        cost_ok, cost_reason, cost_details = _passes_cost_aware_gate(
+            current_price=current_price,
+            take_profit_1=take_profit_1,
+            rr_after_fees=rr_after_fees,
+            min_rr_required=optimization.min_rr_required,
+            market_conditions=market_conditions,
+        )
+        if not cost_ok:
+            logger.info(f"🚫 Trade blocked for {pair}: {cost_reason} details={cost_details}")
+            _remember_autotrade_block_reason(bot, pair, cost_reason)
+            return
+        logger.info(f"✅ {cost_reason}")
+
         if rr_after_fees < optimization.min_rr_required:
-            if is_dry_run:
+            if is_dry_run and not bool(getattr(Config, "AUTOTRADE_DRYRUN_BLOCK_LOW_RR_AFTER_FEES", True)):
                 # DRY RUN: allow entry with reduced size for data collection
                 logger.info(
                     f"⚠️ [DRY RUN] {pair}: R/R after fees low ({rr_after_fees:.2f} < {optimization.min_rr_required:.2f}) "

@@ -9,6 +9,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added - 2026-08-06 (AutoTrade entry quality + cost-aware gate)
+
+**Konteks:** Roadmap quant-hardening dimulai dari filter sederhana yang tidak mengganti
+logic sinyal utama: trend 5m/15m/1h/4h searah, volume spike, orderbook imbalance,
+dan spread abnormal sebagai entry filter.
+
+**Changes:**
+- `autotrade/runtime.py`: tambah entry-quality gate untuk BUY/STRONG_BUY. Gate ini
+  mengevaluasi multi-timeframe trend alignment, volume spike, orderbook pressure,
+  dan abnormal spread/liquidity dari market intelligence.
+- `autotrade/runtime.py`: tambah cost-aware execution gate yang membandingkan expected
+  TP1 edge dengan estimasi biaya round-trip (fee + slippage + spread) dan memblokir
+  setup dengan R/R after fees rendah.
+- `core/config.py`: tambah env toggle/threshold:
+  `AUTOTRADE_ENTRY_QUALITY_FILTER_ENABLED`, `AUTOTRADE_ENTRY_QUALITY_MIN_SCORE`,
+  `AUTOTRADE_MTF_REQUIRED_ALIGNED`, `AUTOTRADE_MTF_MIN_AVAILABLE`,
+  `AUTOTRADE_MTF_MIN_CHANGE_PCT`, `AUTOTRADE_COST_AWARE_GATE_ENABLED`,
+  `AUTOTRADE_COST_EDGE_MULTIPLIER`, dan `AUTOTRADE_DRYRUN_BLOCK_LOW_RR_AFTER_FEES`.
+- `scripts/evaluate_autotrade_quant_gates.py`: tambah evaluator offline untuk
+  walk-forward replay, model promotion gate, meta-labeling `prob_good_trade`, dan
+  probability calibration report berbasis `trade_outcomes`.
+- `_bmad-output/implementation-artifacts/quant-autotrade-roadmap-2026-08-06.md`:
+  backlog implementasi lanjutan untuk walk-forward replay, model promotion gate,
+  meta-labeling, probability calibration, regime-aware sizing/adaptive exit, dan
+  eksplorasi multi-timeframe/orderbook/transformer.
+
+**Safety:** Filter baru fail-open hanya jika granular data benar-benar tidak tersedia,
+agar tidak mengulang bug 0-entry; begitu data MTF/MI tersedia, filter bersifat
+fail-closed untuk spread/liquidity abnormal, trend BUY yang berlawanan, dan edge
+yang tidak cukup untuk mengalahkan biaya.
+
+**Tests:**
+- `./scripts/test.sh tests/test_runtime_price_guard.py tests/test_autotrade_dryrun_signal_cycle.py tests/test_open_position_sweep.py tests/test_evaluate_autotrade_quant_gates.py -q`
+
 ### Fixed - 2026-08-05 (AutoTrade DRY RUN safety/risk hardening)
 
 **Konteks:** Audit VM 2026-08-05 menemukan 26 closed DRY RUN autotrade dengan win rate
