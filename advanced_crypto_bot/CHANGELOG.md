@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added - 2026-08-06 (Runtime meta-label/calibration + retrain promotion gate)
+
+**Changes:**
+- `autotrade/runtime.py`: tambah runtime meta-label gate `prob_good_trade` berbasis
+  closed AutoTrade outcomes. Gate hanya memblokir setelah sample group cukup; jika
+  data VM masih kosong/kecil, gate pass dengan alasan eksplisit.
+- `autotrade/runtime.py`: tambah runtime probability calibration gate berbasis confidence
+  bucket. Gate memblokir bucket yang terbukti overconfident setelah sample cukup dan
+  menyimpan `ml_confidence_calibrated` pada signal.
+- `scripts/retrain_ml_v2_v4_once.py`: retrain V2/V4 sekarang terhubung ke promotion gate.
+  Model hasil retrain di-backup dulu; jika walk-forward/promotion report gagal, model
+  otomatis direstore dari backup dan script keluar dengan code `2`.
+- `autotrade/price_monitor.py`: trailing stop sekarang adaptive terhadap volatilitas
+  historis jika data tersedia, dengan fallback ke trailing stop lama.
+- `analysis/transformer_explorer.py` dan `scripts/explore_transformer_features.py`:
+  tambah eksplorasi transformer/orderbook-sequence offline disabled-by-runtime.
+
+**Safety:** Tidak ada transformer/deep model yang langsung memutuskan trade. Meta-label
+dan calibration gate tidak memblokir ketika sample belum cukup, mencegah regresi 0-entry
+setelah history dry-run dibersihkan.
+
 ### Added - 2026-08-06 (AutoTrade entry quality + cost-aware gate)
 
 **Konteks:** Roadmap quant-hardening dimulai dari filter sederhana yang tidak mengganti

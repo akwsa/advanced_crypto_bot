@@ -28,19 +28,21 @@ Tujuan: meningkatkan kualitas dry-run/live candidate tanpa mengganti seluruh log
 
 2. Meta-labeling `prob_good_trade`
    - sudah ada baseline smoothed group probability dari closed trade outcomes;
-   - berikutnya simpan/export model meta-label dan integrasikan sebagai runtime gate;
-   - entry hanya lanjut jika `prob_good_trade` melewati threshold.
+   - sudah terintegrasi sebagai runtime gate dengan sample-size guard;
+   - berikutnya ganti baseline group probability menjadi model meta-label khusus bila sample cukup.
 
 3. Probability calibration
    - sudah ada calibration report awal: confidence bins, ECE, dan Brier score;
-   - berikutnya kalibrasi confidence model dengan sigmoid/isotonic bila sample cukup;
-   - gunakan calibrated probability untuk gate dan position sizing.
+   - sudah terintegrasi sebagai runtime calibration gate dengan sample-size guard;
+   - berikutnya kalibrasi confidence model dengan sigmoid/isotonic bila sample cukup.
 
 4. Regime-aware sizing dan adaptive exit
-   - pakai trend/range/high-vol regime untuk multiplier size;
-   - ATR/volatility-based trailing activation dan stop distance;
+   - runtime sudah punya trend/range/high-vol size multiplier;
+   - trailing stop sekarang adaptive terhadap volatilitas historis;
+   - berikutnya ATR/volatility-based stop distance yang lebih formal;
    - block atau reduce size saat regime tidak cocok dengan signal.
 
 5. Advanced exploration
-   - fitur multi-timeframe/orderbook yang lebih kaya;
-   - transformer/orderbook sequence model hanya setelah replay + calibration sehat.
+   - fitur multi-timeframe/orderbook sederhana sudah runtime;
+   - transformer/orderbook sequence feature explorer sudah offline;
+   - model sequence hanya boleh masuk runtime setelah replay + calibration sehat.

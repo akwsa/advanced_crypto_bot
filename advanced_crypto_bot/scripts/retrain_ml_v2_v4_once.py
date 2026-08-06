@@ -29,10 +29,16 @@ from analysis.ml_signal_trainer import SignalOutcomeLabeler  # noqa: E402
 from bot import AdvancedCryptoBot  # noqa: E402
 from core.config import Config  # noqa: E402
 from core.database import Database  # noqa: E402
+from scripts.evaluate_autotrade_quant_gates import (  # noqa: E402
+    GateThresholds,
+    build_report,
+    load_outcomes,
+)
 
 LOG_DIR = ROOT / "logs"
 BACKUP_DIR = ROOT / "models" / "backups"
 RUN_DIR = ROOT / "logs" / "ml_retrain"
+PROMOTION_DIR = ROOT / "logs" / "model_promotion"
 
 
 def setup_logging() -> Path:
@@ -60,6 +66,18 @@ def backup_models() -> dict[str, str]:
         else:
             logging.info("backup skipped, missing %s", src.relative_to(ROOT))
     return backups
+
+
+def restore_models(backups: dict[str, str]) -> list[str]:
+    restored = []
+    for name, backup_rel in backups.items():
+        backup_path = ROOT / backup_rel
+        target = ROOT / "models" / name
+        if backup_path.exists():
+            shutil.copy2(backup_path, target)
+            restored.append(name)
+            logging.warning("promotion failed; restored %s from %s", target.relative_to(ROOT), backup_path.relative_to(ROOT))
+    return restored
 
 
 def collect_v2_training_data(limit: int = 2000) -> tuple[pd.DataFrame, list[str]]:
@@ -130,6 +148,25 @@ def train_v4(days_back: int = 30) -> dict[str, object]:
     return result
 
 
+def evaluate_promotion_gate() -> dict[str, object]:
+    PROMOTION_DIR.mkdir(parents=True, exist_ok=True)
+    thresholds = GateThresholds(
+        min_trades=int(getattr(Config, "AUTOTRADE_PROMOTION_MIN_TRADES", 20) or 20),
+        min_profit_factor=float(getattr(Config, "AUTOTRADE_PROMOTION_MIN_PROFIT_FACTOR", 1.20) or 1.20),
+        min_expectancy_pct=float(getattr(Config, "AUTOTRADE_PROMOTION_MIN_EXPECTANCY_PCT", 0.10) or 0.10),
+        max_drawdown_pct=float(getattr(Config, "AUTOTRADE_PROMOTION_MAX_DRAWDOWN_PCT", 10.0) or 10.0),
+        max_ece=float(getattr(Config, "AUTOTRADE_PROMOTION_MAX_ECE", 0.20) or 0.20),
+    )
+    rows = load_outcomes(ROOT / "data" / "trading.db")
+    report = build_report(rows, folds=4, thresholds=thresholds)
+    report_path = PROMOTION_DIR / f"promotion_gate_{datetime.now():%Y%m%d_%H%M%S}.json"
+    report_path.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    report["report_path"] = str(report_path.relative_to(ROOT))
+    logging.info("promotion gate report: %s", json.dumps(report["promotion_gate"], ensure_ascii=False))
+    logging.info("promotion gate report path: %s", report["report_path"])
+    return report
+
+
 def main() -> int:
     log_path = setup_logging()
     logging.info("ML retrain started; log=%s", log_path)
@@ -142,6 +179,16 @@ def main() -> int:
         result["v2_candles"] = len(data)
         result["v2"] = train_v2(data)
         result["v4"] = train_v4(days_back=30)
+        result["promotion"] = evaluate_promotion_gate()
+        if not result["promotion"]["promotion_gate"]["promote"]:
+            result["restored_models"] = restore_models(backups)
+            result["promotion_blocked"] = True
+            logging.warning(
+                "ML retrain blocked by promotion gate: %s",
+                result["promotion"]["promotion_gate"]["reasons"],
+            )
+            print("FINAL_RESULT", json.dumps(result, default=str, ensure_ascii=False), flush=True)
+            return 2
         logging.info("ML retrain complete: %s", json.dumps(result, default=str, ensure_ascii=False))
         print("FINAL_RESULT", json.dumps(result, default=str, ensure_ascii=False), flush=True)
         return 0

@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import random
+import sqlite3
 import threading
 from datetime import datetime, timedelta
 
@@ -357,6 +358,148 @@ def _passes_cost_aware_gate(current_price, take_profit_1, rr_after_fees, min_rr_
         f"[COST_AWARE] pass edge={gross_edge_pct*100:.2f}% "
         f"cost_floor={min_edge_pct*100:.2f}% rr={rr_after_fees:.2f}"
     ), details
+
+
+def _confidence_bucket(confidence, step=0.10):
+    confidence = min(max(float(confidence or 0.0), 0.0), 1.0)
+    low = int(confidence / step) * step
+    high = min(low + step, 1.0)
+    return f"{low:.1f}-{high:.1f}"
+
+
+def _get_runtime_db_path(bot):
+    db = getattr(bot, "db", None)
+    return getattr(db, "db_path", None) or getattr(db, "db_name", None) or "data/trading.db"
+
+
+def _load_runtime_outcome_rows(bot, limit=300):
+    try:
+        with sqlite3.connect(str(_get_runtime_db_path(bot)), timeout=5.0) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                """
+                SELECT
+                    COALESCE(o.pair, t.pair) AS pair,
+                    COALESCE(o.recommendation, t.type) AS recommendation,
+                    COALESCE(o.ml_confidence, t.ml_confidence, 0.5) AS ml_confidence,
+                    COALESCE(o.pnl_pct, t.profit_loss_pct, 0.0) AS pnl_pct,
+                    COALESCE(o.created_at, t.closed_at, t.opened_at) AS event_time
+                FROM trades t
+                LEFT JOIN trade_outcomes o ON o.trade_id = t.id
+                WHERE t.signal_source = 'auto'
+                  AND t.status = 'CLOSED'
+                  AND COALESCE(o.pnl_pct, t.profit_loss_pct) IS NOT NULL
+                ORDER BY datetime(COALESCE(o.created_at, t.closed_at, t.opened_at)) DESC, t.id DESC
+                LIMIT ?
+                """,
+                (int(limit),),
+            ).fetchall()
+    except Exception as e:
+        logger.debug(f"⚠️ [RUNTIME_OUTCOMES] skipped: {e}")
+        return []
+
+    result = []
+    for row in rows:
+        confidence = float(row["ml_confidence"] or 0.5)
+        pnl_pct = float(row["pnl_pct"] or 0.0)
+        result.append({
+            "pair": _normalize_pair(row["pair"]),
+            "recommendation": str(row["recommendation"] or "").upper(),
+            "ml_confidence": confidence,
+            "pnl_pct": pnl_pct,
+            "is_good": 1 if pnl_pct > 0 else 0,
+            "confidence_bucket": _confidence_bucket(confidence),
+        })
+    return result
+
+
+def _get_runtime_quant_stats(bot):
+    ttl_seconds = int(getattr(Config, "AUTOTRADE_RUNTIME_STATS_TTL_SECONDS", 300) or 300)
+    cached = getattr(bot, "_autotrade_runtime_quant_stats", None)
+    now = datetime.now()
+    if cached and (now - cached.get("loaded_at", now)).total_seconds() < ttl_seconds:
+        return cached
+
+    rows = _load_runtime_outcome_rows(bot)
+    total = len(rows)
+    global_good = (sum(r["is_good"] for r in rows) / total) if total else 0.5
+    meta = {}
+    bins = {}
+    for row in rows:
+        meta_key = (row["pair"], row["recommendation"], row["confidence_bucket"])
+        meta.setdefault(meta_key, {"trades": 0, "wins": 0})
+        meta[meta_key]["trades"] += 1
+        meta[meta_key]["wins"] += row["is_good"]
+        bin_key = row["confidence_bucket"]
+        bins.setdefault(bin_key, {"trades": 0, "wins": 0, "confidence_sum": 0.0})
+        bins[bin_key]["trades"] += 1
+        bins[bin_key]["wins"] += row["is_good"]
+        bins[bin_key]["confidence_sum"] += row["ml_confidence"]
+
+    cached = {
+        "loaded_at": now,
+        "total": total,
+        "global_good": global_good,
+        "meta": meta,
+        "bins": bins,
+    }
+    bot._autotrade_runtime_quant_stats = cached
+    return cached
+
+
+def _passes_meta_label_gate(bot, pair, signal):
+    if not bool(getattr(Config, "AUTOTRADE_META_LABEL_GATE_ENABLED", True)):
+        return True, "META_LABEL disabled", {}
+    stats = _get_runtime_quant_stats(bot)
+    confidence = float(signal.get("ml_confidence", 0.5) or 0.5)
+    bucket = _confidence_bucket(confidence)
+    rec = str(signal.get("recommendation") or "").upper()
+    key = (_normalize_pair(pair), rec, bucket)
+    group = stats["meta"].get(key)
+    if not group:
+        return True, "[META_LABEL] insufficient group data; pass", {"bucket": bucket, "total": stats["total"]}
+    min_trades = int(getattr(Config, "AUTOTRADE_META_LABEL_MIN_TRADES", 8) or 8)
+    if group["trades"] < min_trades:
+        return True, "[META_LABEL] group sample too small; pass", {"bucket": bucket, **group}
+
+    prior_strength = 4
+    prob_good = (group["wins"] + stats["global_good"] * prior_strength) / (group["trades"] + prior_strength)
+    min_prob = float(getattr(Config, "AUTOTRADE_META_LABEL_MIN_PROB", 0.52) or 0.52)
+    details = {"bucket": bucket, "prob_good_trade": round(prob_good, 4), **group, "min_prob": min_prob}
+    if prob_good < min_prob:
+        return False, f"[META_LABEL] prob_good_trade {prob_good:.2%} < {min_prob:.0%}", details
+    return True, f"[META_LABEL] pass prob_good_trade={prob_good:.2%}", details
+
+
+def _passes_calibration_gate(bot, signal):
+    if not bool(getattr(Config, "AUTOTRADE_CALIBRATION_GATE_ENABLED", True)):
+        return True, "CALIBRATION disabled", {}
+    stats = _get_runtime_quant_stats(bot)
+    confidence = float(signal.get("ml_confidence", 0.5) or 0.5)
+    bucket = _confidence_bucket(confidence)
+    group = stats["bins"].get(bucket)
+    if not group:
+        return True, "[CALIBRATION] no bin data; pass", {"bucket": bucket, "total": stats["total"]}
+    min_trades = int(getattr(Config, "AUTOTRADE_CALIBRATION_MIN_BIN_TRADES", 8) or 8)
+    if group["trades"] < min_trades:
+        return True, "[CALIBRATION] bin sample too small; pass", {"bucket": bucket, **group}
+
+    avg_conf = group["confidence_sum"] / group["trades"]
+    observed = group["wins"] / group["trades"]
+    gap = avg_conf - observed
+    max_gap = float(getattr(Config, "AUTOTRADE_CALIBRATION_MAX_OVERCONF_GAP", 0.20) or 0.20)
+    details = {
+        "bucket": bucket,
+        "avg_confidence": round(avg_conf, 4),
+        "observed_good_rate": round(observed, 4),
+        "overconfidence_gap": round(gap, 4),
+        "trades": group["trades"],
+        "max_gap": max_gap,
+    }
+    if gap > max_gap:
+        return False, f"[CALIBRATION] confidence overstates good-rate by {gap:.2%}", details
+    signal["ml_confidence_calibrated"] = observed
+    return True, f"[CALIBRATION] pass observed_good_rate={observed:.2%}", details
 
 
 # =============================================================================
@@ -1388,6 +1531,20 @@ async def _check_trading_opportunity_locked(bot, pair, pair_key, signal):
         except Exception as e:
             logger.debug(f"⚠️ V4 filter skipped for {pair}: {e}")
             v4_boost = 1.0
+
+        meta_ok, meta_reason, meta_details = _passes_meta_label_gate(bot, pair, signal)
+        if not meta_ok:
+            logger.info(f"🚫 Entry blocked for {pair}: {meta_reason} details={meta_details}")
+            _remember_autotrade_block_reason(bot, pair, meta_reason)
+            return
+        logger.info(f"✅ {meta_reason} details={meta_details}")
+
+        calibration_ok, calibration_reason, calibration_details = _passes_calibration_gate(bot, signal)
+        if not calibration_ok:
+            logger.info(f"🚫 Entry blocked for {pair}: {calibration_reason} details={calibration_details}")
+            _remember_autotrade_block_reason(bot, pair, calibration_reason)
+            return
+        logger.info(f"✅ {calibration_reason} details={calibration_details}")
 
         indicators = signal.get('indicators', {})
         atr_value = indicators.get('atr')

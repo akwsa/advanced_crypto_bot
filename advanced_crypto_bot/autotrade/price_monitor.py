@@ -60,7 +60,8 @@ class PriceMonitor:
         self.trailing_stops[key] = {
             'highest_price': entry_price,
             'trailing_stop_price': stop_loss,  # Start with initial SL
-            'is_active': False  # Will activate when profit reaches threshold
+            'is_active': False,  # Will activate when profit reaches threshold
+            'adaptive_trail_pct': Config.TRAILING_STOP_PCT,
         }
         
         logger.info(f"📊 Monitoring {pair}: SL={stop_loss:,.0f}, TP1={take_profit_1:,.0f}, TP2={take_profit_2 or 'N/A'}, Amount={amount}")
@@ -305,17 +306,20 @@ class PriceMonitor:
             trailing_data['highest_price'] = current_price
         
         highest = trailing_data['highest_price']
+        trail_pct = self._adaptive_trailing_pct(level)
         
         # Activate trailing stop if profit reaches activation threshold
         if not trailing_data['is_active'] and profit_pct >= Config.TRAILING_ACTIVATION_PCT:
             trailing_data['is_active'] = True
             # Set initial trailing stop at highest price - trailing %
-            trailing_data['trailing_stop_price'] = highest * (1 - Config.TRAILING_STOP_PCT / 100)
-            logger.info(f"🎯 Trailing stop ACTIVATED for {level['pair']} at {highest:,.0f}")
+            trailing_data['adaptive_trail_pct'] = trail_pct
+            trailing_data['trailing_stop_price'] = highest * (1 - trail_pct / 100)
+            logger.info(f"🎯 Trailing stop ACTIVATED for {level['pair']} at {highest:,.0f} (trail={trail_pct:.2f}%)")
         
         # Update trailing stop if price is still rising
         if trailing_data['is_active']:
-            new_trailing_stop = highest * (1 - Config.TRAILING_STOP_PCT / 100)
+            trailing_data['adaptive_trail_pct'] = trail_pct
+            new_trailing_stop = highest * (1 - trail_pct / 100)
             _fee_rate = float(getattr(Config, "TRADING_FEE_RATE", 0.003) or 0.003)
             _fee_floor = entry_price * (1 + 2 * _fee_rate)
             if new_trailing_stop < _fee_floor:
@@ -323,7 +327,52 @@ class PriceMonitor:
             # Only move trailing stop UP, never down
             if new_trailing_stop > trailing_data['trailing_stop_price']:
                 trailing_data['trailing_stop_price'] = new_trailing_stop
-                logger.debug(f"📈 Trailing stop updated for {level['pair']}: {new_trailing_stop:,.0f}")
+                logger.debug(f"📈 Trailing stop updated for {level['pair']}: {new_trailing_stop:,.0f} (trail={trail_pct:.2f}%)")
+
+    def _adaptive_trailing_pct(self, level):
+        """Return volatility-adjusted trailing stop percentage.
+
+        Low volatility tightens the trail to lock profit sooner; high volatility
+        widens it to avoid noise exits. Falls back to Config.TRAILING_STOP_PCT
+        when historical data is unavailable.
+        """
+        base = float(getattr(Config, "TRAILING_STOP_PCT", 3.0) or 3.0)
+        if not bool(getattr(Config, "ADAPTIVE_EXIT_ENABLED", True)):
+            return base
+        vol_pct = self._recent_volatility_pct(level.get("pair"))
+        if vol_pct is None:
+            return base
+        low = float(getattr(Config, "ADAPTIVE_EXIT_LOW_VOL_PCT", 0.8) or 0.8)
+        high = float(getattr(Config, "ADAPTIVE_EXIT_HIGH_VOL_PCT", 2.0) or 2.0)
+        if vol_pct >= high:
+            trail = base * float(getattr(Config, "ADAPTIVE_EXIT_HIGH_VOL_MULTIPLIER", 1.5) or 1.5)
+        elif vol_pct <= low:
+            trail = base * float(getattr(Config, "ADAPTIVE_EXIT_LOW_VOL_MULTIPLIER", 0.8) or 0.8)
+        else:
+            trail = base
+        min_trail = float(getattr(Config, "ADAPTIVE_EXIT_MIN_TRAIL_PCT", 1.5) or 1.5)
+        max_trail = float(getattr(Config, "ADAPTIVE_EXIT_MAX_TRAIL_PCT", 6.0) or 6.0)
+        return min(max(trail, min_trail), max_trail)
+
+    def _recent_volatility_pct(self, pair):
+        try:
+            source = self.bot_app
+            historical = getattr(source, "historical_data", None)
+            if not historical:
+                return None
+            df = historical.get(pair)
+            if df is None or getattr(df, "empty", True) or "close" not in df:
+                return None
+            lookback = int(getattr(Config, "ADAPTIVE_EXIT_VOL_LOOKBACK", 20) or 20)
+            closes = df["close"].tail(lookback + 1).astype(float)
+            if len(closes) < max(5, lookback // 2):
+                return None
+            returns = closes.pct_change().dropna()
+            if returns.empty:
+                return None
+            return float(returns.std() * 100)
+        except Exception:
+            return None
 
     async def _check_drop_alerts(self, key, level, current_price):
         """Check if price has dropped by tiered percentages and send warnings"""

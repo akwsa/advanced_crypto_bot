@@ -229,6 +229,7 @@ def main() -> int:
     parser.add_argument("--max-drawdown-pct", type=float, default=10.0)
     parser.add_argument("--max-ece", type=float, default=0.20)
     parser.add_argument("--output", help="Optional JSON report path")
+    parser.add_argument("--allow-empty", action="store_true", help="Return exit 0 even when promotion gate fails")
     args = parser.parse_args()
 
     thresholds = GateThresholds(
@@ -244,6 +245,8 @@ def main() -> int:
     if args.output:
         Path(args.output).write_text(text + "\n", encoding="utf-8")
     print(text)
+    if args.allow_empty:
+        return 0
     return 0 if report["promotion_gate"]["promote"] else 2
 
 

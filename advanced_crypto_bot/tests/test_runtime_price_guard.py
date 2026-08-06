@@ -14,7 +14,9 @@ from autotrade.runtime import (
     _evaluate_entry_quality_filter,
     _get_cached_signal,
     _is_price_sane_for_pair,
+    _passes_calibration_gate,
     _passes_cost_aware_gate,
+    _passes_meta_label_gate,
 )
 
 
@@ -243,6 +245,79 @@ class TestEntryQualityAndCostAwareGate(unittest.TestCase):
         self.assertTrue(ok)
         self.assertIn("pass edge", reason)
         self.assertGreater(details["gross_edge_pct"], details["min_edge_pct"])
+
+    def test_meta_label_gate_blocks_when_group_probability_is_low(self):
+        bot = SimpleNamespace()
+        stats = {
+            "total": 30,
+            "global_good": 0.4,
+            "meta": {
+                ("testidr", "BUY", "0.7-0.8"): {"trades": 10, "wins": 2},
+            },
+            "bins": {},
+        }
+
+        with patch("autotrade.runtime._get_runtime_quant_stats", return_value=stats), \
+             patch("autotrade.runtime.Config.AUTOTRADE_META_LABEL_GATE_ENABLED", True), \
+             patch("autotrade.runtime.Config.AUTOTRADE_META_LABEL_MIN_TRADES", 8), \
+             patch("autotrade.runtime.Config.AUTOTRADE_META_LABEL_MIN_PROB", 0.52):
+            ok, reason, details = _passes_meta_label_gate(
+                bot,
+                "testidr",
+                {"recommendation": "BUY", "ml_confidence": 0.75},
+            )
+
+        self.assertFalse(ok)
+        self.assertIn("prob_good_trade", reason)
+        self.assertLess(details["prob_good_trade"], 0.52)
+
+    def test_meta_label_gate_passes_when_group_sample_is_too_small(self):
+        bot = SimpleNamespace()
+        stats = {
+            "total": 5,
+            "global_good": 0.2,
+            "meta": {
+                ("testidr", "BUY", "0.7-0.8"): {"trades": 2, "wins": 0},
+            },
+            "bins": {},
+        }
+
+        with patch("autotrade.runtime._get_runtime_quant_stats", return_value=stats), \
+             patch("autotrade.runtime.Config.AUTOTRADE_META_LABEL_GATE_ENABLED", True), \
+             patch("autotrade.runtime.Config.AUTOTRADE_META_LABEL_MIN_TRADES", 8):
+            ok, reason, details = _passes_meta_label_gate(
+                bot,
+                "testidr",
+                {"recommendation": "BUY", "ml_confidence": 0.75},
+            )
+
+        self.assertTrue(ok)
+        self.assertIn("sample too small", reason)
+        self.assertEqual(details["trades"], 2)
+
+    def test_calibration_gate_blocks_overconfident_bin(self):
+        bot = SimpleNamespace()
+        stats = {
+            "total": 20,
+            "global_good": 0.5,
+            "meta": {},
+            "bins": {
+                "0.8-0.9": {"trades": 10, "wins": 4, "confidence_sum": 8.5},
+            },
+        }
+
+        with patch("autotrade.runtime._get_runtime_quant_stats", return_value=stats), \
+             patch("autotrade.runtime.Config.AUTOTRADE_CALIBRATION_GATE_ENABLED", True), \
+             patch("autotrade.runtime.Config.AUTOTRADE_CALIBRATION_MIN_BIN_TRADES", 8), \
+             patch("autotrade.runtime.Config.AUTOTRADE_CALIBRATION_MAX_OVERCONF_GAP", 0.20):
+            ok, reason, details = _passes_calibration_gate(
+                bot,
+                {"recommendation": "BUY", "ml_confidence": 0.85},
+            )
+
+        self.assertFalse(ok)
+        self.assertIn("overstates", reason)
+        self.assertGreater(details["overconfidence_gap"], 0.20)
 
 
 if __name__ == "__main__":

@@ -6,6 +6,8 @@ import unittest
 from datetime import datetime, timedelta
 from unittest.mock import patch
 
+import pandas as pd
+
 from autotrade.price_monitor import PriceMonitor
 
 
@@ -133,6 +135,27 @@ class TestOpenPositionSweep(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(monitor.price_levels[key]["partial_2_triggered"])
         self.assertFalse(monitor.price_levels[key]["triggered"])
         self.assertEqual(db.closed, [])
+
+    async def test_adaptive_exit_widens_trailing_stop_in_high_volatility(self):
+        db = _FakeDb()
+        monitor = PriceMonitor(db)
+        monitor.bot_app = type("BotApp", (), {
+            "historical_data": {
+                "penguidr": pd.DataFrame({"close": [100, 104, 98, 106, 99, 108, 100, 110, 102, 112]})
+            }
+        })()
+        monitor.set_price_level(256024600, 1, "penguidr", 100.0, 90.0, 105.0, 112.0, 10.0)
+
+        with patch("autotrade.price_monitor.Config.TRAILING_ACTIVATION_PCT", 4.0), \
+             patch("autotrade.price_monitor.Config.TRAILING_STOP_PCT", 3.0), \
+             patch("autotrade.price_monitor.Config.ADAPTIVE_EXIT_ENABLED", True), \
+             patch("autotrade.price_monitor.Config.ADAPTIVE_EXIT_HIGH_VOL_PCT", 1.0), \
+             patch("autotrade.price_monitor.Config.ADAPTIVE_EXIT_HIGH_VOL_MULTIPLIER", 1.5), \
+             patch("autotrade.price_monitor.Config.ADAPTIVE_EXIT_MAX_TRAIL_PCT", 6.0):
+            await monitor._update_trailing_stop("256024600_1", monitor.price_levels["256024600_1"], 112.0)
+
+        self.assertTrue(monitor.trailing_stops["256024600_1"]["is_active"])
+        self.assertEqual(monitor.trailing_stops["256024600_1"]["adaptive_trail_pct"], 4.5)
 
 
 if __name__ == "__main__":
