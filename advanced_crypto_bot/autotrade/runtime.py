@@ -1031,6 +1031,21 @@ async def check_trading_opportunity(bot, pair, signal=None):
 async def _check_trading_opportunity_locked(bot, pair, pair_key, signal):
     """Core trading logic — must be called while holding the per-pair lock."""
     user_id = list(bot.subscribers.keys())[0] if bot.subscribers else 1
+    intent = None
+    if signal and isinstance(signal, dict) and signal.get("_intent"):
+        from autotrade.contracts import TradeIntent
+        intent = TradeIntent(**signal["_intent"])
+        if intent.user_id is not None:
+            user_id = intent.user_id
+        if hasattr(bot.db, "record_autotrade_intent"):
+            existing_intent = bot.db.record_autotrade_intent(intent)
+            if existing_intent and existing_intent["status"] in ("FILLED", "PENDING", "REJECTED", "NO_ENTRY"):
+                return {
+                    "status": existing_intent["status"],
+                    "reason_code": existing_intent["reason_code"] or "IDEMPOTENT_REPLAY",
+                    "correlation_id": intent.correlation_id,
+                    "idempotency_key": intent.idempotency_key,
+                }
     open_trades_for_pair = []
     try:
         open_trades_for_pair = [
@@ -1046,7 +1061,7 @@ async def _check_trading_opportunity_locked(bot, pair, pair_key, signal):
         last_ml_update = getattr(bot, "last_ml_update", {})
         last_update = last_ml_update.get(pair_key)
         cooldown_active = bool(last_update and now - last_update < timedelta(minutes=bot.auto_trade_interval_minutes))
-        if cooldown_active and not open_trades_for_pair:
+        if cooldown_active and not open_trades_for_pair and intent is None:
             return
 
     is_dry_run = Config.AUTO_TRADE_DRY_RUN
@@ -1133,7 +1148,7 @@ async def _check_trading_opportunity_locked(bot, pair, pair_key, signal):
     if is_dry_run and open_trades_for_pair and signal["recommendation"] in ["BUY", "STRONG_BUY"]:
         logger.info(f"⏭️ Skipping {pair}: open DRY RUN position already exists; waiting for SELL")
         return
-    if cooldown_active and signal["recommendation"] not in ["STRONG_SELL", "SELL"]:
+    if cooldown_active and signal["recommendation"] not in ["STRONG_SELL", "SELL"] and intent is None:
         logger.info(f"⏭️ Skipping {pair}: scan cooldown active and signal is not SELL")
         return
     if cooldown_active:
@@ -1660,7 +1675,7 @@ async def _check_trading_opportunity_locked(bot, pair, pair_key, signal):
         # - Multiple reduction multipliers making amount near-zero
         # - Bayesian Kelly override inflating position beyond the cap
         # - Any other mutation that produces invalid position size
-        DRY_RUN_MAX_TOTAL = 2_000_000  # Hard cap for all pairs including BTC
+        DRY_RUN_MAX_TOTAL = float(getattr(Config, "DRY_RUN_MAX_TOTAL_IDR", 2_000_000))
         if is_dry_run:
             if amount <= 0 or total <= 0 or total > DRY_RUN_MAX_TOTAL:
                 original_amount = amount
@@ -1775,6 +1790,12 @@ async def _check_trading_opportunity_locked(bot, pair, pair_key, signal):
                 if amount <= 0 or total <= 0:
                     logger.warning(f"🛡️ [DRY RUN] {pair}: amount={amount} atau total={total} <= 0, skip fill")
                     return
+                # Slippage changes the executable price after sizing. Reconcile
+                # quantity once more so the actual filled notional cannot exceed
+                # the configured dry-run cap and amount*price remains exact.
+                capped_total = min(float(total), float(getattr(Config, "DRY_RUN_MAX_TOTAL_IDR", 2_000_000)))
+                amount = capped_total / float(fill_price)
+                total = float(fill_price) * float(amount)
                 fee_rate = float(getattr(Config, "TRADING_FEE_RATE", 0.0) or 0.0)
                 # DRY RUN realism: fee applied on both entry and exit (round-trip)
                 fee = float(fill_price) * float(amount) * fee_rate
@@ -1782,18 +1803,11 @@ async def _check_trading_opportunity_locked(bot, pair, pair_key, signal):
                 stop_loss = tp_fill["stop_loss"]
                 take_profit_1 = tp_fill["take_profit_1"]
                 take_profit_2 = tp_fill["take_profit_2"]
-                trade_id = bot.db.add_trade(
-                    user_id=user_id,
-                    pair=pair,
-                    trade_type="BUY",
-                    price=float(fill_price),
-                    amount=amount,
-                    total=float(fill_price) * float(amount),
-                    fee=fee,
-                    signal_source="auto",
-                    ml_confidence=confidence,
-                    notes=f"[DRY RUN] Filled limit order_id: {simulated_order_id} @ {float(fill_price):,.0f}",
-                )
+                fill_notes=f"[DRY RUN] Filled limit order_id: {simulated_order_id} @ {float(fill_price):,.0f}"
+                if intent is not None and hasattr(bot.db, "create_atomic_dryrun_fill"):
+                    trade_id=bot.db.create_atomic_dryrun_fill(intent=intent,user_id=user_id,order_id=simulated_order_id,pair=pair,price=float(fill_price),quantity=amount,fee=fee,confidence=confidence,notes=fill_notes)
+                else:
+                    trade_id=bot.db.add_trade(user_id=user_id,pair=pair,trade_type="BUY",price=float(fill_price),amount=amount,total=float(fill_price)*float(amount),fee=fee,signal_source="auto",ml_confidence=confidence,notes=fill_notes)
                 bot.price_monitor.set_price_level(user_id, trade_id, pair, float(fill_price), stop_loss, take_profit_1, take_profit_2, amount, support_1=sr_data.get("nearest_support", 0) if sr_data else 0, resistance_1=sr_data.get("nearest_resistance", 0) if sr_data else 0)
                 text = f"""
 🧪 **DRY RUN: FILLED LIMIT BUY** 🧪
@@ -1815,7 +1829,10 @@ async def _check_trading_opportunity_locked(bot, pair, pair_key, signal):
 """
                 await bot._broadcast_to_subscribers(pair, text)
                 logger.info(f"🧪 [DRY RUN] Filled LIMIT BUY for {pair}: {amount} @ {float(fill_price):,.0f} (limit {entry_zone_price:,.0f})")
-                return
+                return {"status": "FILLED", "reason_code": "DRYRUN_FILL",
+                        "correlation_id": intent.correlation_id if intent else None,
+                        "idempotency_key": intent.idempotency_key if intent else None,
+                        "order_id": simulated_order_id, "trade_id": trade_id}
 
             meta = {
                 "ml_confidence": confidence,
@@ -1826,30 +1843,36 @@ async def _check_trading_opportunity_locked(bot, pair, pair_key, signal):
                 "signal_source": "auto",
             }
             try:
-                existing = bot.db.get_pending_orders(pair=pair, status="PENDING")
+                existing = bot.db.get_pending_orders(pair=pair, status="PENDING", user_id=user_id)
                 for pending in existing or []:
                     try:
                         if str(pending.get("trade_type") or pending.get("type") or "").upper() == "BUY":
-                            return
+                            if intent is not None and hasattr(bot.db,"decide_autotrade_intent"):
+                                bot.db.decide_autotrade_intent(intent.idempotency_key,"PENDING","EXISTING_PENDING_ORDER")
+                            return {"status": "PENDING", "reason_code": "EXISTING_PENDING_ORDER",
+                                    "correlation_id": intent.correlation_id if intent else None,
+                                    "idempotency_key": intent.idempotency_key if intent else None,
+                                    "order_id": pending.get("order_id")}
                     except Exception:
                         continue
             except Exception:
                 pass
             try:
-                bot.db.add_pending_order(
-                    order_id=simulated_order_id,
-                    pair=pair,
-                    user_id=user_id,
-                    trade_type="BUY",
-                    limit_price=entry_zone_price,
-                    amount=amount,
-                    total=float(entry_zone_price) * float(amount),
-                    notes=json.dumps(meta, separators=(",", ":")),
-                    trade_id=None
-                )
+                pending_notes=json.dumps(meta, separators=(",", ":"))
+                if intent is not None and hasattr(bot.db,"create_atomic_dryrun_pending"):
+                    bot.db.create_atomic_dryrun_pending(intent=intent,user_id=user_id,order_id=simulated_order_id,pair=pair,limit_price=entry_zone_price,quantity=amount,notes=pending_notes)
+                else:
+                    bot.db.add_pending_order(order_id=simulated_order_id,pair=pair,user_id=user_id,trade_type="BUY",limit_price=entry_zone_price,amount=amount,total=float(entry_zone_price)*float(amount),notes=pending_notes,trade_id=None)
                 logger.info(f"[PENDING_ORDER] Registered simulated limit order {simulated_order_id} for {pair}")
+                if intent is not None and hasattr(bot.db, "decide_autotrade_intent"):
+                    bot.db.decide_autotrade_intent(intent.idempotency_key, "PENDING", "DRYRUN_LIMIT_PENDING")
             except Exception as e:
                 logger.warning(f"⚠️ Failed to register pending order: {e}")
+                if intent is not None and hasattr(bot.db,"decide_autotrade_intent"):
+                    bot.db.decide_autotrade_intent(intent.idempotency_key,"ERROR_RETRYABLE","PENDING_PERSIST_FAILED",str(e))
+                return {"status":"ERROR_RETRYABLE","reason_code":"PENDING_PERSIST_FAILED","reason":str(e),
+                        "correlation_id":intent.correlation_id if intent else None,
+                        "idempotency_key":intent.idempotency_key if intent else None}
             text = f"""
 🧪 **DRY RUN: SIMULATED LIMIT ORDER** 🧪
 
@@ -2320,15 +2343,12 @@ async def execute_auto_sell(bot, pair, signal, current_price, user_id, is_dry_ru
 
             if is_dry_run:
                 simulated_order_id = f"DRY-SELL-{random.randint(100000, 999999)}"
-                bot.db.close_trade(
-                    trade_id=trade_id,
-                    sell_price=sell_price,
-                    sell_amount=amount,
-                    order_id=simulated_order_id,
-                    reason=f"Auto-SELL ({signal['recommendation']})",
-                    pnl=pnl,
-                    pnl_pct=pnl_pct,
-                )
+                sell_reason=f"Auto-SELL ({signal['recommendation']})"
+                normalized_position=bot.db.get_autotrade_position(pair,user_id) if hasattr(bot.db,"get_autotrade_position") else None
+                if normalized_position and hasattr(bot.db,"close_atomic_dryrun_position"):
+                    bot.db.close_atomic_dryrun_position(trade_id=trade_id,fill_key=f"trade:{trade_id}:sell",order_id=simulated_order_id,pair=pair,user_id=user_id,sell_price=sell_price,quantity=amount,fee=exit_fee,reason=sell_reason,pnl=pnl,pnl_pct=pnl_pct)
+                else:
+                    bot.db.close_trade(trade_id=trade_id,sell_price=sell_price,sell_amount=amount,order_id=simulated_order_id,reason=sell_reason,pnl=pnl,pnl_pct=pnl_pct)
                 bot.price_monitor.remove_price_level(user_id, trade_id)
                 text = f"""
 🧪 **DRY RUN: SIMULATED SELL** 🧪

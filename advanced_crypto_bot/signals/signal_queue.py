@@ -27,6 +27,8 @@ import time
 import json
 import logging
 import threading
+import copy
+import uuid
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 
@@ -48,6 +50,7 @@ class SignalQueue:
 
     def __init__(self, host: str = "localhost", port: int = 6379, db: int = 0):
         self.queue_name = "signal_queue:signals"
+        self.inflight_name = "signal_queue:inflight"
         self.stats_prefix = "signal_queue:stats:"
         self._redis = None
         self._connected = False
@@ -77,19 +80,32 @@ class SignalQueue:
         if not self._connected:
             return None
 
-        signal_id = f"{pair}_{signal_type}_{int(time.time())}"
+        signal_id = f"{pair}_{signal_type}_{uuid.uuid4().hex}"
 
+        # Keep a deep copy: callers often reuse/mutate indicator dictionaries
+        # after enqueueing.  The queue is the execution boundary and therefore
+        # owns an immutable semantic snapshot.
+        payload_data = copy.deepcopy(data or {})
+        semantic = dict(payload_data.get("signal") or payload_data)
+        semantic.setdefault("pair", pair)
+        semantic.setdefault("recommendation", signal_type)
+        semantic.setdefault("ml_confidence", confidence)
+        semantic.setdefault("price", price)
+        source_user_id=payload_data.get("source_user_id") or payload_data.get("user_id")
         signal = {
+            "version": 1,
             "signal_id": signal_id,
             "pair": pair,
             "signal_type": signal_type,
             "confidence": confidence,
             "price": price,
-            "data": data or {},
+            "data": {**payload_data, "signal": semantic},
             "priority": priority,
             "created_at": time.time(),
             "status": "pending"  # pending → executing → done → skipped
         }
+        if source_user_id is not None:
+            signal["source_user_id"] = int(source_user_id)
 
         try:
             self._redis.zadd(self.queue_name, {json.dumps(signal): -priority})
@@ -111,21 +127,81 @@ class SignalQueue:
             return None
 
         try:
-            result = self._redis.bzpopmin(self.queue_name, timeout=timeout)
+            # Redis sorted sets cannot atomically move with blocking semantics;
+            # claim via Lua so a crash leaves the envelope recoverable inflight.
+            script = """
+            local x=redis.call('ZRANGE',KEYS[1],0,0,'WITHSCORES')
+            if #x==0 then return nil end
+            redis.call('ZREM',KEYS[1],x[1]); redis.call('HSET',KEYS[2],x[1],ARGV[1]); return x[1]
+            """
+            signal_json = self._redis.eval(script, 2, self.queue_name, self.inflight_name, time.time())
+            result = (self.queue_name, signal_json, 0) if signal_json else None
             if result:
                 _, signal_json, _ = result
-                signal = json.loads(signal_json)
+                try:
+                    signal = json.loads(signal_json)
+                except Exception as exc:
+                    malformed = {"signal_id": f"malformed-{uuid.uuid4().hex}", "raw": signal_json}
+                    self.mark_skipped(malformed, f"MALFORMED_ENVELOPE: {exc}")
+                    self._redis.hdel(self.inflight_name, signal_json)
+                    return None
                 signal["status"] = "executing"
+                signal["_raw_envelope"] = signal_json
                 logger.info(f"🔨 Processing signal: {signal['signal_type']} {signal['pair']}")
                 return signal
             return None
-        except Exception:
+        except Exception as exc:
+            logger.warning(f"⚠️ Signal Queue claim failed: {exc}")
             return None
 
     def mark_done(self, signal_id: str):
         """Mark signal as executed"""
         # Signal removed from queue, log completion
         logger.debug(f"✅ Signal done: {signal_id}")
+
+    def ack(self, signal: Dict):
+        if self._connected:
+            raw = signal.get("_raw_envelope")
+            if raw: self._redis.hdel(self.inflight_name, raw)
+
+    def recover_inflight(self, min_age_seconds=0):
+        if not self._connected:
+            return 0
+        now, recovered = time.time(), 0
+        for raw, claimed in self._redis.hgetall(self.inflight_name).items():
+            if now - float(claimed) >= min_age_seconds:
+                try:
+                    priority = int(json.loads(raw).get("priority", 0))
+                    script="redis.call('ZADD',KEYS[1],ARGV[1],ARGV[2]); return redis.call('HDEL',KEYS[2],ARGV[2])"
+                    self._redis.eval(script,2,self.queue_name,self.inflight_name,-priority,raw)
+                    recovered += 1
+                except Exception as exc:
+                    self.mark_skipped({"raw": raw}, f"MALFORMED_INFLIGHT: {exc}")
+                    self._redis.hdel(self.inflight_name, raw)
+        return recovered
+
+    def settle(self, signal: Dict, decision: Dict) -> str:
+        """Persist outcome and either requeue retryable or ack terminal work."""
+        self.mark_decision(signal, decision)
+        if decision.get("status") == "ERROR_RETRYABLE":
+            self.recover_inflight(min_age_seconds=0)
+            return "REQUEUED"
+        self.mark_done(signal.get("signal_id"))
+        self.ack(signal)
+        return "ACKED"
+
+    def mark_decision(self, signal: Dict, decision: Dict):
+        """Persist terminal/pending queue outcome; never silently discard work."""
+        if not self._connected:
+            return
+        record = copy.deepcopy(signal)
+        record["status"] = str(decision.get("status", "UNKNOWN")).lower()
+        record["decision"] = copy.deepcopy(decision)
+        raw=json.dumps(record,default=str)
+        key=str(decision.get("idempotency_key") or signal.get("signal_id"))
+        terminal=str(decision.get("status")) != "ERROR_RETRYABLE"
+        script="""local old=redis.call('HGET',KEYS[1],ARGV[1]); if (not old) or ARGV[3]=='1' then redis.call('HSET',KEYS[1],ARGV[1],ARGV[2]); redis.call('LPUSH',KEYS[2],ARGV[2]); redis.call('LTRIM',KEYS[2],0,999); return 1 end return 0"""
+        self._redis.eval(script,2,"signal_queue:decision_by_key","signal_queue:decisions",key,raw,"1" if terminal else "0")
 
     def mark_skipped(self, signal: Dict, reason: str):
         """Mark signal as skipped (e.g., insufficient balance)"""
@@ -137,7 +213,8 @@ class SignalQueue:
             signal["skip_reason"] = reason
             self._redis.lpush("signal_queue:skipped", json.dumps(signal))
             self._redis.ltrim("signal_queue:skipped", 0, 99)  # Keep last 100
-            logger.info(f"⏭️ Signal skipped: {signal['pair']} - {reason}")
+            logger.info(f"⏭️ Signal skipped: {signal.get('pair', 'UNKNOWN')} - {reason}")
+            self.ack(signal)
         except Exception as e:
             logger.error(f"❌ Failed to mark skipped: {e}")
 
@@ -150,6 +227,7 @@ class SignalQueue:
             stats = {
                 "pending": self._redis.zcard(self.queue_name),
                 "skipped_count": self._redis.llen("signal_queue:skipped"),
+                "decision_count": self._redis.llen("signal_queue:decisions"),
             }
 
             for signal_type in ["STRONG_BUY", "BUY", "SELL", "STRONG_SELL"]:

@@ -1014,7 +1014,15 @@ class AdvancedCryptoBot:
                 logger.error(f"❌ Bot crashed: {e}")
                 import traceback
                 logger.error(traceback.format_exc())
-                self._shutdown()
+                if e.__class__.__name__ == "Conflict" or "getUpdates" in str(e):
+                    logger.critical(
+                        "⚠️ Telegram control plane conflict; trading engine remains "
+                        "alive in degraded dry-run mode. Stop the duplicate poller."
+                    )
+                    while not self.shutdown_event.wait(timeout=5):
+                        pass
+                else:
+                    self._shutdown()
         else:
             logger.info("📱 Starting Telegram bot with POLLING...")
             logger.info("💡 Press Ctrl+C to stop bot (graceful shutdown with 10s timeout)")
@@ -1027,7 +1035,15 @@ class AdvancedCryptoBot:
                 logger.error(f"❌ Bot crashed: {e}")
                 import traceback
                 logger.error(traceback.format_exc())
-                self._shutdown()
+                if e.__class__.__name__ == "Conflict" or "getUpdates" in str(e):
+                    logger.critical(
+                        "⚠️ Telegram control plane conflict; trading engine remains "
+                        "alive in degraded dry-run mode. Stop the duplicate poller."
+                    )
+                    while not self.shutdown_event.wait(timeout=5):
+                        pass
+                else:
+                    self._shutdown()
     
     def _shutdown(self, timeout=10):
         """
@@ -1327,32 +1343,63 @@ class AdvancedCryptoBot:
             logger.info("📭 Signal Queue unavailable, skipping worker")
             return
 
-        # Clear stale backlog on startup to avoid burst-processing old signals
+        current = getattr(self, "_signal_queue_worker_thread", None)
+        if current is not None and current.is_alive():
+            logger.info("🔨 Signal Queue worker already running")
+            return
+        lock_path = getattr(Config, "AUTOTRADE_WORKER_LOCK_PATH", "/tmp/advanced_crypto_bot-autotrade-worker.lock")
+        from autotrade.contracts import acquire_process_singleton
+        lock_handle = acquire_process_singleton(lock_path)
+        if lock_handle is None:
+            logger.warning("🔒 Signal Queue worker owned by another process; skipping")
+            return
+        self._signal_queue_worker_lock = lock_handle
+
+        # Recover claimed work after an unclean worker exit; never discard backlog.
         try:
-            cleared = self.signal_queue.clear_all()
-            logger.info(f"🧹 Signal Queue cleared {cleared} stale signals on startup")
+            recovered = self.signal_queue.recover_inflight(min_age_seconds=0)
+            logger.info(f"♻️ Signal Queue recovered {recovered} inflight signals")
         except Exception:
             pass
 
         def worker_loop():
             import asyncio
             from autotrade.runtime import check_trading_opportunity
+            from autotrade.contracts import TradeIntent
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
-            last_processed = {}  # {(pair, signal_type): timestamp}
+            last_processed = {}  # {idempotency_key: timestamp}
             COOLDOWN_SECONDS = 300  # 5 min cooldown per pair+type
             while not self.shutdown_event.is_set():
                 try:
                     signal = self.signal_queue.pop_signal(timeout=5)
                     if signal:
-                        pair = signal.get('pair')
-                        signal_type = signal.get('signal_type')
+                        try:
+                            intent = TradeIntent.from_signal(signal)
+                        except Exception as exc:
+                            reason=f"POISON_ENVELOPE: {exc}"
+                            if hasattr(self.db,"record_autotrade_rejection"):
+                                self.db.record_autotrade_rejection(signal.get('signal_id','unknown'),reason,signal)
+                            self.signal_queue.mark_skipped(signal,reason)
+                            continue
+                        invalid_reason = intent.validate(
+                            max_age_seconds=getattr(Config, "AUTOTRADE_SIGNAL_MAX_AGE_SECONDS", 900)
+                        )
+                        if invalid_reason:
+                            if hasattr(self.db,"record_autotrade_rejection"):
+                                self.db.record_autotrade_rejection(signal.get('signal_id','unknown'),invalid_reason,signal)
+                            self.signal_queue.mark_skipped(signal, invalid_reason)
+                            continue
+                        pair = intent.pair
+                        signal_type = intent.recommendation
                         confidence = signal.get('confidence', 0)
                         price = signal.get('price', 0)
-                        key = (pair, signal_type)
+                        key = intent.idempotency_key
                         now = time.time()
+                        getattr(self,"_autotrade_block_reasons",{}).pop(pair,None)
 
-                        # Cooldown deduplication
+                        # Retry deduplication applies only to the identical
+                        # immutable intent; distinct valid signals are not lost.
                         if key in last_processed and (now - last_processed[key]) < COOLDOWN_SECONDS:
                             logger.debug(f"⏳ [SQ-WORKER] Cooldown skip {signal_type} {pair}")
                             self.signal_queue.mark_skipped(signal, "Cooldown deduplication")
@@ -1360,7 +1407,6 @@ class AdvancedCryptoBot:
                             continue
 
                         logger.info(f"🔨 [SQ-WORKER] Processing {signal_type} {pair} @ {price:,.0f}")
-                        last_processed[key] = now
 
                         # FIX 2026-06-07: Clear stale inflight tasks from other
                         # event loops before running check_trading_opportunity.
@@ -1373,19 +1419,42 @@ class AdvancedCryptoBot:
                         if isinstance(inflight, dict):
                             inflight.clear()
 
-                        # FIX: Do NOT pass a minimal signal skeleton; let
-                        # check_trading_opportunity regenerate the full signal via
-                        # _get_cached_signal so notifications carry real indicators,
-                        # combined_strength, ML confidence, and stabilization/quality
-                        # gates instead of a stale market-scan snapshot.
                         try:
-                            loop.run_until_complete(
-                                check_trading_opportunity(self, pair, signal=None)
+                            runtime_signal = dict(intent.signal)
+                            runtime_signal["_intent"] = intent.to_dict()
+                            result = loop.run_until_complete(
+                                check_trading_opportunity(self, pair, signal=runtime_signal)
                             )
-                            self.signal_queue.mark_done(signal['signal_id'])
+                            if isinstance(result, dict):
+                                decision = result
+                            else:
+                                block = getattr(self, "_autotrade_block_reasons", {}).get(
+                                    str(pair).lower().replace("/", "").replace("_", ""), {}
+                                )
+                                reason = block.get("reason") or "Runtime completed without order or fill"
+                                decision = {
+                                    "status": "NO_ENTRY", "reason_code": block.get("bucket") or "NO_ORDER_CREATED",
+                                    "reason": reason, "correlation_id": intent.correlation_id,
+                                    "idempotency_key": intent.idempotency_key,
+                                }
+                                if hasattr(self.db, "decide_autotrade_intent"):
+                                    self.db.decide_autotrade_intent(
+                                        intent.idempotency_key, "NO_ENTRY",
+                                        decision["reason_code"], reason,
+                                    )
+                            settlement = self.signal_queue.settle(signal, decision)
+                            if settlement == "REQUEUED":
+                                # Keep semantic work unacked and atomically put it
+                                # back on the queue. Bounded attempt metadata avoids
+                                # a hot poison loop while preserving retryability.
+                                signal["retry_count"] = int(signal.get("retry_count", 0)) + 1
+                                time.sleep(min(30, 2 ** min(signal["retry_count"], 5)))
+                            else:
+                                last_processed[key] = now
                         except Exception as e:
                             logger.error(f"❌ [SQ-WORKER] Trade execution failed: {e}")
-                            self.signal_queue.mark_skipped(signal, str(e))
+                            self.signal_queue.mark_decision(signal,{"status":"ERROR_RETRYABLE","reason_code":"RUNTIME_EXCEPTION","reason":str(e),"idempotency_key":intent.idempotency_key})
+                            self.signal_queue.recover_inflight(min_age_seconds=0)
                         # Throttle to avoid CPU spike and API rate limits
                         time.sleep(2)
                     else:
@@ -1397,6 +1466,7 @@ class AdvancedCryptoBot:
             loop.close()
 
         t = threading.Thread(target=worker_loop, daemon=True, name="SignalQueue-Worker")
+        self._signal_queue_worker_thread = t
         t.start()
         self.background_threads.append(t)
         logger.info("🔨 Signal Queue worker started")
@@ -1465,7 +1535,10 @@ class AdvancedCryptoBot:
                                         'type': recommendation,
                                         'confidence': abs(ta_strength),
                                         'price': price,
-                                        'reason': ta_signals.get('reason', f'TA strength: {ta_strength:.2f}')
+                                        'reason': ta_signals.get('reason', f'TA strength: {ta_strength:.2f}'),
+                                        'signal': dict(ta_signals, pair=pair, price=price,
+                                                       recommendation=recommendation,
+                                                       ml_confidence=abs(ta_strength)),
                                     })
                         except Exception as e:
                             logger.debug(f"Scan error for {pair}: {e}")
@@ -1499,12 +1572,14 @@ class AdvancedCryptoBot:
                     
                     # Queue strong signals (only filtered)
                     for sig in strong_signals:
+                        owners=[int(v) for v in (getattr(Config,'ADMIN_IDS',[]) or []) if str(v).isdigit() and int(v)>0]
+                        source_user_id=owners[0] if owners else 1
                         signal_queue.push_signal(
                             pair=sig['pair'],
                             signal_type=sig['type'],
                             confidence=sig['confidence'],
                             price=sig['price'],
-                            data={'reason': sig['reason']},
+                            data={'reason': sig['reason'], 'signal': sig['signal'], 'source_user_id': source_user_id},
                             priority=10
                         )
 
@@ -8727,18 +8802,11 @@ It uses its own analysis (RSI, MACD, Volume, MA, Bollinger).
                             fee = fill_price * amount * fee_rate
                             ml_conf = float(meta.get('ml_confidence', 0.5) or 0.5)
                             signal_source = str(meta.get('signal_source') or 'auto')
-                            trade_id = self.db.add_trade(
-                                user_id=order['user_id'],
-                                pair=pair,
-                                trade_type='BUY',
-                                price=fill_price,
-                                amount=amount,
-                                total=fill_price * amount,
-                                fee=fee,
-                                signal_source=signal_source,
-                                ml_confidence=ml_conf,
-                                notes=f"[DRY RUN] Filled limit order_id: {order_id} @ {fill_price:,.0f} (limit={float(limit_price):,.0f}, slip={slippage_pct*100:.2f}%, fee={fee:,.0f})",
-                            )
+                            fill_notes=f"[DRY RUN] Filled limit order_id: {order_id} @ {fill_price:,.0f} (limit={float(limit_price):,.0f}, slip={slippage_pct*100:.2f}%, fee={fee:,.0f})"
+                            if hasattr(self.db,'promote_atomic_dryrun_pending'):
+                                trade_id=self.db.promote_atomic_dryrun_pending(pending_db_id=db_id,order_id=order_id,user_id=order['user_id'],fill_price=fill_price,fee=fee,confidence=ml_conf,notes=fill_notes)
+                            else:
+                                trade_id=self.db.add_trade(user_id=order['user_id'],pair=pair,trade_type='BUY',price=fill_price,amount=amount,total=fill_price*amount,fee=fee,signal_source=signal_source,ml_confidence=ml_conf,notes=fill_notes)
                             stop_loss = meta.get('stop_loss')
                             take_profit_1 = meta.get('take_profit_1')
                             take_profit_2 = meta.get('take_profit_2')
@@ -8756,12 +8824,8 @@ It uses its own analysis (RSI, MACD, Volume, MA, Bollinger).
                             except Exception:
                                 pass
                         # Simulate fill with realistic price
-                        self.db.update_pending_order_filled(
-                            db_id,
-                            fill_price=fill_price,
-                            notes=f"[DRY RUN] Simulated fill @ {fill_price:,.0f} (limit={limit_price:,.0f}, market={market_price:,.0f}, slip={slippage_pct*100:.2f}%)",
-                            trade_id=trade_id,
-                        )
+                        if not hasattr(self.db,'promote_atomic_dryrun_pending'):
+                            self.db.update_pending_order_filled(db_id,fill_price=fill_price,notes=f"[DRY RUN] Simulated fill @ {fill_price:,.0f}",trade_id=trade_id)
                         logger.info(f"[PENDING_ORDER] DRY RUN filled: {pair} @ {fill_price:,.0f} (limit={limit_price:,.0f}, market={market_price:,.0f})")
                     elif market_price and market_price >= limit_price * (1 + Config.LIMIT_ORDER_CANCEL_DISTANCE_PCT / 100.0):
                         self.db.update_pending_order_cancelled(
