@@ -1,5 +1,9 @@
 # AutoTrade Dry-Run Decision/Execution Spine
 
+> Status deployment, hotfix runtime, rekonsiliasi circuit breaker, bukti test,
+> dan rollback terbaru tersedia di
+> [Handoff 2026-08-12](HANDOFF_2026-08-12_autotrade_execution_repair.md).
+
 Jalur eksekusi resmi adalah market scan → Redis `SignalQueue` → `TradeIntent`
 → runtime policy → dry-run order/fill → ledger position. Queue menyimpan snapshot
 semantik lengkap; worker tidak boleh menggantinya dengan `signal=None`. Envelope
