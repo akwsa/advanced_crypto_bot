@@ -108,7 +108,14 @@ class SignalQueue:
             signal["source_user_id"] = int(source_user_id)
 
         try:
-            self._redis.zadd(self.queue_name, {json.dumps(signal): -priority})
+            # Production scanner payloads legitimately contain datetime and
+            # other rich indicator values.  The queue boundary must preserve
+            # them as a deterministic textual snapshot instead of dropping
+            # the entire signal because the stdlib encoder only accepts JSON
+            # primitives by default.  TradeIntent applies the same canonical
+            # conversion when it hashes/validates the recovered payload.
+            signal_json = json.dumps(signal, sort_keys=True, default=str)
+            self._redis.zadd(self.queue_name, {signal_json: -priority})
 
             # Update stats
             stat_key = f"{self.stats_prefix}{signal_type}"
@@ -211,7 +218,7 @@ class SignalQueue:
         try:
             signal["status"] = "skipped"
             signal["skip_reason"] = reason
-            self._redis.lpush("signal_queue:skipped", json.dumps(signal))
+            self._redis.lpush("signal_queue:skipped", json.dumps(signal, sort_keys=True, default=str))
             self._redis.ltrim("signal_queue:skipped", 0, 99)  # Keep last 100
             logger.info(f"⏭️ Signal skipped: {signal.get('pair', 'UNKNOWN')} - {reason}")
             self.ack(signal)
