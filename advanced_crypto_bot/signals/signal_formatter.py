@@ -12,6 +12,18 @@ from html import escape
 from core.utils import Utils
 
 
+def _coerce_signal_timestamp(value):
+    """Accept in-process datetimes and durable queue ISO snapshots."""
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            pass
+    return datetime.now()
+
+
 def _recommendation_theme(recommendation):
     """Return emoji theme metadata for signal recommendation."""
     return {
@@ -183,7 +195,7 @@ def format_signal_message(signal):
     ml_confidence = signal.get("ml_confidence", 0.5)
     ml_confidence_raw = signal.get("ml_confidence_raw", ml_confidence)
     combined_strength = signal.get("combined_strength", 0)
-    timestamp = signal.get("timestamp", datetime.now())
+    timestamp = _coerce_signal_timestamp(signal.get("timestamp"))
     reason = signal.get("reason", "No analysis available")
     final_gate_source = signal.get("final_gate_source")
     theme = _recommendation_theme(recommendation)
@@ -265,7 +277,7 @@ def format_signal_message_html(signal):
     ml_confidence = signal.get("ml_confidence", 0.5)
     ml_confidence_raw = signal.get("ml_confidence_raw", ml_confidence)
     combined_strength = signal.get("combined_strength", 0)
-    timestamp = signal.get("timestamp", datetime.now())
+    timestamp = _coerce_signal_timestamp(signal.get("timestamp"))
     reason = signal.get("reason", "No analysis available")
     final_gate_source = signal.get("final_gate_source")
     theme = _recommendation_theme(recommendation)

@@ -75,3 +75,12 @@ def test_signal_message_uses_compact_indicator_layout():
     assert "Trend MA:" not in text
     assert "Bollinger:" not in text
     assert "Volume:" not in text
+
+
+def test_signal_message_accepts_timestamp_round_tripped_through_queue_json():
+    signal = _sample_signal("BUY")
+    signal["timestamp"] = str(signal["timestamp"])
+
+    text = format_signal_message_html(signal)
+
+    assert "20:30:00" in text
