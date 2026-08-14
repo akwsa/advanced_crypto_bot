@@ -1,5 +1,8 @@
 # Handoff — Perbaikan Execution Spine dan Aktivasi AutoTrade Dry-Run
 
+> Audit checkpoint terbaru tersedia di
+> [Audit AutoTrade 14 Agustus 2026](AUDIT_2026-08-14_autotrade_24h_checkpoint.md).
+
 Tanggal: 2026-08-12
 
 Branch: `kiro/dryrun-activation-dashboard`
