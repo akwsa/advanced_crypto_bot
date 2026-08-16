@@ -2,7 +2,7 @@
 title: 'Konsistensi Equity, Pending Cancellation, dan NO_ENTRY AutoTrade'
 type: 'bugfix'
 created: '2026-08-16'
-status: 'in-review'
+status: 'done'
 baseline_commit: 'a279933f25f170317a7271b54f8f0d8b650f2bce'
 review_loop_iteration: 0
 context:
@@ -55,7 +55,7 @@ context:
 - [x] `bot.py` -- gunakan cash+marked-open-position equity dan panggil cancellation settlement canonical; sediakan fail-closed migration checks.
 - [x] `autotrade/runtime.py` -- klasifikasikan edge score, liquidity/price/sizing/pair/chase/correlation, dan `NO_OPEN_POSITION`; tidak ada actionable path generik.
 - [x] Tests -- cover immediate/deferred/replay/rollback, insufficient cash, partial/full SELL, cancellation parity, equity mark-to-market, dan reason taxonomy.
-- [ ] Documentation/deploy -- backup DB, test VM, rekonsiliasi cash+peak hanya bila no OPEN position, restart service dry-run, dan audit sampel baru.
+- [x] Documentation/deploy -- backup DB, test VM, rekonsiliasi cash+peak hanya bila no OPEN position, restart service dry-run, dan audit sampel baru.
 
 **Acceptance Criteria:**
 - Given cash Rp50 juta dan BUY Rp2 juta dengan fee Rp6 ribu, when fill commit, then cash Rp47,994 juta dan equity tidak melonjak Rp2 juta.
@@ -76,6 +76,17 @@ context:
 - `cd advanced_crypto_bot && venv/bin/python -m pytest -q tests/test_autotrade_ledger.py tests/test_autotrade_dispatch_lifecycle.py tests/test_bug_fixes_verification.py tests/test_runtime_fill_reconciliation.py tests/test_autotrade_dryrun_signal_cycle.py tests/test_dryrun_safety.py` -- expected: seluruh regression lulus tanpa network/private order.
 - `git diff --check` -- expected: tidak ada whitespace error.
 - VM preflight SQL + targeted pytest + service/log/Redis audit -- expected: backup ada, no OPEN position saat migration, dry-run aktif, cash/peak konsisten, dan sampel baru memiliki reason spesifik.
+
+## Deployment Outcome
+
+- Branch deployed: `kiro/dryrun-activation-dashboard`, commit `e1a9ce1`.
+- Backup: `data/backups/trading-before-accounting-migration-20260816T162825Z.db`, SHA-256 `9a8b4b61b388f36831090f0b77f7ebcf8623339c7ffc7885b126b48fab47c531`.
+- Reconstructed missing normalized SELL `velvetidr` from closed legacy trade 520; synchronized three stale cancellations.
+- Reconciled user `256024600`: cash/equity peak `49,572,215.19584967`, 14 BUY and 14 SELL fills, zero OPEN/pending/orphan/bad-total rows.
+- VM targeted regression: 64 tests + 11 subtests passed; taxonomy hotfix regression: 28 tests + 12 subtests passed.
+- Service: active/running, `NRestarts=0`, `AUTO_TRADE_DRY_RUN=true`.
+- First sample classified SELL without position as `NO_OPEN_POSITION`, edge rejection as `ENTRY_EDGE`, blacklist as `PAIR_GUARD`, and exposed/fixed underscore handling for `MARKET_INTELLIGENCE`.
+- Local full suite baseline debt outside changed modules: 631 passed, 12 failed, 5 collection/setup errors.
 
 ## Suggested Review Order
 
