@@ -17,6 +17,7 @@ class TestTradeIntent(unittest.TestCase):
             "fresh price deviates 51% from signal price": "PRICE_INVALID",
             "SIGNAL_INVALID: recommendation missing": "SIGNAL_INVALID",
             "DUPLICATE_POSITION: already open": "DUPLICATE_POSITION",
+            "MARKET_INTELLIGENCE: MI_FILTER": "MARKET_INTELLIGENCE",
         }
         for reason, bucket in expected.items():
             with self.subTest(reason=reason):

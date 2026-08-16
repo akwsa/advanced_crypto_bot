@@ -155,7 +155,7 @@ def _classify_autotrade_block_reason(reason):
         return "ENTRY_EDGE"
     if "PAIR_FILTER" in text or "PROFIT_FACTOR" in text:
         return "PAIR_FILTER"
-    if "MI FILTER" in text or "MARKET INTELLIGENCE" in text:
+    if "MI FILTER" in text or "MI_FILTER" in text or "MARKET INTELLIGENCE" in text or "MARKET_INTELLIGENCE" in text:
         return "MARKET_INTELLIGENCE"
     return "OTHER"
 
