@@ -541,6 +541,34 @@ class Database:
             cursor.execute('SELECT balance FROM users WHERE user_id = ?', (user_id,))
             result = cursor.fetchone()
             return result['balance'] if result else Config.INITIAL_BALANCE
+
+    @staticmethod
+    def _ensure_virtual_cash_account(conn, user_id):
+        """Create a dry-run cash account without silently starting at zero."""
+        conn.execute(
+            'INSERT OR IGNORE INTO users(user_id, balance) VALUES(?, ?)',
+            (user_id, float(Config.INITIAL_BALANCE)),
+        )
+
+    @staticmethod
+    def _apply_virtual_cash_fill(conn, user_id, side, total, fee):
+        """Apply one fill to virtual cash inside the caller's transaction."""
+        total, fee = float(total), float(fee)
+        if side.upper() == 'BUY':
+            required = total + fee
+            updated = conn.execute(
+                'UPDATE users SET balance=balance-? WHERE user_id=? AND balance>=?',
+                (required, user_id, required),
+            ).rowcount
+            if updated != 1:
+                raise ValueError('insufficient virtual cash for dry-run fill')
+        elif side.upper() == 'SELL':
+            conn.execute(
+                'UPDATE users SET balance=balance+? WHERE user_id=?',
+                (total - fee, user_id),
+            )
+        else:
+            raise ValueError(f'unsupported dry-run side: {side}')
     
     # Price history
     def save_price(self, pair, ohlcv):
@@ -1310,10 +1338,13 @@ class Database:
         """
         price, quantity, fee = float(price), float(quantity), float(fee)
         total = price * quantity
-        if price <= 0 or quantity <= 0 or total <= 0 or fee < 0:
+        if side.upper() != 'BUY':
+            raise ValueError('record_dryrun_fill only accepts BUY; use record_dryrun_sell for SELL')
+        if not all(math.isfinite(v) for v in (price, quantity, total, fee)) or price <= 0 or quantity <= 0 or total <= 0 or fee < 0:
             raise ValueError("invalid dry-run fill invariant")
         payload = intent.to_dict() if hasattr(intent, "to_dict") else dict(intent)
         with self.get_connection() as conn:
+            self._ensure_virtual_cash_account(conn, user_id)
             conn.execute('''
                 INSERT OR IGNORE INTO autotrade_intents
                 (idempotency_key, correlation_id, version, pair, recommendation,
@@ -1332,6 +1363,7 @@ class Database:
                 (order_id, fill_key, price, quantity, total, fee) VALUES (?, ?, ?, ?, ?, ?)''',
                 (order['id'], fill_key, price, quantity, total, fee)).rowcount
             if inserted:
+                self._apply_virtual_cash_fill(conn, user_id, side, total, fee)
                 existing = conn.execute('SELECT * FROM autotrade_positions WHERE pair=? AND user_id=?',
                                         (pair, user_id)).fetchone()
                 old_qty = float(existing['quantity']) if existing else 0.0
@@ -1359,7 +1391,7 @@ class Database:
         payload = intent.to_dict() if hasattr(intent, 'to_dict') else dict(intent)
         total = price * quantity
         with self.get_connection() as conn:
-            conn.execute('INSERT OR IGNORE INTO users(user_id) VALUES(?)',(user_id,))
+            self._ensure_virtual_cash_account(conn, user_id)
             inserted=conn.execute('''INSERT OR IGNORE INTO autotrade_intents
                 (idempotency_key,correlation_id,version,pair,recommendation,signal_json,created_at)
                 VALUES(?,?,?,?,?,?,datetime(?,'unixepoch'))''',(payload['idempotency_key'],payload['correlation_id'],payload.get('version',1),pair,payload['recommendation'],json.dumps(payload['signal'],sort_keys=True,default=str),payload['created_at'])).rowcount
@@ -1375,6 +1407,7 @@ class Database:
             conn.execute("INSERT INTO autotrade_orders(intent_id,order_id,pair,user_id,side,order_type,limit_price,quantity,total,status) VALUES(?,?,?,?,'BUY','DRY_RUN',?,?,?,'FILLED')",(intent_id,order_id,pair,user_id,price,quantity,total))
             oid=conn.execute('SELECT id FROM autotrade_orders WHERE intent_id=?',(intent_id,)).fetchone()[0]
             conn.execute('INSERT INTO autotrade_fills(order_id,fill_key,price,quantity,total,fee) VALUES(?,?,?,?,?,?)',(oid,f"{payload['idempotency_key']}:fill",price,quantity,total,fee))
+            self._apply_virtual_cash_fill(conn, user_id, 'BUY', total, fee)
             conn.execute('''INSERT INTO autotrade_positions(pair,user_id,quantity,avg_price,cost_basis,fees,status) VALUES(?,?,?,?,?,?,'OPEN')
                 ON CONFLICT(pair,user_id) DO UPDATE SET quantity=quantity+excluded.quantity,cost_basis=cost_basis+excluded.cost_basis,
                 avg_price=(cost_basis+excluded.cost_basis)/(quantity+excluded.quantity),fees=fees+excluded.fees,status='OPEN' ''',(pair,user_id,quantity,price,total,fee))
@@ -1388,7 +1421,7 @@ class Database:
         if not all(math.isfinite(v) for v in (limit_price,quantity)) or min(limit_price,quantity)<=0: raise ValueError("invalid pending")
         total=limit_price*quantity
         with self.get_connection() as conn:
-            conn.execute('INSERT OR IGNORE INTO users(user_id) VALUES(?)',(user_id,))
+            self._ensure_virtual_cash_account(conn, user_id)
             existing=conn.execute('SELECT id FROM autotrade_intents WHERE idempotency_key=?',(payload['idempotency_key'],)).fetchone()
             if existing:
                 row=conn.execute('SELECT id FROM pending_orders WHERE order_id=?',(order_id,)).fetchone()
@@ -1407,11 +1440,17 @@ class Database:
     def promote_atomic_dryrun_pending(self, *, pending_db_id, order_id, user_id,
                                       fill_price, fee, confidence, notes, inject_failure=False):
         """Legacy trade + both pending states + normalized fill atomically."""
+        fill_price, fee = float(fill_price), float(fee)
+        if not all(math.isfinite(v) for v in (fill_price, fee)) or fill_price <= 0 or fee < 0:
+            raise ValueError('invalid pending promotion')
         with self.get_connection() as conn:
-            conn.execute('INSERT OR IGNORE INTO users(user_id) VALUES(?)',(user_id,))
+            self._ensure_virtual_cash_account(conn, user_id)
             pending=conn.execute("SELECT * FROM pending_orders WHERE id=? AND status='PENDING'",(pending_db_id,)).fetchone()
             order=conn.execute("SELECT * FROM autotrade_orders WHERE order_id=? AND status='PENDING'",(order_id,)).fetchone()
             if not pending or not order: return None
+            if (str(pending['order_id']) != str(order_id) or pending['user_id'] != user_id
+                    or order['user_id'] != user_id or order['pair'] != pending['pair']):
+                raise ValueError('pending promotion ownership mismatch')
             qty=float(pending['amount']); total=float(fill_price)*qty
             trade_id=conn.execute('''INSERT INTO trades(user_id,pair,type,price,amount,total,fee,signal_source,ml_confidence,status,original_total,notes)
                 VALUES(?,?, 'BUY',?,?,?,?, 'auto',?,'OPEN',?,?)''',(user_id,pending['pair'],fill_price,qty,total,fee,confidence,total,notes)).lastrowid
@@ -1420,6 +1459,7 @@ class Database:
             conn.execute("UPDATE autotrade_orders SET status='FILLED' WHERE id=? AND status='PENDING'",(order['id'],))
             intent=conn.execute('SELECT * FROM autotrade_intents WHERE id=?',(order['intent_id'],)).fetchone()
             conn.execute('INSERT INTO autotrade_fills(order_id,fill_key,price,quantity,total,fee) VALUES(?,?,?,?,?,?)',(order['id'],f"{intent['idempotency_key']}:fill",fill_price,qty,total,fee))
+            self._apply_virtual_cash_fill(conn, user_id, 'BUY', total, fee)
             conn.execute('''INSERT INTO autotrade_positions(pair,user_id,quantity,avg_price,cost_basis,fees,status) VALUES(?,?,?,?,?,?,'OPEN')
                 ON CONFLICT(pair,user_id) DO UPDATE SET quantity=quantity+excluded.quantity,cost_basis=cost_basis+excluded.cost_basis,
                 avg_price=(cost_basis+excluded.cost_basis)/(quantity+excluded.quantity),fees=fees+excluded.fees,status='OPEN' ''',(pending['pair'],user_id,qty,fill_price,total,fee))
@@ -1469,9 +1509,10 @@ class Database:
     def record_dryrun_sell(self, *, fill_key, order_id, pair, user_id, price, quantity, fee):
         """Idempotently decrement/close a normalized dry-run position."""
         price, quantity, fee = float(price), float(quantity), float(fee)
-        if not all(math.isfinite(v) for v in (price,quantity,fee)) or min(price, quantity) <= 0 or fee < 0:
+        if not all(math.isfinite(v) for v in (price,quantity,fee)) or min(price, quantity) <= 0 or fee < 0 or fee > price*quantity:
             raise ValueError("invalid sell invariant")
         with self.get_connection() as conn:
+            self._ensure_virtual_cash_account(conn, user_id)
             pos = conn.execute('SELECT * FROM autotrade_positions WHERE pair=? AND user_id=?', (pair,user_id)).fetchone()
             if not pos or quantity > float(pos['quantity']) + 1e-12:
                 raise ValueError("sell exceeds open position")
@@ -1485,6 +1526,7 @@ class Database:
             conn.execute("INSERT INTO autotrade_orders(intent_id,order_id,pair,user_id,side,order_type,limit_price,quantity,total,status) VALUES(?,?,?,?,'SELL','DRY_RUN',?,?,?,'FILLED')",(iid,order_id,pair,user_id,price,quantity,price*quantity))
             oid=conn.execute('SELECT id FROM autotrade_orders WHERE intent_id=?',(iid,)).fetchone()[0]
             conn.execute('INSERT INTO autotrade_fills(order_id,fill_key,price,quantity,total,fee) VALUES(?,?,?,?,?,?)',(oid,fill_key,price,quantity,price*quantity,fee))
+            self._apply_virtual_cash_fill(conn, user_id, 'SELL', price*quantity, fee)
             remain=max(0.0,float(pos['quantity'])-quantity)
             basis=float(pos['cost_basis']) * (remain/float(pos['quantity'])) if remain else 0
             conn.execute("UPDATE autotrade_positions SET quantity=?,cost_basis=?,avg_price=?,fees=fees+?,status=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",(remain,basis,(basis/remain if remain else 0),fee,('OPEN' if remain else 'CLOSED'),pos['id']))
@@ -1495,12 +1537,15 @@ class Database:
                                      pnl, pnl_pct, inject_failure=False):
         """Atomically close legacy trade quantity and normalized position."""
         sell_price,quantity,fee=float(sell_price),float(quantity),float(fee)
-        if not all(math.isfinite(v) for v in (sell_price,quantity,fee,pnl,pnl_pct)) or min(sell_price,quantity)<=0 or fee<0:
+        if not all(math.isfinite(v) for v in (sell_price,quantity,fee,pnl,pnl_pct)) or min(sell_price,quantity)<=0 or fee<0 or fee>sell_price*quantity:
             raise ValueError("invalid atomic sell")
         with self.get_connection() as conn:
+            self._ensure_virtual_cash_account(conn, user_id)
             legacy=conn.execute("SELECT * FROM trades WHERE id=? AND status='OPEN'",(trade_id,)).fetchone()
             pos=conn.execute("SELECT * FROM autotrade_positions WHERE pair=? AND user_id=? AND status='OPEN'",(pair,user_id)).fetchone()
             if not legacy or not pos: return False
+            if legacy['user_id'] != user_id or legacy['pair'] != pair:
+                raise ValueError('legacy trade ownership mismatch')
             if quantity>float(pos['quantity'])+1e-12: raise ValueError("sell exceeds normalized position")
             if conn.execute('SELECT 1 FROM autotrade_fills WHERE fill_key=?',(fill_key,)).fetchone(): return False
             remain=max(0.0,float(legacy['amount'])-quantity)
@@ -1515,6 +1560,7 @@ class Database:
             conn.execute("INSERT INTO autotrade_orders(intent_id,order_id,pair,user_id,side,order_type,limit_price,quantity,total,status) VALUES(?,?,?,?,'SELL','DRY_RUN',?,?,?,'FILLED')",(iid,order_id,pair,user_id,sell_price,quantity,sell_price*quantity))
             oid=conn.execute('SELECT id FROM autotrade_orders WHERE intent_id=?',(iid,)).fetchone()[0]
             conn.execute('INSERT INTO autotrade_fills(order_id,fill_key,price,quantity,total,fee) VALUES(?,?,?,?,?,?)',(oid,fill_key,sell_price,quantity,sell_price*quantity,fee))
+            self._apply_virtual_cash_fill(conn, user_id, 'SELL', sell_price*quantity, fee)
             premain=max(0.0,float(pos['quantity'])-quantity); basis=float(pos['cost_basis'])*(premain/float(pos['quantity'])) if premain else 0
             conn.execute("UPDATE autotrade_positions SET quantity=?,cost_basis=?,avg_price=?,fees=fees+?,status=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",(premain,basis,basis/premain if premain else 0,fee,'OPEN' if premain>1e-12 else 'CLOSED',pos['id']))
             return True
@@ -1561,15 +1607,32 @@ class Database:
                 WHERE id = ?
             ''', (fill_price, notes, trade_id, db_id))
 
-    def update_pending_order_cancelled(self, db_id, notes=None):
-        """Mark pending order as cancelled."""
+    def update_pending_order_cancelled(self, db_id, notes=None, reason_code='PENDING_CANCELLED'):
+        """Atomically cancel legacy pending, normalized order, and its intent."""
         with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
-                UPDATE pending_orders
-                SET status = 'CANCELLED', cancelled_at = CURRENT_TIMESTAMP, notes = COALESCE(?, notes)
-                WHERE id = ?
-            ''', (notes, db_id))
+            pending = conn.execute('SELECT * FROM pending_orders WHERE id=?', (db_id,)).fetchone()
+            if not pending:
+                raise ValueError(f'pending order not found: {db_id}')
+            if pending['status'] != 'PENDING':
+                return False
+            normalized = conn.execute(
+                "SELECT * FROM autotrade_orders WHERE order_id=? AND user_id=? AND status='PENDING'",
+                (pending['order_id'], pending['user_id']),
+            ).fetchone()
+            if not normalized:
+                raise RuntimeError('normalized pending order missing or non-pending')
+            intent = conn.execute(
+                "SELECT * FROM autotrade_intents WHERE id=? AND status='PENDING'",
+                (normalized['intent_id'],),
+            ).fetchone()
+            if not intent:
+                raise RuntimeError('normalized pending intent missing or non-pending')
+            conn.execute('''UPDATE pending_orders SET status='CANCELLED',
+                cancelled_at=CURRENT_TIMESTAMP,notes=COALESCE(?,notes) WHERE id=?''', (notes, db_id))
+            conn.execute("UPDATE autotrade_orders SET status='CANCELLED' WHERE id=?", (normalized['id'],))
+            conn.execute('''UPDATE autotrade_intents SET status='NO_ENTRY',reason_code=?,reason=?,
+                updated_at=CURRENT_TIMESTAMP WHERE id=?''', (reason_code, notes or '', normalized['intent_id']))
+            return True
 
     def get_pending_order_by_order_id(self, order_id, pair):
         """Get a specific pending order by exchange order_id and pair."""
@@ -1889,7 +1952,63 @@ class Database:
                 ON CONFLICT(user_id) DO UPDATE SET
                     equity_peak = excluded.equity_peak,
                     last_updated = CURRENT_TIMESTAMP
-            ''', (user_id, peak))
+                ''', (user_id, peak))
+
+    def reconcile_closed_dryrun_cash(self, user_id, pre_fill_baseline_cash):
+        """Rebuild virtual cash from normalized fills when every position is closed.
+
+        This fail-closed migration is deterministic and idempotent. It refuses
+        to guess a cash value while either ledger still reports an open trade.
+        """
+        baseline_cash = float(pre_fill_baseline_cash)
+        if not math.isfinite(baseline_cash) or baseline_cash < 0:
+            raise ValueError('invalid dry-run baseline cash')
+        with self.get_connection() as conn:
+            legacy_open = conn.execute(
+                "SELECT COUNT(*) FROM trades WHERE user_id=? AND status='OPEN'", (user_id,)
+            ).fetchone()[0]
+            normalized_open = conn.execute(
+                "SELECT COUNT(*) FROM autotrade_positions WHERE user_id=? AND status='OPEN' AND quantity>1e-12",
+                (user_id,),
+            ).fetchone()[0]
+            if legacy_open or normalized_open:
+                raise RuntimeError(
+                    f'cash reconciliation refused: legacy_open={legacy_open}, normalized_open={normalized_open}'
+                )
+            uncovered_legacy = conn.execute('''
+                SELECT COUNT(*) FROM trades t
+                WHERE t.user_id=? AND t.signal_source='auto' AND t.status='CLOSED'
+                  AND NOT EXISTS (
+                    SELECT 1 FROM autotrade_intents i WHERE i.legacy_trade_id=t.id
+                  )
+            ''', (user_id,)).fetchone()[0]
+            if uncovered_legacy:
+                raise RuntimeError(f'cash reconciliation refused: uncovered_legacy={uncovered_legacy}')
+            rows = conn.execute('''
+                SELECT o.side, f.total, f.fee
+                FROM autotrade_fills f
+                JOIN autotrade_orders o ON o.id=f.order_id
+                WHERE o.user_id=? ORDER BY f.id
+            ''', (user_id,)).fetchall()
+            cash = baseline_cash
+            for row in rows:
+                if row['side'] == 'BUY':
+                    cash -= float(row['total']) + float(row['fee'])
+                elif row['side'] == 'SELL':
+                    cash += float(row['total']) - float(row['fee'])
+                else:
+                    raise RuntimeError(f"unknown fill side: {row['side']}")
+            if not math.isfinite(cash) or cash < 0:
+                raise RuntimeError(f'cash reconciliation produced invalid cash: {cash}')
+            self._ensure_virtual_cash_account(conn, user_id)
+            conn.execute('UPDATE users SET balance=? WHERE user_id=?', (cash, user_id))
+            conn.execute('''
+                INSERT INTO drawdown_state(user_id,equity_peak,last_updated)
+                VALUES(?,?,CURRENT_TIMESTAMP)
+                ON CONFLICT(user_id) DO UPDATE SET equity_peak=excluded.equity_peak,
+                    last_updated=CURRENT_TIMESTAMP
+            ''', (user_id, cash))
+            return {'cash': cash, 'equity_peak': cash, 'fill_count': len(rows)}
 
     # =====================================================================
     # DATABASE HEALTH & OPTIMIZATION

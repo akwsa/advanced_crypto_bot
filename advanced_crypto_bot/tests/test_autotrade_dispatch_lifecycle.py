@@ -2,9 +2,25 @@ import unittest
 import tempfile
 
 from autotrade.contracts import TradeIntent, acquire_process_singleton
+from autotrade.runtime import _classify_autotrade_block_reason
 
 
 class TestTradeIntent(unittest.TestCase):
+    def test_no_entry_taxonomy_is_specific(self):
+        expected = {
+            "Edge score too low (< 56)": "ENTRY_EDGE",
+            "NO_OPEN_POSITION: SELL has no position": "NO_OPEN_POSITION",
+            "POSITION_SIZING: invalid calculated size": "POSITION_SIZING",
+            "LIQUIDITY: SPREAD_TOO_WIDE": "LIQUIDITY",
+            "PAIR_BLACKLIST: temporary blacklist": "PAIR_GUARD",
+            "fresh entry price unavailable": "PRICE_INVALID",
+            "fresh price deviates 51% from signal price": "PRICE_INVALID",
+            "SIGNAL_INVALID: recommendation missing": "SIGNAL_INVALID",
+            "DUPLICATE_POSITION: already open": "DUPLICATE_POSITION",
+        }
+        for reason, bucket in expected.items():
+            with self.subTest(reason=reason):
+                self.assertEqual(_classify_autotrade_block_reason(reason), bucket)
     def test_exact_semantic_payload_is_preserved(self):
         raw = {"signal_id": "x", "pair": "btc_idr", "signal_type": "BUY",
                "confidence": .7, "price": 100, "created_at": 1_800_000_000,

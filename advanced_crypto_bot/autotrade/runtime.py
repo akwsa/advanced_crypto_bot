@@ -109,6 +109,32 @@ def _classify_autotrade_block_reason(reason):
     text = str(reason or "").upper()
     if "ENTRY_QUALITY" in text:
         return "ENTRY_QUALITY"
+    if "NO OPEN POSITION" in text or "NO_OPEN_POSITION" in text:
+        return "NO_OPEN_POSITION"
+    if "EDGE SCORE" in text or "MINIMUM EDGE" in text:
+        return "ENTRY_EDGE"
+    if "FRESH ENTRY PRICE" in text or "FRESH PRICE" in text or "PRICE MISSING" in text or "PRICE FAILED SANITY" in text:
+        return "PRICE_INVALID"
+    if "POSITION SIZ" in text or "POSITION_SIZ" in text or "NOMINAL SIZ" in text or "NOMINAL_SIZ" in text or "INSUFFICIENT BALANCE" in text:
+        return "POSITION_SIZING"
+    if "LIQUIDITY" in text or "SPREAD" in text or "ILLIQUID" in text:
+        return "LIQUIDITY"
+    if "BLACKLIST" in text or "LOSS STREAK" in text:
+        return "PAIR_GUARD"
+    if "SIGNAL_UNAVAILABLE" in text or "SIGNAL_INVALID" in text:
+        return "SIGNAL_INVALID"
+    if "NON_ACTIONABLE_SIGNAL" in text:
+        return "NON_ACTIONABLE_SIGNAL"
+    if "DUPLICATE_SIGNAL" in text:
+        return "DUPLICATE_SIGNAL"
+    if "DUPLICATE_POSITION" in text:
+        return "DUPLICATE_POSITION"
+    if "EXECUTION_VETO" in text:
+        return "EXECUTION_VETO"
+    if "WATCH_ONLY" in text:
+        return "WATCH_ONLY"
+    if "LEDGER_UNAVAILABLE" in text:
+        return "INTERNAL_ERROR"
     if "COST_AWARE" in text or "ROUND-TRIP COST" in text:
         return "COST_AWARE"
     if "V4_FILTER" in text or "BAD_BUY" in text or "BAD_SELL" in text:
@@ -1071,9 +1097,11 @@ async def _check_trading_opportunity_locked(bot, pair, pair_key, signal):
     if signal is None:
         signal = await _get_cached_signal(bot, pair)
     if not signal:
+        _remember_autotrade_block_reason(bot, pair, "SIGNAL_UNAVAILABLE: no cached or queued signal")
         return
     if "recommendation" not in signal:
         logger.warning(f"⚠️ Signal for {pair} missing 'recommendation' key, skipping")
+        _remember_autotrade_block_reason(bot, pair, "SIGNAL_INVALID: recommendation missing")
         return
     signal = dict(signal)
     signal.setdefault("pair", pair)
@@ -1097,6 +1125,7 @@ async def _check_trading_opportunity_locked(bot, pair, pair_key, signal):
         # tetap punya audit trail. Sebelum patch ini, ~73% scan DRY RUN
         # berakhir silent karena log skip-nya di level DEBUG.
         logger.info(f"⏸️ Skipping {pair}: Weak signal ({effective_rec})")
+        _remember_autotrade_block_reason(bot, pair, f"NON_ACTIONABLE_SIGNAL: {effective_rec}")
         return
     # FIX 2026-06-11: Explicit veto checks sebelum pre_sr override.
     # Beberapa flag dari pipeline upstream menandakan bahwa signal TIDAK
@@ -1114,18 +1143,21 @@ async def _check_trading_opportunity_locked(bot, pair, pair_key, signal):
             f"⏸️ Skipping {pair}: duplicate_filtered=True "
             f"({signal.get('duplicate_filtered_reason', 'no reason')})"
         )
+        _remember_autotrade_block_reason(bot, pair, "DUPLICATE_SIGNAL: upstream duplicate filter")
         return
     if signal.get("execution_allowed") is False:
         logger.info(
             f"⏸️ Skipping {pair}: execution_allowed=False "
             f"({signal.get('decision_reason', 'no reason')})"
         )
+        _remember_autotrade_block_reason(bot, pair, "EXECUTION_VETO: upstream decision layer")
         return
     if signal.get("display_recommendation") == "PANTAU":
         logger.info(
             f"⏸️ Skipping {pair}: display_recommendation=PANTAU "
             f"({signal.get('display_reason', 'no reason')})"
         )
+        _remember_autotrade_block_reason(bot, pair, "WATCH_ONLY: display recommendation PANTAU")
         return
     # FIX 2026-06-11: Apply pre_sr override on signal['recommendation']
     # so downstream gates (DRY RUN open-position check, MI filter, V4,
@@ -1147,6 +1179,7 @@ async def _check_trading_opportunity_locked(bot, pair, pair_key, signal):
     # Previously only STRONG_BUY was allowed, making DRY RUN results misleading.
     if is_dry_run and open_trades_for_pair and signal["recommendation"] in ["BUY", "STRONG_BUY"]:
         logger.info(f"⏭️ Skipping {pair}: open DRY RUN position already exists; waiting for SELL")
+        _remember_autotrade_block_reason(bot, pair, "DUPLICATE_POSITION: dry-run position already open")
         return
     if cooldown_active and signal["recommendation"] not in ["STRONG_SELL", "SELL"] and intent is None:
         logger.info(f"⏭️ Skipping {pair}: scan cooldown active and signal is not SELL")
@@ -1216,12 +1249,14 @@ async def _check_trading_opportunity_locked(bot, pair, pair_key, signal):
     can_trade, reason = bot.risk_manager.check_daily_loss_limit(user_id)
     if not can_trade:
         logger.warning(f"⚠️ Trading blocked for {pair}: {reason}")
+        _remember_autotrade_block_reason(bot, pair, f"DAILY_LOSS: {reason}")
         return
 
     # Max drawdown circuit breaker
     dd_allowed, dd_reason = bot._check_max_drawdown(user_id)
     if not dd_allowed:
         logger.error(f"🚫 [CIRCUIT_BREAKER] Trading blocked for {pair}: {dd_reason}")
+        _remember_autotrade_block_reason(bot, pair, f"DRAWDOWN: {dd_reason}")
         return
 
     # Pair performance filter
@@ -1232,6 +1267,7 @@ async def _check_trading_opportunity_locked(bot, pair, pair_key, signal):
                 f"🚫 [PAIR_FILTER] Entry blocked for {pair}: "
                 f"profit_factor={pp['profit_factor']:.2f} (min 1.0) over {pp['total_trades']} trades"
             )
+            _remember_autotrade_block_reason(bot, pair, "PAIR_FILTER: historical profit factor below minimum")
             return
     except Exception as e:
         logger.debug(f"⚠️ Pair performance check skipped for {pair}: {e}")
@@ -1251,6 +1287,7 @@ async def _check_trading_opportunity_locked(bot, pair, pair_key, signal):
             logger.warning(f"⚠️ Failed to fetch fallback price for {pair}: {e}")
     if current_price is None:
         logger.warning(f"⚠️ Skipping {pair}: signal price missing/invalid and no fallback available")
+        _remember_autotrade_block_reason(bot, pair, "PRICE_MISSING: no valid signal, cache, or ticker price")
         return
 
     confidence = float(signal.get("ml_confidence", 0.5) or 0.5)
@@ -1309,8 +1346,10 @@ async def _check_trading_opportunity_locked(bot, pair, pair_key, signal):
                 f"🛑 [PAIR_BLACKLIST] {pair}: temporarily blacklisted "
                 f"(env: AUTOTRADE_TEMPORARY_BLACKLIST) — skipping"
             )
+            _remember_autotrade_block_reason(bot, pair, "PAIR_BLACKLIST: temporary blacklist")
             return
         if _check_pair_loss_streak(bot, pair_key):
+            _remember_autotrade_block_reason(bot, pair, "PAIR_LOSS_STREAK: consecutive loss guard")
             return
 
         # Pre-entry checks: duplicate-position, max-daily-trade, min-balance, trading-hours, and
@@ -1351,6 +1390,10 @@ async def _check_trading_opportunity_locked(bot, pair, pair_key, signal):
                 )
             else:
                 log_fn(f"{prefix} Entry blocked for {pair}: MI filter failed (Signal={market_conditions['overall_signal']})")
+            reason_prefix = "LIQUIDITY" if block_reason in {
+                "SPREAD_INVALID", "SPREAD_TOO_WIDE", "NO_BID_LIQUIDITY"
+            } else "MARKET_INTELLIGENCE"
+            _remember_autotrade_block_reason(bot, pair, f"{reason_prefix}: {block_reason or 'MI_FILTER'}")
             return
 
         quality_ok, quality_reason, quality_details = _evaluate_entry_quality_filter(
@@ -1373,6 +1416,7 @@ async def _check_trading_opportunity_locked(bot, pair, pair_key, signal):
             )
             if not _is_valid_position_size(amount, total):
                 logger.warning(f"⚠️ Position sizing failed for {pair} in high-volatility regime")
+                _remember_autotrade_block_reason(bot, pair, "POSITION_SIZING: invalid high-volatility size")
                 return
             amount *= 0.5
             total *= 0.5
@@ -1388,6 +1432,7 @@ async def _check_trading_opportunity_locked(bot, pair, pair_key, signal):
             )
             if not _is_valid_position_size(amount, total):
                 logger.warning(f"⚠️ Position sizing failed for {pair} in downtrend regime")
+                _remember_autotrade_block_reason(bot, pair, "POSITION_SIZING: invalid downtrend size")
                 return
             amount *= 0.75
             total *= 0.75
@@ -1401,12 +1446,14 @@ async def _check_trading_opportunity_locked(bot, pair, pair_key, signal):
             )
             if not _is_valid_position_size(amount, total):
                 logger.warning(f"⚠️ Position sizing failed for {pair}")
+                _remember_autotrade_block_reason(bot, pair, "POSITION_SIZING: invalid calculated size")
                 return
 
         if is_dry_run:
             dry_run_total = _calculate_dry_run_total_from_price(current_price)
             if dry_run_total is None or dry_run_total <= 0:
                 logger.warning(f"⚠️ DRY RUN nominal sizing failed for {pair} at price {current_price}")
+                _remember_autotrade_block_reason(bot, pair, "NOMINAL_SIZING: invalid dry-run nominal")
                 return
             total = dry_run_total
             amount = total / current_price
@@ -1501,6 +1548,7 @@ async def _check_trading_opportunity_locked(bot, pair, pair_key, signal):
                     f"🚫 Chase prevention: {pair} price moved +{chase_pct*100:.2f}% from signal price "
                     f"({Utils.format_price(current_price)} vs signal {Utils.format_price(signal_entry_price)}), skipping entry"
                 )
+                _remember_autotrade_block_reason(bot, pair, f"CHASE_PREVENTION: price moved {chase_pct*100:.2f}%")
                 return
 
         # Portfolio heat / correlation limit check
@@ -1509,6 +1557,7 @@ async def _check_trading_opportunity_locked(bot, pair, pair_key, signal):
             corr_allowed, corr_factor, corr_reason = _check_correlated_exposure(bot, user_id, pair, balance)
             if not corr_allowed:
                 logger.info(f"🚫 Entry blocked for {pair}: {corr_reason}")
+                _remember_autotrade_block_reason(bot, pair, f"CORRELATION: {corr_reason}")
                 return
             if corr_factor < 1.0:
                 amount *= corr_factor
@@ -1806,7 +1855,22 @@ async def _check_trading_opportunity_locked(bot, pair, pair_key, signal):
                 fill_notes=f"[DRY RUN] Filled limit order_id: {simulated_order_id} @ {float(fill_price):,.0f}"
                 if intent is not None and hasattr(bot.db, "create_atomic_dryrun_fill"):
                     trade_id=bot.db.create_atomic_dryrun_fill(intent=intent,user_id=user_id,order_id=simulated_order_id,pair=pair,price=float(fill_price),quantity=amount,fee=fee,confidence=confidence,notes=fill_notes)
+                elif hasattr(bot.db, "create_atomic_dryrun_fill"):
+                    from autotrade.contracts import TradeIntent
+                    synthetic_intent = TradeIntent.from_signal({
+                        "signal_id": f"direct:{pair}:{int(datetime.now().timestamp())}",
+                        "pair": pair,
+                        "signal_type": "BUY",
+                        "confidence": confidence,
+                        "price": float(fill_price),
+                        "created_at": datetime.now().timestamp(),
+                        "source_user_id": user_id,
+                        "data": {"signal": signal},
+                    })
+                    trade_id=bot.db.create_atomic_dryrun_fill(intent=synthetic_intent,user_id=user_id,order_id=simulated_order_id,pair=pair,price=float(fill_price),quantity=amount,fee=fee,confidence=confidence,notes=fill_notes)
                 else:
+                    # Compatibility seam for lightweight/test repositories.
+                    # Production Database always exposes create_atomic_dryrun_fill.
                     trade_id=bot.db.add_trade(user_id=user_id,pair=pair,trade_type="BUY",price=float(fill_price),amount=amount,total=float(fill_price)*float(amount),fee=fee,signal_source="auto",ml_confidence=confidence,notes=fill_notes)
                 bot.price_monitor.set_price_level(user_id, trade_id, pair, float(fill_price), stop_loss, take_profit_1, take_profit_2, amount, support_1=sr_data.get("nearest_support", 0) if sr_data else 0, resistance_1=sr_data.get("nearest_resistance", 0) if sr_data else 0)
                 text = f"""
@@ -1985,6 +2049,7 @@ async def _check_trading_opportunity_locked(bot, pair, pair_key, signal):
                         bot._rl_update(state, "SELL", reward)
         else:
             logger.info(f"⏸️ SELL signal for {pair} - no open position to sell")
+            _remember_autotrade_block_reason(bot, pair, "NO_OPEN_POSITION: SELL has no position to close")
 
     if Config.PORTFOLIO_RISK_ADJUSTED:
         open_trades = bot.db.get_open_trades(user_id)

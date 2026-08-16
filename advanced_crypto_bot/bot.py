@@ -8830,7 +8830,8 @@ It uses its own analysis (RSI, MACD, Volume, MA, Bollinger).
                     elif market_price and market_price >= limit_price * (1 + Config.LIMIT_ORDER_CANCEL_DISTANCE_PCT / 100.0):
                         self.db.update_pending_order_cancelled(
                             db_id,
-                            notes=f"[DRY RUN] Cancelled chase: market {market_price:,.0f} > limit {limit_price:,.0f} by {Config.LIMIT_ORDER_CANCEL_DISTANCE_PCT:.2f}%"
+                            notes=f"[DRY RUN] Cancelled chase: market {market_price:,.0f} > limit {limit_price:,.0f} by {Config.LIMIT_ORDER_CANCEL_DISTANCE_PCT:.2f}%",
+                            reason_code="PENDING_CHASE_CANCELLED",
                         )
                         if trade_id:
                             self.db.close_trade(trade_id=trade_id, sell_price=limit_price, sell_amount=order['amount'], order_id=order_id, reason="LIMIT_NOT_FILLED_CANCELLED")
@@ -8840,7 +8841,8 @@ It uses its own analysis (RSI, MACD, Volume, MA, Bollinger).
                         # Simulate cancel
                         self.db.update_pending_order_cancelled(
                             db_id,
-                            notes=f"[DRY RUN] Cancelled after {elapsed_minutes:.0f}m (market {market_price:,.0f} > limit {limit_price:,.0f})"
+                            notes=f"[DRY RUN] Cancelled after {elapsed_minutes:.0f}m (market {market_price:,.0f} > limit {limit_price:,.0f})",
+                            reason_code="PENDING_TIMEOUT_CANCELLED",
                         )
                         if trade_id:
                             self.db.close_trade(trade_id=trade_id, sell_price=limit_price, sell_amount=order['amount'], order_id=order_id, reason="LIMIT_NOT_FILLED_TIMEOUT")
@@ -8872,7 +8874,8 @@ It uses its own analysis (RSI, MACD, Volume, MA, Bollinger).
                                 if cancel_result and cancel_result.get('success') == 1:
                                     self.db.update_pending_order_cancelled(
                                         db_id,
-                                        notes=f"Cancelled chase: market {market_price:,.0f} > limit {limit_price:,.0f} by {Config.LIMIT_ORDER_CANCEL_DISTANCE_PCT:.2f}%"
+                                        notes=f"Cancelled chase: market {market_price:,.0f} > limit {limit_price:,.0f} by {Config.LIMIT_ORDER_CANCEL_DISTANCE_PCT:.2f}%",
+                                        reason_code="PENDING_CHASE_CANCELLED",
                                     )
                                     if trade_id:
                                         self.db.close_trade(trade_id=trade_id, sell_price=limit_price, sell_amount=order['amount'], order_id=order_id, reason="LIMIT_NOT_FILLED_CANCELLED")
@@ -8886,7 +8889,8 @@ It uses its own analysis (RSI, MACD, Volume, MA, Bollinger).
                             if cancel_result and cancel_result.get('success') == 1:
                                 self.db.update_pending_order_cancelled(
                                     db_id,
-                                    notes=f"Cancelled by bot after {elapsed_minutes:.0f}m timeout"
+                                    notes=f"Cancelled by bot after {elapsed_minutes:.0f}m timeout",
+                                    reason_code="PENDING_TIMEOUT_CANCELLED",
                                 )
                                 if trade_id:
                                     self.db.close_trade(trade_id=trade_id, sell_price=limit_price, sell_amount=order['amount'], order_id=order_id, reason="LIMIT_NOT_FILLED_TIMEOUT")
