@@ -219,6 +219,40 @@ class Strategy2Repository:
                     VALUES(?,?,?,?,?,0,0,0,0)''', (*self.namespace, user_id, pair, target.value))
             return self._event(conn, event_key)
 
+    def record_audit_event(self, *, user_id: int | None, pair: str, event_key: str,
+                           correlation_id: str, snapshot_id: str, state: Any | None,
+                           reason_code: Any, event: Mapping[str, Any] | None = None):
+        """Persist an additive audit event without mutating Strategy 2 projections."""
+        pair = _pair(pair)
+        event_key = _nonempty("event_key", event_key)
+        snapshot_id = _nonempty("snapshot_id", snapshot_id)
+        correlation_id = _nonempty("correlation_id", correlation_id)
+        state_value = None if state is None else PositionState(getattr(state, "value", state)).value
+        if user_id is not None:
+            normalized_user_id = _user_id(user_id)
+        else:
+            normalized_user_id = 0
+        with self.database.get_connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            prior_event = self._event(conn, event_key)
+            if prior_event:
+                return _same(prior_event, {
+                    "user_id": normalized_user_id,
+                    "pair": pair,
+                    "correlation_id": correlation_id,
+                    "snapshot_id": snapshot_id,
+                    "from_state": state_value,
+                    "to_state": state_value,
+                    "reason_code": ReasonCode(reason_code).value,
+                    "event_json": _json(event),
+                }, "event")
+            conn.execute('''INSERT INTO strategy2_state_events
+                (strategy_version,experiment_id,event_key,correlation_id,snapshot_id,user_id,pair,
+                 from_state,to_state,reason_code,event_json) VALUES(?,?,?,?,?,?,?,?,?,?,?)''',
+                (*self.namespace, event_key, correlation_id, snapshot_id, normalized_user_id,
+                 pair, state_value, state_value, ReasonCode(reason_code).value, _json(event)))
+            return self._event(conn, event_key)
+
     def open_position(self, *, user_id: int, pair: str, event_key: str,
                       correlation_id: str, snapshot_id: str, price: float,
                       quantity: float, fee: float, reason_code: Any):

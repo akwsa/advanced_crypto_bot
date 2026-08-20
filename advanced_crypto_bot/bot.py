@@ -1420,8 +1420,7 @@ class AdvancedCryptoBot:
                             inflight.clear()
 
                         try:
-                            runtime_signal = dict(intent.signal)
-                            runtime_signal["_intent"] = intent.to_dict()
+                            runtime_signal = self._prepare_runtime_signal_for_worker(intent, signal)
                             result = loop.run_until_complete(
                                 check_trading_opportunity(self, pair, signal=runtime_signal)
                             )
@@ -1470,6 +1469,34 @@ class AdvancedCryptoBot:
         t.start()
         self.background_threads.append(t)
         logger.info("🔨 Signal Queue worker started")
+
+    def _prepare_runtime_signal_for_worker(self, intent, signal):
+        """Build runtime signal from validated intent and preserve source identity."""
+        from autotrade.strategy2.shadow_runtime import prepare_runtime_signal
+
+        runtime_signal = prepare_runtime_signal(intent, signal)
+        self._observe_strategy2_shadow_intent(intent, runtime_signal)
+        return runtime_signal
+
+    def _observe_strategy2_shadow_intent(self, intent, runtime_signal):
+        """Best-effort Strategy 2 hook after TradeIntent validation."""
+        if not getattr(Config, "AUTOTRADE_STRATEGY2_ENABLED", False):
+            return None
+        if getattr(Config, "AUTOTRADE_STRATEGY2_MODE", "off") != "shadow":
+            return None
+        try:
+            from autotrade.strategy2.shadow_runtime import observe_intent_safely
+        except Exception as exc:
+            logger.warning("Strategy 2 shadow observe skipped: %s", exc)
+            return None
+
+        return observe_intent_safely(
+            database=self.db,
+            intent=intent,
+            signal=runtime_signal,
+            config=Config,
+            logger=logger,
+        )
 
     # =============================================================================
     # SCHEDULED TASKS (Phase 4)

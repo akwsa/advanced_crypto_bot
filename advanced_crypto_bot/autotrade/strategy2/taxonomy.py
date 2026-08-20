@@ -26,6 +26,10 @@ class DecisionStatus(str, Enum):
 
 
 class ReasonCode(str, Enum):
+    NO_ENTRY = "NO_ENTRY"
+    ENTER_CANDIDATE = "ENTER_CANDIDATE"
+    SHADOW_SKIPPED = "SHADOW_SKIPPED"
+    REPLAY = "REPLAY"
     INVALID_SNAPSHOT = "INVALID_SNAPSHOT"
     DATA_STALE = "DATA_STALE"
     FEATURE_INCOMPLETE = "FEATURE_INCOMPLETE"
@@ -56,4 +60,3 @@ TERMINAL_POSITION_STATES = frozenset(
         PositionState.DATA_STALE,
     }
 )
-

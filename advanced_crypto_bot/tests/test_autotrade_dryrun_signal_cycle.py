@@ -2,10 +2,15 @@
 # Caller: unittest focused autotrade runtime behavior.
 
 import unittest
+import tempfile
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
+from autotrade.contracts import TradeIntent
 from autotrade.runtime import check_trading_opportunity
+from autotrade.strategy2.shadow_runtime import observe_intent, prepare_runtime_signal
+from autotrade.strategy2.taxonomy import DecisionStatus, ReasonCode
+from core.database import Database
 
 
 class _FakeDryRunDB:
@@ -895,6 +900,152 @@ class TestAutoTradeDryRunSignalCycle(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(open_trades), 1)
         # New formula: target 1.250.000 IDR + slippage (DRYRUN_SLIPPAGE_PCT=0.1%)
         self.assertAlmostEqual(open_trades[0]["total"], 1250000.0, delta=12500.0)
+
+
+class TestStrategy2ShadowRuntime(unittest.TestCase):
+    def test_strategy2_shadow_valid_path_is_idempotent(self):
+        with tempfile.NamedTemporaryFile(suffix=".db") as tmp:
+            db = Database(tmp.name)
+            signal = {
+                "signal_id": "sig-1",
+                "pair": "btcidr",
+                "signal_type": "BUY",
+                "price": 100.0,
+                "confidence": 0.9,
+                "created_at": 1_000.0,
+                "user_id": 1,
+                "data": {"signal": {"pair": "btcidr", "recommendation": "BUY", "price": 100.0, "ml_confidence": 0.9}},
+            }
+            intent = TradeIntent.from_signal(signal)
+            runtime_signal = dict(intent.signal)
+            runtime_signal["_intent"] = intent.to_dict()
+
+            first = observe_intent(
+                database=db,
+                intent=intent,
+                signal=runtime_signal,
+                strategy_version="patient-swing-v1",
+                initial_cash=1_000.0,
+            )
+            second = observe_intent(
+                database=db,
+                intent=intent,
+                signal=runtime_signal,
+                strategy_version="patient-swing-v1",
+                initial_cash=1_000.0,
+            )
+
+            self.assertEqual(first.decision_row_id, second.decision_row_id)
+            self.assertIsNotNone(first.event_row_id)
+            self.assertIsNotNone(second.replay_event_row_id)
+            self.assertEqual(first.decision.status, DecisionStatus.ENTER)
+            self.assertEqual(first.decision.reason_code, ReasonCode.ENTER_CANDIDATE)
+            self.assertFalse(first.replayed)
+            self.assertTrue(second.replayed)
+            with db.get_connection() as conn:
+                self.assertEqual(conn.execute("SELECT COUNT(*) FROM strategy2_decisions").fetchone()[0], 1)
+                reason_codes = {
+                    row[0] for row in conn.execute("SELECT reason_code FROM strategy2_state_events")
+                }
+                self.assertEqual(reason_codes, {"ENTER_CANDIDATE", "REPLAY"})
+            db.close()
+
+    def test_strategy2_shadow_replay_stays_stable_after_position_advances(self):
+        with tempfile.NamedTemporaryFile(suffix=".db") as tmp:
+            db = Database(tmp.name)
+            signal = {
+                "signal_id": "sig-advance-1",
+                "pair": "btcidr",
+                "signal_type": "BUY",
+                "price": 100.0,
+                "confidence": 0.9,
+                "created_at": 1_000.0,
+                "user_id": 1,
+                "data": {"signal": {"pair": "btcidr", "recommendation": "BUY", "price": 100.0, "ml_confidence": 0.9}},
+            }
+            intent = TradeIntent.from_signal(signal)
+            runtime_signal = prepare_runtime_signal(intent, signal)
+
+            first = observe_intent(
+                database=db,
+                intent=intent,
+                signal=runtime_signal,
+                strategy_version="patient-swing-v1",
+                initial_cash=1_000.0,
+            )
+            repo = Database(tmp.name)
+            try:
+                with repo.get_connection() as conn:
+                    conn.execute(
+                        """UPDATE strategy2_positions
+                           SET state='OPEN_RISK'
+                           WHERE strategy_version='patient-swing-v1'
+                             AND experiment_id='shadow-runtime'
+                             AND user_id=1 AND pair='BTCIDR'"""
+                    )
+                second = observe_intent(
+                    database=db,
+                    intent=intent,
+                    signal=runtime_signal,
+                    strategy_version="patient-swing-v1",
+                    initial_cash=1_000.0,
+                )
+            finally:
+                repo.close()
+
+            self.assertEqual(first.decision_row_id, second.decision_row_id)
+            self.assertTrue(second.replayed)
+            self.assertIsNotNone(second.replay_event_row_id)
+            db.close()
+
+    def test_strategy2_shadow_sell_records_no_entry(self):
+        with tempfile.NamedTemporaryFile(suffix=".db") as tmp:
+            db = Database(tmp.name)
+            signal = {
+                "signal_id": "sig-2",
+                "pair": "btcidr",
+                "signal_type": "SELL",
+                "price": 100.0,
+                "confidence": 0.9,
+                "created_at": 1_000.0,
+                "data": {"signal": {"pair": "btcidr", "recommendation": "SELL", "price": 100.0, "ml_confidence": 0.9}},
+            }
+            intent = TradeIntent.from_signal(signal)
+            observation = observe_intent(
+                database=db,
+                intent=intent,
+                signal=dict(intent.signal),
+                strategy_version="patient-swing-v1",
+                initial_cash=1_000.0,
+            )
+            self.assertEqual(observation.decision.status, DecisionStatus.NO_ENTRY)
+            self.assertEqual(observation.decision.reason_code, ReasonCode.SHADOW_SKIPPED)
+            with db.get_connection() as conn:
+                self.assertEqual(conn.execute("SELECT COUNT(*) FROM strategy2_decisions").fetchone()[0], 1)
+                self.assertEqual(conn.execute("SELECT COUNT(*) FROM strategy2_state_events").fetchone()[0], 0)
+            db.close()
+
+    def test_worker_runtime_signal_preserves_source_id_and_observes_once(self):
+        intent = TradeIntent.from_signal(
+            {
+                "signal_id": "sig-worker-1",
+                "pair": "btcidr",
+                "signal_type": "BUY",
+                "price": 100.0,
+                "confidence": 0.9,
+                "created_at": 1_000.0,
+                "data": {"signal": {"pair": "btcidr", "recommendation": "BUY", "price": 100.0, "ml_confidence": 0.9}},
+            }
+        )
+        bot = SimpleNamespace()
+        bot._observe_strategy2_shadow_intent = Mock(return_value=None)
+
+        runtime_signal = prepare_runtime_signal(intent, {"signal_id": 12345})
+        bot._observe_strategy2_shadow_intent(intent, runtime_signal)
+
+        self.assertEqual(runtime_signal["_shadow_signal_id"], "12345")
+        self.assertEqual(runtime_signal["_intent"]["idempotency_key"], intent.idempotency_key)
+        bot._observe_strategy2_shadow_intent.assert_called_once_with(intent, runtime_signal)
 
 
 if __name__ == "__main__":
