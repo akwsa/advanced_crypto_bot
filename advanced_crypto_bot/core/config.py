@@ -6,6 +6,7 @@
 
 import os
 import logging
+import math
 from dotenv import load_dotenv
 from datetime import timedelta
 
@@ -72,6 +73,28 @@ def _parse_id_list(value, env_name):
 def _parse_admin_ids(value):
     return _parse_id_list(value, "ADMIN_IDS")
 
+
+def _strategy2_mode(value):
+    """Return the Phase-1 allowlisted mode, failing closed on bad input."""
+    mode = str(value or "off").strip().lower()
+    if mode not in {"off", "shadow"}:
+        logger.warning("Invalid AUTOTRADE_STRATEGY2_MODE=%r; forcing off", value)
+        return "off"
+    return mode
+
+
+def _strategy2_initial_cash(value, default=10_000_000.0):
+    """Parse isolated virtual cash and report whether the source value was valid."""
+    try:
+        cash = float(value)
+    except (TypeError, ValueError):
+        logger.warning("Invalid AUTOTRADE_STRATEGY2_INITIAL_CASH_IDR=%r; forcing Strategy 2 off", value)
+        return float(default), False
+    if not math.isfinite(cash) or cash <= 0:
+        logger.warning("Invalid AUTOTRADE_STRATEGY2_INITIAL_CASH_IDR=%r; forcing Strategy 2 off", value)
+        return float(default), False
+    return cash, True
+
 class Config:
     # Telegram
     TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
@@ -97,6 +120,23 @@ class Config:
     AUTOTRADE_LIQUIDITY_BLACKLIST_TTL_MINUTES = _safe_int_env('AUTOTRADE_LIQUIDITY_BLACKLIST_TTL_MINUTES', 180)
     AUTOTRADE_LIQUIDITY_PROMOTE_MAX_SPREAD_PCT = _safe_float_env('AUTOTRADE_LIQUIDITY_PROMOTE_MAX_SPREAD_PCT', 0.03)
     AUTOTRADE_LIQUIDITY_PROMOTE_REQUIRE_BIDASK = os.getenv('AUTOTRADE_LIQUIDITY_PROMOTE_REQUIRE_BIDASK', 'true').lower() == 'true'
+
+    # Strategy 2 Phase 1 is an isolated, default-off foundation.  Only shadow
+    # is allowlisted; an invalid mode disables it even when enabled=true.
+    AUTOTRADE_STRATEGY2_MODE = _strategy2_mode(os.getenv('AUTOTRADE_STRATEGY2_MODE', 'off'))
+    _STRATEGY2_INITIAL_CASH_IDR, _STRATEGY2_INITIAL_CASH_VALID = _strategy2_initial_cash(
+        os.getenv('AUTOTRADE_STRATEGY2_INITIAL_CASH_IDR', '10000000')
+    )
+    AUTOTRADE_STRATEGY2_ENABLED = (
+        os.getenv('AUTOTRADE_STRATEGY2_ENABLED', 'false').strip().lower() == 'true'
+        and AUTOTRADE_STRATEGY2_MODE == 'shadow'
+        and _STRATEGY2_INITIAL_CASH_VALID
+    )
+    AUTOTRADE_STRATEGY2_VERSION = (
+        os.getenv('AUTOTRADE_STRATEGY2_VERSION', 'patient-swing-v1').strip()
+        or 'patient-swing-v1'
+    )
+    AUTOTRADE_STRATEGY2_INITIAL_CASH_IDR = _STRATEGY2_INITIAL_CASH_IDR
     
     # DRY RUN Exploration Mode: allow PANTAU signals with high confluence to enter
     # with reduced position size (data collection for tuning)

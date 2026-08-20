@@ -151,6 +151,16 @@ class Database:
         with self.get_connection() as conn:
             cursor = conn.cursor()
 
+            def ensure_columns(table_name, column_ddls):
+                existing = {
+                    row["name"] if isinstance(row, sqlite3.Row) else row[1]
+                    for row in conn.execute(f"PRAGMA table_info({table_name})")
+                }
+                for column_name, ddl in column_ddls:
+                    if column_name not in existing:
+                        cursor.execute(f"ALTER TABLE {table_name} ADD COLUMN {ddl}")
+                        existing.add(column_name)
+
             # Users
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS users (
@@ -438,6 +448,125 @@ class Database:
                 id INTEGER PRIMARY KEY AUTOINCREMENT, signal_id TEXT UNIQUE,
                 reason_code TEXT NOT NULL, envelope_json TEXT NOT NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+
+            # Strategy 2 Phase 1 uses an entirely separate journal/projection.
+            # These additive tables are intentionally not wired into the
+            # Strategy 1 runtime, users.balance, trades, or autotrade_* ledger.
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS strategy2_decisions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    strategy_version TEXT NOT NULL,
+                    experiment_id TEXT NOT NULL,
+                    idempotency_key TEXT NOT NULL,
+                    correlation_id TEXT NOT NULL,
+                    snapshot_id TEXT NOT NULL,
+                    pair TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    reason_code TEXT NOT NULL,
+                    reason TEXT NOT NULL DEFAULT '',
+                    evidence_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(strategy_version, experiment_id, idempotency_key)
+                )
+            ''')
+            ensure_columns("strategy2_decisions", (
+                ("strategy_version", "strategy_version TEXT NOT NULL DEFAULT ''"),
+                ("experiment_id", "experiment_id TEXT NOT NULL DEFAULT ''"),
+                ("idempotency_key", "idempotency_key TEXT NOT NULL DEFAULT ''"),
+                ("correlation_id", "correlation_id TEXT NOT NULL DEFAULT ''"),
+                ("snapshot_id", "snapshot_id TEXT NOT NULL DEFAULT ''"),
+                ("pair", "pair TEXT NOT NULL DEFAULT ''"),
+                ("status", "status TEXT NOT NULL DEFAULT ''"),
+                ("reason_code", "reason_code TEXT NOT NULL DEFAULT ''"),
+                ("reason", "reason TEXT NOT NULL DEFAULT ''"),
+                ("evidence_json", "evidence_json TEXT NOT NULL DEFAULT '{}'"),
+                ("created_at", "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP"),
+            ))
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS strategy2_state_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    strategy_version TEXT NOT NULL,
+                    experiment_id TEXT NOT NULL,
+                    event_key TEXT NOT NULL,
+                    correlation_id TEXT NOT NULL,
+                    snapshot_id TEXT NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    pair TEXT NOT NULL,
+                    from_state TEXT,
+                    to_state TEXT NOT NULL,
+                    reason_code TEXT NOT NULL,
+                    event_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(strategy_version, experiment_id, event_key)
+                )
+            ''')
+            ensure_columns("strategy2_state_events", (
+                ("strategy_version", "strategy_version TEXT NOT NULL DEFAULT ''"),
+                ("experiment_id", "experiment_id TEXT NOT NULL DEFAULT ''"),
+                ("event_key", "event_key TEXT NOT NULL DEFAULT ''"),
+                ("correlation_id", "correlation_id TEXT NOT NULL DEFAULT ''"),
+                ("snapshot_id", "snapshot_id TEXT NOT NULL DEFAULT ''"),
+                ("user_id", "user_id INTEGER NOT NULL DEFAULT 0"),
+                ("pair", "pair TEXT NOT NULL DEFAULT ''"),
+                ("from_state", "from_state TEXT"),
+                ("to_state", "to_state TEXT NOT NULL DEFAULT ''"),
+                ("reason_code", "reason_code TEXT NOT NULL DEFAULT ''"),
+                ("event_json", "event_json TEXT NOT NULL DEFAULT '{}'"),
+                ("created_at", "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP"),
+            ))
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS strategy2_portfolios (
+                    strategy_version TEXT NOT NULL,
+                    experiment_id TEXT NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    cash REAL NOT NULL CHECK(cash >= 0),
+                    initial_cash REAL NOT NULL CHECK(initial_cash > 0),
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY(strategy_version, experiment_id, user_id)
+                )
+            ''')
+            ensure_columns("strategy2_portfolios", (
+                ("strategy_version", "strategy_version TEXT NOT NULL DEFAULT ''"),
+                ("experiment_id", "experiment_id TEXT NOT NULL DEFAULT ''"),
+                ("user_id", "user_id INTEGER NOT NULL DEFAULT 0"),
+                ("cash", "cash REAL NOT NULL DEFAULT 0"),
+                ("initial_cash", "initial_cash REAL NOT NULL DEFAULT 1"),
+                ("updated_at", "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP"),
+            ))
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS strategy2_positions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    strategy_version TEXT NOT NULL,
+                    experiment_id TEXT NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    pair TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    quantity REAL NOT NULL CHECK(quantity >= 0),
+                    avg_price REAL NOT NULL CHECK(avg_price >= 0),
+                    cost_basis REAL NOT NULL CHECK(cost_basis >= 0),
+                    fees REAL NOT NULL CHECK(fees >= 0),
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(strategy_version, experiment_id, user_id, pair)
+                )
+            ''')
+            ensure_columns("strategy2_positions", (
+                ("strategy_version", "strategy_version TEXT NOT NULL DEFAULT ''"),
+                ("experiment_id", "experiment_id TEXT NOT NULL DEFAULT ''"),
+                ("user_id", "user_id INTEGER NOT NULL DEFAULT 0"),
+                ("pair", "pair TEXT NOT NULL DEFAULT ''"),
+                ("state", "state TEXT NOT NULL DEFAULT ''"),
+                ("quantity", "quantity REAL NOT NULL DEFAULT 0"),
+                ("avg_price", "avg_price REAL NOT NULL DEFAULT 0"),
+                ("cost_basis", "cost_basis REAL NOT NULL DEFAULT 0"),
+                ("fees", "fees REAL NOT NULL DEFAULT 0"),
+                ("updated_at", "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP"),
+            ))
+            cursor.execute('''CREATE INDEX IF NOT EXISTS idx_strategy2_decisions_snapshot
+                ON strategy2_decisions(strategy_version, experiment_id, snapshot_id)''')
+            cursor.execute('''CREATE INDEX IF NOT EXISTS idx_strategy2_events_position
+                ON strategy2_state_events(strategy_version, experiment_id, user_id, pair, id)''')
+            cursor.execute('''CREATE INDEX IF NOT EXISTS idx_strategy2_positions_state
+                ON strategy2_positions(strategy_version, experiment_id, state)''')
 
             # Telegram Access Control (whitelist + invite registration)
             cursor.execute('''
