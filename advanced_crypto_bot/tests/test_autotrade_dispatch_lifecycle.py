@@ -2,7 +2,7 @@ import unittest
 import tempfile
 
 from autotrade.contracts import TradeIntent, acquire_process_singleton
-from autotrade.runtime import _classify_autotrade_block_reason
+from autotrade.runtime import _classify_autotrade_block_reason, classify_autotrade_block_reason
 
 
 class TestTradeIntent(unittest.TestCase):
@@ -18,10 +18,25 @@ class TestTradeIntent(unittest.TestCase):
             "SIGNAL_INVALID: recommendation missing": "SIGNAL_INVALID",
             "DUPLICATE_POSITION: already open": "DUPLICATE_POSITION",
             "MARKET_INTELLIGENCE: MI_FILTER": "MARKET_INTELLIGENCE",
+            "[META_LABEL] prob_good_trade 20% < 55%": "META_LABEL",
+            "[CALIBRATION] confidence overstates good-rate": "CALIBRATION",
+            "DRAWDOWN: maximum drawdown exceeded": "RISK_DRAWDOWN",
+            "Daily trade limit reached: 50/50": "DAILY_TRADE_LIMIT",
+            "Correlated pair ethidr traded 30 min ago. Wait for cooldown.": "CORRELATION_COOLDOWN",
+            "Risk-reward ratio too low: 1.00 < 1.50": "RISK_REWARD",
+            "Error calculating risk metrics": "INTERNAL_ERROR",
+            "Invalid signal format": "SIGNAL_INVALID",
+            "Invalid price": "PRICE_INVALID",
         }
         for reason, bucket in expected.items():
             with self.subTest(reason=reason):
                 self.assertEqual(_classify_autotrade_block_reason(reason), bucket)
+
+    def test_unknown_reason_is_an_explicit_integrity_failure(self):
+        self.assertEqual(
+            classify_autotrade_block_reason("unexpected branch without taxonomy"),
+            "UNCLASSIFIED_INTERNAL_ERROR",
+        )
     def test_exact_semantic_payload_is_preserved(self):
         raw = {"signal_id": "x", "pair": "btc_idr", "signal_type": "BUY",
                "confidence": .7, "price": 100, "created_at": 1_800_000_000,

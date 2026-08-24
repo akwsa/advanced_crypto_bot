@@ -105,9 +105,11 @@ def _check_pair_loss_streak(bot, pair_key: str) -> bool:
     return False
 
 
-def _classify_autotrade_block_reason(reason):
-    """Classify a blocked entry reason into a compact diagnostic bucket."""
+def classify_autotrade_block_reason(reason):
+    """Return a stable terminal reason code for a runtime block message."""
     text = str(reason or "").upper()
+    if not text.strip():
+        return "UNCLASSIFIED_INTERNAL_ERROR"
     if "ENTRY_QUALITY" in text:
         return "ENTRY_QUALITY"
     if "NO OPEN POSITION" in text or "NO_OPEN_POSITION" in text:
@@ -122,8 +124,12 @@ def _classify_autotrade_block_reason(reason):
         return "LIQUIDITY"
     if "BLACKLIST" in text or "LOSS STREAK" in text:
         return "PAIR_GUARD"
-    if "SIGNAL_UNAVAILABLE" in text or "SIGNAL_INVALID" in text:
+    if "SIGNAL_UNAVAILABLE" in text:
+        return "SIGNAL_UNAVAILABLE"
+    if "SIGNAL_INVALID" in text or "INVALID SIGNAL FORMAT" in text or "NOT STRONG ENOUGH" in text:
         return "SIGNAL_INVALID"
+    if text.strip() == "INVALID PRICE":
+        return "PRICE_INVALID"
     if "NON_ACTIONABLE_SIGNAL" in text:
         return "NON_ACTIONABLE_SIGNAL"
     if "DUPLICATE_SIGNAL" in text:
@@ -136,6 +142,8 @@ def _classify_autotrade_block_reason(reason):
         return "WATCH_ONLY"
     if "LEDGER_UNAVAILABLE" in text:
         return "INTERNAL_ERROR"
+    if "ERROR CHECKING" in text or "INVALID RISK CALCULATION" in text or "ERROR CALCULATING RISK" in text:
+        return "INTERNAL_ERROR"
     if "COST_AWARE" in text or "ROUND-TRIP COST" in text:
         return "COST_AWARE"
     if "V4_FILTER" in text or "BAD_BUY" in text or "BAD_SELL" in text:
@@ -144,21 +152,44 @@ def _classify_autotrade_block_reason(reason):
         return "R/R_FLOOR"
     if "CVAR" in text:
         return "CVAR"
+    if "VAR GATE" in text:
+        return "VAR"
+    if "CORRELATED PAIR" in text and "COOLDOWN" in text:
+        return "CORRELATION_COOLDOWN"
     if "CORREL" in text:
         return "CORRELATION"
     if "CHASE" in text:
         return "CHASE_PREVENTION"
     if "DRAWDOWN" in text:
-        return "DRAWDOWN"
+        return "RISK_DRAWDOWN"
     if "DAILY LOSS" in text or "MAX_DAILY_LOSS" in text:
-        return "DAILY_LOSS"
+        return "RISK_DAILY_LOSS"
+    if "DAILY TRADE LIMIT" in text:
+        return "DAILY_TRADE_LIMIT"
+    if "OUTSIDE TRADING HOURS" in text:
+        return "TRADING_HOURS"
+    if "ALREADY HAVE POSITION" in text:
+        return "DUPLICATE_POSITION"
+    if "INSUFFICIENT BALANCE" in text:
+        return "POSITION_SIZING"
     if "MAKER EDGE" in text or "ENTRY ZONE" in text:
         return "ENTRY_EDGE"
     if "PAIR_FILTER" in text or "PROFIT_FACTOR" in text:
         return "PAIR_FILTER"
+    if "RISK-REWARD RATIO TOO LOW" in text:
+        return "RISK_REWARD"
+    if "META_LABEL" in text:
+        return "META_LABEL"
+    if "CALIBRATION" in text:
+        return "CALIBRATION"
     if "MI FILTER" in text or "MI_FILTER" in text or "MARKET INTELLIGENCE" in text or "MARKET_INTELLIGENCE" in text:
         return "MARKET_INTELLIGENCE"
-    return "OTHER"
+    return "UNCLASSIFIED_INTERNAL_ERROR"
+
+
+# Compatibility alias for existing callers/tests. New code should use the
+# public, side-effect-free classifier above.
+_classify_autotrade_block_reason = classify_autotrade_block_reason
 
 
 def _remember_autotrade_block_reason(bot, pair, reason):

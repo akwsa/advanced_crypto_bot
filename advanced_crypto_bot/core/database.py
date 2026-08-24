@@ -15,6 +15,91 @@ import math
 
 logger = logging.getLogger('crypto_bot')
 
+AUTOTRADE_EXECUTED_STATUSES = frozenset({'FILLED', 'PENDING'})
+AUTOTRADE_TERMINAL_STATUSES = frozenset({'FILLED', 'NO_ENTRY', 'REJECTED', 'CANCELLED', 'ERROR_TERMINAL'})
+AUTOTRADE_GENERIC_REASON_CODES = frozenset({
+    '', 'OTHER', 'NO_ORDER_CREATED', 'UNCLASSIFIED_INTERNAL_ERROR',
+})
+
+
+def build_autotrade_funnel_report(conn, *, user_id=None, start_at=None, end_at=None):
+    """Aggregate durable intent outcomes without mutating the database."""
+    clauses = []
+    params = []
+    if user_id is not None:
+        clauses.append('user_id = ?')
+        params.append(int(user_id))
+    if start_at is not None:
+        clauses.append('created_at >= ?')
+        params.append(str(start_at))
+    if end_at is not None:
+        clauses.append('created_at < ?')
+        params.append(str(end_at))
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ''
+    rows = conn.execute(f'''
+        SELECT status, COALESCE(reason_code, '') AS reason_code,
+               lower(replace(replace(pair, '/', ''), '_', '')) AS pair,
+               COUNT(*) AS count
+        FROM autotrade_intents
+        {where}
+        GROUP BY status, COALESCE(reason_code, ''),
+                 lower(replace(replace(pair, '/', ''), '_', ''))
+        ORDER BY status, reason_code, pair
+    ''', params).fetchall()
+
+    status_counts = {}
+    reason_counts = {}
+    pair_counts = {}
+    actionable_total = 0
+    generic_total = 0
+    for row in rows:
+        status = str(row[0] or '')
+        reason_code = str(row[1] or '').strip().upper()
+        pair = str(row[2] or '')
+        count = int(row[3])
+        actionable_total += count
+        status_counts[status] = status_counts.get(status, 0) + count
+        reason_counts[reason_code] = reason_counts.get(reason_code, 0) + count
+        pair_counts[pair] = pair_counts.get(pair, 0) + count
+        if reason_code in AUTOTRADE_GENERIC_REASON_CODES:
+            generic_total += count
+
+    unattributed_total = 0
+    if user_id is not None:
+        attribution_clauses = ['user_id IS NULL']
+        attribution_params = []
+        if start_at is not None:
+            attribution_clauses.append('created_at >= ?')
+            attribution_params.append(str(start_at))
+        if end_at is not None:
+            attribution_clauses.append('created_at < ?')
+            attribution_params.append(str(end_at))
+        unattributed_total = int(conn.execute(
+            f"SELECT COUNT(*) FROM autotrade_intents WHERE {' AND '.join(attribution_clauses)}",
+            attribution_params,
+        ).fetchone()[0])
+
+    executed_total = sum(status_counts.get(status, 0) for status in AUTOTRADE_EXECUTED_STATUSES)
+    terminal_total = sum(status_counts.get(status, 0) for status in AUTOTRADE_TERMINAL_STATUSES)
+    return {
+        'window': {'start_at': start_at, 'end_at': end_at, 'user_id': user_id},
+        'totals': {
+            'actionable_total': actionable_total,
+            'executed_total': executed_total,
+            'terminal_total': terminal_total,
+            'conversion_rate': executed_total / actionable_total if actionable_total else 0.0,
+            'terminal_coverage_rate': terminal_total / actionable_total if actionable_total else 1.0,
+        },
+        'integrity': {
+            'generic_total': generic_total,
+            'generic_rate': generic_total / actionable_total if actionable_total else 0.0,
+            'excluded_unattributed_total': unattributed_total,
+        },
+        'by_status': dict(sorted(status_counts.items())),
+        'by_reason': dict(sorted(reason_counts.items())),
+        'by_pair': dict(sorted(pair_counts.items())),
+    }
+
 # Python 3.12 deprecates the default datetime adapter for sqlite3.
 # Register explicit ISO 8601 adapters so callers can keep passing datetime/date
 # objects directly without triggering DeprecationWarning.
@@ -392,12 +477,17 @@ class Database:
                     reason_code TEXT,
                     reason TEXT,
                     legacy_trade_id INTEGER,
+                    user_id INTEGER,
                     created_at TIMESTAMP NOT NULL,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
             try: cursor.execute('ALTER TABLE autotrade_intents ADD COLUMN legacy_trade_id INTEGER')
             except sqlite3.OperationalError: pass
+            try: cursor.execute('ALTER TABLE autotrade_intents ADD COLUMN user_id INTEGER')
+            except sqlite3.OperationalError: pass
+            cursor.execute('''CREATE INDEX IF NOT EXISTS idx_autotrade_intents_funnel
+                ON autotrade_intents(user_id, created_at, status, reason_code, pair)''')
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS autotrade_orders (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1443,10 +1533,11 @@ class Database:
             conn.execute('''
                 INSERT OR IGNORE INTO autotrade_intents
                 (idempotency_key, correlation_id, version, pair, recommendation,
-                 signal_json, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, datetime(?, 'unixepoch'))
+                 signal_json, user_id, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, datetime(?, 'unixepoch'))
             ''', (payload['idempotency_key'], payload['correlation_id'], payload.get('version', 1),
                   payload['pair'], payload['recommendation'], json.dumps(payload['signal'], sort_keys=True, default=str),
+                  payload.get('user_id'),
                   payload['created_at']))
             return conn.execute(
                 'SELECT * FROM autotrade_intents WHERE idempotency_key = ?',
@@ -1468,6 +1559,13 @@ class Database:
                 'SELECT * FROM autotrade_intents WHERE idempotency_key=?', (idempotency_key,)
             ).fetchone()
 
+    def get_autotrade_funnel_report(self, *, user_id=None, start_at=None, end_at=None):
+        """Return a read-only aggregate of durable autotrade intent outcomes."""
+        with self.get_connection() as conn:
+            return build_autotrade_funnel_report(
+                conn, user_id=user_id, start_at=start_at, end_at=end_at,
+            )
+
     def record_dryrun_fill(self, *, intent, user_id, order_id, pair, side,
                            price, quantity, fee, legacy_trade=None):
         """Atomically record logical order, fill and reconstructed position.
@@ -1487,9 +1585,10 @@ class Database:
             conn.execute('''
                 INSERT OR IGNORE INTO autotrade_intents
                 (idempotency_key, correlation_id, version, pair, recommendation,
-                 signal_json, created_at) VALUES (?, ?, ?, ?, ?, ?, datetime(?, 'unixepoch'))
+                 signal_json, user_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, datetime(?, 'unixepoch'))
             ''', (payload['idempotency_key'], payload['correlation_id'], payload.get('version', 1), pair,
-                  payload['recommendation'], json.dumps(payload['signal'], sort_keys=True, default=str), payload['created_at']))
+                  payload['recommendation'], json.dumps(payload['signal'], sort_keys=True, default=str), user_id,
+                  payload['created_at']))
             intent_row = conn.execute('SELECT * FROM autotrade_intents WHERE idempotency_key=?',
                                       (payload['idempotency_key'],)).fetchone()
             conn.execute('''INSERT OR IGNORE INTO autotrade_orders
@@ -1532,8 +1631,8 @@ class Database:
         with self.get_connection() as conn:
             self._ensure_virtual_cash_account(conn, user_id)
             inserted=conn.execute('''INSERT OR IGNORE INTO autotrade_intents
-                (idempotency_key,correlation_id,version,pair,recommendation,signal_json,created_at)
-                VALUES(?,?,?,?,?,?,datetime(?,'unixepoch'))''',(payload['idempotency_key'],payload['correlation_id'],payload.get('version',1),pair,payload['recommendation'],json.dumps(payload['signal'],sort_keys=True,default=str),payload['created_at'])).rowcount
+                (idempotency_key,correlation_id,version,pair,recommendation,signal_json,user_id,created_at)
+                VALUES(?,?,?,?,?,?,?,datetime(?,'unixepoch'))''',(payload['idempotency_key'],payload['correlation_id'],payload.get('version',1),pair,payload['recommendation'],json.dumps(payload['signal'],sort_keys=True,default=str),user_id,payload['created_at'])).rowcount
             intent_row=conn.execute('SELECT * FROM autotrade_intents WHERE idempotency_key=?',(payload['idempotency_key'],)).fetchone()
             if not inserted and intent_row['status']=='FILLED': return intent_row['legacy_trade_id']
             cur = conn.execute('''INSERT INTO trades(user_id,pair,type,price,amount,total,fee,signal_source,ml_confidence,status,original_total,notes)
@@ -1569,8 +1668,8 @@ class Database:
             conn.execute('''INSERT INTO pending_orders(order_id,pair,user_id,trade_type,limit_price,amount,total,notes)
                 VALUES(?,?,?,'BUY',?,?,?,?)''',(order_id,pair,user_id,limit_price,quantity,total,notes))
             if inject_failure: raise RuntimeError("injected atomic pending failure")
-            conn.execute('''INSERT OR IGNORE INTO autotrade_intents(idempotency_key,correlation_id,version,pair,recommendation,signal_json,status,reason_code,created_at)
-                VALUES(?,?,?,?,?,?,'PENDING','DRYRUN_LIMIT_PENDING',datetime(?,'unixepoch'))''',(payload['idempotency_key'],payload['correlation_id'],payload.get('version',1),pair,payload['recommendation'],json.dumps(payload['signal'],sort_keys=True,default=str),payload['created_at']))
+            conn.execute('''INSERT OR IGNORE INTO autotrade_intents(idempotency_key,correlation_id,version,pair,recommendation,signal_json,user_id,status,reason_code,created_at)
+                VALUES(?,?,?,?,?,?,?,'PENDING','DRYRUN_LIMIT_PENDING',datetime(?,'unixepoch'))''',(payload['idempotency_key'],payload['correlation_id'],payload.get('version',1),pair,payload['recommendation'],json.dumps(payload['signal'],sort_keys=True,default=str),user_id,payload['created_at']))
             iid=conn.execute('SELECT id FROM autotrade_intents WHERE idempotency_key=?',(payload['idempotency_key'],)).fetchone()[0]
             conn.execute("UPDATE autotrade_intents SET status='PENDING',reason_code='DRYRUN_LIMIT_PENDING' WHERE id=?",(iid,))
             conn.execute("INSERT INTO autotrade_orders(intent_id,order_id,pair,user_id,side,order_type,limit_price,quantity,total,status) VALUES(?,?,?,?,'BUY','DRY_RUN_LIMIT',?,?,?,'PENDING')",(iid,order_id,pair,user_id,limit_price,quantity,total))
@@ -1685,10 +1784,11 @@ class Database:
         payload = intent.to_dict() if hasattr(intent, "to_dict") else dict(intent)
         with self.get_connection() as conn:
             conn.execute('''INSERT OR IGNORE INTO autotrade_intents
-                (idempotency_key,correlation_id,version,pair,recommendation,signal_json,created_at)
-                VALUES (?,?,?,?,?,?,datetime(?,'unixepoch'))''',
+                (idempotency_key,correlation_id,version,pair,recommendation,signal_json,user_id,created_at)
+                VALUES (?,?,?,?,?,?,?,datetime(?,'unixepoch'))''',
                 (payload['idempotency_key'], payload['correlation_id'], payload.get('version', 1), pair,
-                 payload['recommendation'], json.dumps(payload['signal'], sort_keys=True, default=str), payload['created_at']))
+                 payload['recommendation'], json.dumps(payload['signal'], sort_keys=True, default=str), user_id,
+                 payload['created_at']))
             row = conn.execute('SELECT * FROM autotrade_intents WHERE idempotency_key=?',
                                (payload['idempotency_key'],)).fetchone()
             conn.execute('''INSERT OR IGNORE INTO autotrade_orders
@@ -1729,7 +1829,7 @@ class Database:
                 return False
             # Synthetic sell intent/order keeps the normalized journal complete.
             key = f"sell:{fill_key}"
-            conn.execute("INSERT INTO autotrade_intents(idempotency_key,correlation_id,version,pair,recommendation,signal_json,status,reason_code,created_at) VALUES(?,?,1,?,'SELL','{}','FILLED','DRYRUN_SELL_FILL',CURRENT_TIMESTAMP)", (key,key,pair))
+            conn.execute("INSERT INTO autotrade_intents(idempotency_key,correlation_id,version,pair,recommendation,signal_json,user_id,status,reason_code,created_at) VALUES(?,?,1,?,'SELL','{}',?,'FILLED','DRYRUN_SELL_FILL',CURRENT_TIMESTAMP)", (key,key,pair,user_id))
             iid = conn.execute('SELECT id FROM autotrade_intents WHERE idempotency_key=?',(key,)).fetchone()[0]
             conn.execute("INSERT INTO autotrade_orders(intent_id,order_id,pair,user_id,side,order_type,limit_price,quantity,total,status) VALUES(?,?,?,?,'SELL','DRY_RUN',?,?,?,'FILLED')",(iid,order_id,pair,user_id,price,quantity,price*quantity))
             oid=conn.execute('SELECT id FROM autotrade_orders WHERE intent_id=?',(iid,)).fetchone()[0]
@@ -1767,7 +1867,7 @@ class Database:
                 (remain,remain*float(legacy['price']),legacy_status,legacy_status,pnl,pnl_pct,pnl,reason,trade_id))
             if inject_failure: raise RuntimeError("injected atomic sell failure")
             key=f"sell:{fill_key}"
-            conn.execute("INSERT INTO autotrade_intents(idempotency_key,correlation_id,version,pair,recommendation,signal_json,status,reason_code,created_at,legacy_trade_id) VALUES(?,?,1,?,'SELL','{}','FILLED','DRYRUN_SELL_FILL',CURRENT_TIMESTAMP,?)",(key,key,pair,trade_id))
+            conn.execute("INSERT INTO autotrade_intents(idempotency_key,correlation_id,version,pair,recommendation,signal_json,user_id,status,reason_code,created_at,legacy_trade_id) VALUES(?,?,1,?,'SELL','{}',?,'FILLED','DRYRUN_SELL_FILL',CURRENT_TIMESTAMP,?)",(key,key,pair,user_id,trade_id))
             iid=conn.execute('SELECT id FROM autotrade_intents WHERE idempotency_key=?',(key,)).fetchone()[0]
             conn.execute("INSERT INTO autotrade_orders(intent_id,order_id,pair,user_id,side,order_type,limit_price,quantity,total,status) VALUES(?,?,?,?,'SELL','DRY_RUN',?,?,?,'FILLED')",(iid,order_id,pair,user_id,sell_price,quantity,sell_price*quantity))
             oid=conn.execute('SELECT id FROM autotrade_orders WHERE intent_id=?',(iid,)).fetchone()[0]

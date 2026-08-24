@@ -78,6 +78,7 @@ from autotrade.runtime import (
     get_support_resistance_for_pair,
     monitor_strong_signal,
     process_price_update_signal_tasks,
+    classify_autotrade_block_reason,
     _is_price_sane_for_pair,
 )
 from scalper.scalper_module import ScalperModule  # Scalper integration
@@ -1430,9 +1431,10 @@ class AdvancedCryptoBot:
                                 block = getattr(self, "_autotrade_block_reasons", {}).get(
                                     str(pair).lower().replace("/", "").replace("_", ""), {}
                                 )
-                                reason = block.get("reason") or "Runtime completed without order or fill"
+                                reason = block.get("reason") or "Runtime completed without a classified terminal decision"
+                                reason_code = block.get("bucket") or classify_autotrade_block_reason(reason)
                                 decision = {
-                                    "status": "NO_ENTRY", "reason_code": block.get("bucket") or "NO_ORDER_CREATED",
+                                    "status": "NO_ENTRY", "reason_code": reason_code,
                                     "reason": reason, "correlation_id": intent.correlation_id,
                                     "idempotency_key": intent.idempotency_key,
                                 }
