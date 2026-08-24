@@ -1606,9 +1606,75 @@ class Database:
             return trade_id
 
     def get_autotrade_position(self, pair, user_id):
+        pair_key = str(pair).replace('/', '').replace('_', '').lower()
         with self.get_connection() as conn:
-            return conn.execute('SELECT * FROM autotrade_positions WHERE pair=? AND user_id=?',
-                                (pair, user_id)).fetchone()
+            return conn.execute('''
+                SELECT * FROM autotrade_positions
+                WHERE lower(replace(replace(pair, '/', ''), '_', ''))=? AND user_id=?
+            ''', (pair_key, user_id)).fetchone()
+
+    def get_open_autotrade_positions(self, user_id):
+        """Return canonical normalized positions that still carry inventory."""
+        with self.get_connection() as conn:
+            return conn.execute('''
+                SELECT * FROM autotrade_positions
+                WHERE user_id=? AND status='OPEN' AND quantity>1e-12
+                ORDER BY pair
+            ''', (user_id,)).fetchall()
+
+    def audit_autotrade_projection_drift(self, user_id):
+        """Read-only comparison of legacy and normalized open-position state."""
+        with self.get_connection() as conn:
+            legacy_rows = conn.execute('''
+                SELECT lower(replace(replace(pair, '/', ''), '_', '')) AS pair,
+                       COUNT(*) AS open_count,
+                       COALESCE(SUM(amount), 0) AS quantity
+                FROM trades
+                WHERE user_id=? AND signal_source='auto' AND status='OPEN'
+                GROUP BY lower(replace(replace(pair, '/', ''), '_', ''))
+            ''', (user_id,)).fetchall()
+            normalized_rows = conn.execute('''
+                SELECT lower(replace(replace(pair, '/', ''), '_', '')) AS pair,
+                       quantity, cost_basis, fees
+                FROM autotrade_positions
+                WHERE user_id=? AND status='OPEN' AND quantity>1e-12
+            ''', (user_id,)).fetchall()
+            balance_row = conn.execute(
+                'SELECT balance FROM users WHERE user_id=?', (user_id,)
+            ).fetchone()
+            peak_row = conn.execute(
+                'SELECT equity_peak FROM drawdown_state WHERE user_id=?', (user_id,)
+            ).fetchone()
+
+        legacy = {row['pair']: dict(row) for row in legacy_rows}
+        normalized = {row['pair']: dict(row) for row in normalized_rows}
+        mismatches = []
+        for pair in sorted(set(legacy) | set(normalized)):
+            legacy_open = pair in legacy
+            normalized_open = pair in normalized
+            legacy_qty = float(legacy.get(pair, {}).get('quantity') or 0)
+            normalized_qty = float(normalized.get(pair, {}).get('quantity') or 0)
+            if legacy_open != normalized_open or not math.isclose(
+                legacy_qty, normalized_qty, rel_tol=1e-9, abs_tol=1e-12
+            ):
+                mismatches.append({
+                    'pair': pair,
+                    'legacy_open': legacy_open,
+                    'legacy_quantity': legacy_qty,
+                    'normalized_open': normalized_open,
+                    'normalized_quantity': normalized_qty,
+                })
+        return {
+            'user_id': user_id,
+            'cash': float(balance_row['balance']) if balance_row else None,
+            'equity_peak': float(peak_row['equity_peak']) if peak_row else None,
+            'legacy_open_count': len(legacy),
+            'normalized_open_count': len(normalized),
+            'normalized_open_cost_basis': sum(
+                float(row['cost_basis']) for row in normalized.values()
+            ),
+            'mismatches': mismatches,
+        }
 
     def record_dryrun_pending(self, *, intent, user_id, order_id, pair, side,
                               limit_price, quantity):
@@ -1652,7 +1718,10 @@ class Database:
             raise ValueError("invalid sell invariant")
         with self.get_connection() as conn:
             self._ensure_virtual_cash_account(conn, user_id)
-            pos = conn.execute('SELECT * FROM autotrade_positions WHERE pair=? AND user_id=?', (pair,user_id)).fetchone()
+            pair_key = str(pair).replace('/', '').replace('_', '').lower()
+            pos = conn.execute('''SELECT * FROM autotrade_positions
+                WHERE lower(replace(replace(pair, '/', ''), '_', ''))=? AND user_id=?''',
+                (pair_key, user_id)).fetchone()
             if not pos or quantity > float(pos['quantity']) + 1e-12:
                 raise ValueError("sell exceeds open position")
             exists = conn.execute('SELECT 1 FROM autotrade_fills WHERE fill_key=?', (fill_key,)).fetchone()
@@ -1681,9 +1750,13 @@ class Database:
         with self.get_connection() as conn:
             self._ensure_virtual_cash_account(conn, user_id)
             legacy=conn.execute("SELECT * FROM trades WHERE id=? AND status='OPEN'",(trade_id,)).fetchone()
-            pos=conn.execute("SELECT * FROM autotrade_positions WHERE pair=? AND user_id=? AND status='OPEN'",(pair,user_id)).fetchone()
+            pair_key = str(pair).replace('/', '').replace('_', '').lower()
+            pos=conn.execute('''SELECT * FROM autotrade_positions
+                WHERE lower(replace(replace(pair, '/', ''), '_', ''))=?
+                  AND user_id=? AND status='OPEN' ''',(pair_key,user_id)).fetchone()
             if not legacy or not pos: return False
-            if legacy['user_id'] != user_id or legacy['pair'] != pair:
+            legacy_pair_key = str(legacy['pair']).replace('/', '').replace('_', '').lower()
+            if legacy['user_id'] != user_id or legacy_pair_key != pair_key:
                 raise ValueError('legacy trade ownership mismatch')
             if quantity>float(pos['quantity'])+1e-12: raise ValueError("sell exceeds normalized position")
             if conn.execute('SELECT 1 FROM autotrade_fills WHERE fill_key=?',(fill_key,)).fetchone(): return False

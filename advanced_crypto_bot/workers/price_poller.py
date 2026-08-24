@@ -197,6 +197,8 @@ class PricePoller:
             # Update price cache (bot's internal cache)
             self.bot.price_data[pair] = {
                 'last': last_price,
+                'bid': ticker.get('bid'),
+                'ask': ticker.get('ask'),
                 'volume': volume,
                 'change_percent': change_pct,
                 'timestamp': datetime.now()
@@ -304,6 +306,8 @@ class PricePoller:
             # Update price cache (bot's internal cache)
             self.bot.price_data[pair] = {
                 'last': last_price,
+                'bid': ticker.get('bid'),
+                'ask': ticker.get('ask'),
                 'volume': volume,
                 'change_percent': change_pct,
                 'timestamp': datetime.now()

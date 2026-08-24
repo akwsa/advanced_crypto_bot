@@ -8644,54 +8644,71 @@ It uses its own analysis (RSI, MACD, Volume, MA, Bollinger).
     # =====================================================================
 
     def _calculate_equity(self, user_id):
-        """Calculate total equity = cash balance + current value of open positions."""
+        """Return canonical dry-run equity, or None when a position cannot be marked."""
+        valuation = self._calculate_canonical_equity(user_id)
+        return valuation['equity'] if valuation['available'] else None
+
+    def _calculate_canonical_equity(self, user_id, now=None):
+        """Value normalized positions from fresh executable bids only."""
         try:
-            balance = self.db.get_balance(user_id)
-            open_trades = self.db.get_open_trades(user_id)
-            open_value = 0.0
-            for trade in open_trades:
-                pair = trade['pair']
-                amount = float(trade['amount'])
-                # Get current price from cache or API
-                current_price = self.price_data.get(pair, {}).get('last')
-                if not current_price:
-                    try:
-                        ticker = self.indodax.get_ticker(pair)
-                        current_price = ticker['last'] if ticker else float(trade['price'])
-                    except Exception:
-                        current_price = float(trade['price'])
-                open_value += current_price * amount
-            return balance + open_value
+            from autotrade.valuation import value_normalized_equity
+
+            now_ts = float(now if now is not None else time.time())
+            cash = float(self.db.get_balance(user_id))
+            positions = self.db.get_open_autotrade_positions(user_id)
+            max_age = float(getattr(Config, 'AUTOTRADE_EQUITY_MARK_MAX_AGE_SECONDS', 300) or 300)
+            return value_normalized_equity(
+                cash=cash,
+                positions=positions,
+                price_data=self.price_data,
+                now_ts=now_ts,
+                max_age_seconds=max_age,
+            )
         except Exception as e:
-            logger.error(f"❌ Error calculating equity: {e}")
-            return self.db.get_balance(user_id)
+            logger.error(f"❌ Error calculating canonical equity: {e}")
+            return {
+                'available': False,
+                'equity': None,
+                'cash': None,
+                'open_value': None,
+                'marks': [],
+                'unavailable': [{'pair': None, 'reason': 'valuation_error', 'error': str(e)}],
+            }
 
     def _check_max_drawdown(self, user_id):
         """
         Check if equity drawdown from peak exceeds limit.
         Returns (allowed: bool, message: str).
-        If drawdown exceeds limit, auto-trade is stopped globally.
+        If drawdown exceeds limit, new entries are blocked while exits remain active.
         """
         try:
-            current_equity = self._calculate_equity(user_id)
+            valuation = self._calculate_canonical_equity(user_id)
+            if not valuation['available']:
+                self.entry_circuit_breaker_active = True
+                reasons = ', '.join(
+                    f"{item.get('pair') or 'portfolio'}:{item['reason']}"
+                    for item in valuation['unavailable']
+                )
+                return False, f"Equity unavailable ({reasons})"
+            current_equity = valuation['equity']
             peak = self.db.get_equity_peak(user_id)
 
             # Initialize peak if not set or equity is higher
             if peak is None or current_equity > peak:
                 self.db.set_equity_peak(user_id, current_equity)
+                self.entry_circuit_breaker_active = False
                 logger.info(f"📈 Equity peak updated for user {user_id}: {current_equity:,.0f}")
                 return True, "Peak updated"
 
             drawdown = (peak - current_equity) / peak
             if drawdown >= Config.MAX_DRAWDOWN_PCT:
-                self.is_trading = False
+                self.entry_circuit_breaker_active = True
                 msg = (
                     f"🚨 <b>CIRCUIT BREAKER TRIGGERED</b>\n\n"
                     f"📉 Drawdown: <code>{drawdown:.1%}</code> (limit <code>{Config.MAX_DRAWDOWN_PCT:.1%}</code>)\n"
                     f"💰 Peak: <code>{Utils.format_currency(peak)}</code>\n"
                     f"💰 Now: <code>{Utils.format_currency(current_equity)}</code>\n\n"
-                    f"⛔ Auto-trade has been STOPPED.\n"
-                    f"Use <code>/reset_drawdown</code> to re-enable after review."
+                    f"⛔ New entries are blocked; protective exits remain active."
                 )
                 logger.error(f"[CIRCUIT_BREAKER] {msg}")
                 # Notify admins asynchronously
@@ -8706,10 +8723,12 @@ It uses its own analysis (RSI, MACD, Volume, MA, Bollinger).
                         pass
                 return False, f"Drawdown {drawdown:.1%} exceeds limit"
 
+            self.entry_circuit_breaker_active = False
             return True, f"Drawdown {drawdown:.1%} (limit {Config.MAX_DRAWDOWN_PCT:.1%})"
         except Exception as e:
             logger.error(f"❌ Error in max drawdown check: {e}")
-            return True, "Check error, allowing trade"
+            self.entry_circuit_breaker_active = True
+            return False, "Equity check error; new entries blocked"
 
     async def cmd_reset_drawdown(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Admin command: reset equity peak and re-enable auto-trade."""
@@ -8717,9 +8736,20 @@ It uses its own analysis (RSI, MACD, Volume, MA, Bollinger).
             await update.message.reply_text("❌ Admin only!")
             return
         user_id = list(self.subscribers.keys())[0] if self.subscribers else update.effective_user.id
-        current_equity = self._calculate_equity(user_id)
+        valuation = self._calculate_canonical_equity(user_id)
+        if not valuation['available']:
+            reasons = ', '.join(
+                f"{item.get('pair') or 'portfolio'}:{item['reason']}"
+                for item in valuation['unavailable']
+            )
+            await update.message.reply_text(
+                f"❌ Drawdown reset ditolak: canonical equity tidak tersedia ({reasons})."
+            )
+            return
+        current_equity = valuation['equity']
         self.db.set_equity_peak(user_id, current_equity)
         self.is_trading = True
+        self.entry_circuit_breaker_active = False
         await update.message.reply_text(
             f"✅ <b>Drawdown Reset</b>\n\n"
             f"💰 New equity peak: <code>{Utils.format_currency(current_equity)}</code>\n"

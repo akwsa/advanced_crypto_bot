@@ -115,6 +115,9 @@ class Config:
     AUTO_TRADE_DRY_RUN = os.getenv('AUTO_TRADE_DRY_RUN', 'true').lower() == 'true'  # True = simulation mode
     DRY_RUN_MAX_TOTAL_IDR = _safe_float_env('DRY_RUN_MAX_TOTAL_IDR', 2_000_000)
     AUTOTRADE_SIGNAL_MAX_AGE_SECONDS = _safe_float_env('AUTOTRADE_SIGNAL_MAX_AGE_SECONDS', 900)
+    AUTOTRADE_EQUITY_MARK_MAX_AGE_SECONDS = _safe_float_env(
+        'AUTOTRADE_EQUITY_MARK_MAX_AGE_SECONDS', 300
+    )
     AUTOTRADE_WORKER_LOCK_PATH = os.getenv('AUTOTRADE_WORKER_LOCK_PATH', '/tmp/advanced_crypto_bot-autotrade-worker.lock')
     AUTOTRADE_LIQUIDITY_WHITELIST = _parse_watch_pairs(os.getenv('AUTOTRADE_LIQUIDITY_WHITELIST', ''))
     AUTOTRADE_LIQUIDITY_BLACKLIST_TTL_MINUTES = _safe_int_env('AUTOTRADE_LIQUIDITY_BLACKLIST_TTL_MINUTES', 180)

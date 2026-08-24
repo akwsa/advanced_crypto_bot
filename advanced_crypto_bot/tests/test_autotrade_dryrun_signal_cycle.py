@@ -17,6 +17,8 @@ class _FakeDryRunDB:
     def __init__(self):
         self.trades = []
         self.closed_trade_ids = []
+        self.normalized_position = None
+        self.normalized_sell_calls = []
 
     def get_pair_performance(self, pair):
         return None
@@ -26,6 +28,15 @@ class _FakeDryRunDB:
 
     def get_open_trades(self, user_id):
         return [trade for trade in self.trades if trade["user_id"] == user_id and trade["status"] == "OPEN"]
+
+    def get_autotrade_position(self, pair, user_id):
+        return self.normalized_position
+
+    def record_dryrun_sell(self, **kwargs):
+        self.normalized_sell_calls.append(kwargs)
+        self.normalized_position['quantity'] = 0.0
+        self.normalized_position['status'] = 'CLOSED'
+        return True
 
     def add_trade(self, user_id, pair, trade_type, price, amount, total, fee, signal_source, ml_confidence, notes=None):
         trade_id = len(self.trades) + 1
@@ -158,6 +169,38 @@ class TestAutoTradeDryRunSignalCycle(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(db.get_open_trades(123), [])
         bot.trading_engine.should_execute_trade.assert_not_called()
+
+    async def test_normalized_only_position_can_exit_while_entry_risk_gates_fail(self):
+        bot, db, optimization = self._make_dryrun_bot("testidr")
+        db.normalized_position = {
+            'id': 7,
+            'pair': 'testidr',
+            'quantity': 2.0,
+            'avg_price': 100.0,
+            'cost_basis': 200.0,
+            'fees': 0.2,
+            'status': 'OPEN',
+        }
+        bot.risk_manager.check_daily_loss_limit = Mock(return_value=(False, 'daily loss'))
+        bot._check_max_drawdown = Mock(return_value=(False, 'drawdown'))
+
+        await self._run_dryrun_signal(
+            bot,
+            'testidr',
+            {
+                'pair': 'testidr',
+                'recommendation': 'SELL',
+                'ml_confidence': 0.8,
+                'price': 110.0,
+                'indicators': {},
+            },
+            optimization,
+        )
+
+        self.assertEqual(db.normalized_position['status'], 'CLOSED')
+        self.assertEqual(len(db.normalized_sell_calls), 1)
+        bot.risk_manager.check_daily_loss_limit.assert_not_called()
+        bot._check_max_drawdown.assert_not_called()
 
     async def test_execution_allowed_false_signal_does_not_open_dryrun_trade(self):
         bot, db, optimization = self._make_dryrun_bot("testidr")
@@ -554,6 +597,10 @@ class TestAutoTradeDryRunSignalCycle(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(len(db.get_open_trades(123)), 1)
 
+            # Entry risk gates may be active, but they must not trap open risk.
+            bot.risk_manager.check_daily_loss_limit = Mock(return_value=(False, "daily loss"))
+            bot._check_max_drawdown = Mock(return_value=(False, "drawdown"))
+
             await check_trading_opportunity(
                 bot,
                 "testidr",
@@ -562,6 +609,8 @@ class TestAutoTradeDryRunSignalCycle(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(db.get_open_trades(123), [])
         self.assertEqual(db.closed_trade_ids, [1])
+        bot.risk_manager.check_daily_loss_limit.assert_not_called()
+        bot._check_max_drawdown.assert_not_called()
         bot.price_monitor.remove_price_level.assert_called_once_with(123, 1)
 
     async def test_watched_buy_signal_auto_promotes_and_saves_dryrun_trade_to_db(self):

@@ -9,6 +9,7 @@
 import asyncio
 import json
 import logging
+import math
 import os
 import random
 import sqlite3
@@ -1246,31 +1247,34 @@ async def _check_trading_opportunity_locked(bot, pair, pair_key, signal):
     else:
         logger.info(f"🔕 Auto-trade signal notification skipped for {pair}: notifications OFF")
 
-    can_trade, reason = bot.risk_manager.check_daily_loss_limit(user_id)
-    if not can_trade:
-        logger.warning(f"⚠️ Trading blocked for {pair}: {reason}")
-        _remember_autotrade_block_reason(bot, pair, f"DAILY_LOSS: {reason}")
-        return
-
-    # Max drawdown circuit breaker
-    dd_allowed, dd_reason = bot._check_max_drawdown(user_id)
-    if not dd_allowed:
-        logger.error(f"🚫 [CIRCUIT_BREAKER] Trading blocked for {pair}: {dd_reason}")
-        _remember_autotrade_block_reason(bot, pair, f"DRAWDOWN: {dd_reason}")
-        return
-
-    # Pair performance filter
-    try:
-        pp = bot.db.get_pair_performance(pair)
-        if pp and pp['profit_factor'] is not None and pp['profit_factor'] < 1.0 and pp['total_trades'] >= 5:
-            logger.info(
-                f"🚫 [PAIR_FILTER] Entry blocked for {pair}: "
-                f"profit_factor={pp['profit_factor']:.2f} (min 1.0) over {pp['total_trades']} trades"
-            )
-            _remember_autotrade_block_reason(bot, pair, "PAIR_FILTER: historical profit factor below minimum")
+    is_entry_signal = signal['recommendation'] in ['BUY', 'STRONG_BUY']
+    if is_entry_signal:
+        can_trade, reason = bot.risk_manager.check_daily_loss_limit(user_id)
+        if not can_trade:
+            logger.warning(f"⚠️ New entry blocked for {pair}: {reason}")
+            _remember_autotrade_block_reason(bot, pair, f"DAILY_LOSS: {reason}")
             return
-    except Exception as e:
-        logger.debug(f"⚠️ Pair performance check skipped for {pair}: {e}")
+
+        # Entry-only circuit breaker. SELL/protective monitoring must remain active.
+        dd_allowed, dd_reason = bot._check_max_drawdown(user_id)
+        if not dd_allowed:
+            logger.error(f"🚫 [CIRCUIT_BREAKER] New entry blocked for {pair}: {dd_reason}")
+            _remember_autotrade_block_reason(bot, pair, f"DRAWDOWN: {dd_reason}")
+            return
+
+    # Pair performance is an entry-quality filter; never use it to trap exits.
+    if is_entry_signal:
+        try:
+            pp = bot.db.get_pair_performance(pair)
+            if pp and pp['profit_factor'] is not None and pp['profit_factor'] < 1.0 and pp['total_trades'] >= 5:
+                logger.info(
+                    f"🚫 [PAIR_FILTER] Entry blocked for {pair}: "
+                    f"profit_factor={pp['profit_factor']:.2f} (min 1.0) over {pp['total_trades']} trades"
+                )
+                _remember_autotrade_block_reason(bot, pair, "PAIR_FILTER: historical profit factor below minimum")
+                return
+        except Exception as e:
+            logger.debug(f"⚠️ Pair performance check skipped for {pair}: {e}")
 
     current_price = _to_positive_float(signal.get("price"))
     if current_price is None:
@@ -2033,10 +2037,29 @@ async def _check_trading_opportunity_locked(bot, pair, pair_key, signal):
 
     elif signal["recommendation"] in ["SELL", "STRONG_SELL"]:
         open_trades = bot.db.get_open_trades(user_id)
-        pair_trades = [t for t in open_trades if t["pair"] == pair]
+        pair_trades = [
+            t for t in open_trades
+            if _normalize_pair(t["pair"]) == _normalize_pair(pair)
+        ]
         if pair_trades:
             logger.info(f"🔴 SELL signal for {pair} - {len(pair_trades)} open position(s) found, executing auto-sell")
             await execute_auto_sell(bot, pair, signal, current_price, user_id, is_dry_run)
+            if is_dry_run and hasattr(bot.db, 'get_autotrade_position'):
+                remaining_legacy = [
+                    t for t in bot.db.get_open_trades(user_id)
+                    if _normalize_pair(t['pair']) == _normalize_pair(pair)
+                ]
+                remaining_normalized = bot.db.get_autotrade_position(pair, user_id)
+                if not remaining_legacy and remaining_normalized \
+                        and remaining_normalized['status'] == 'OPEN' \
+                        and float(remaining_normalized['quantity']) > 1e-12:
+                    logger.warning(
+                        "🧭 [PROJECTION_DRIFT] %s retains normalized inventory after "
+                        "legacy SELL; settling canonical residual", pair
+                    )
+                    await execute_normalized_drift_sell(
+                        bot, pair, signal, current_price, user_id, remaining_normalized
+                    )
             if Config.RL_ENABLED and Config.RL_UPDATE_REWARD:
                 for trade in pair_trades:
                     trade_dict = dict(trade) if hasattr(trade, "keys") else trade
@@ -2047,6 +2070,20 @@ async def _check_trading_opportunity_locked(bot, pair, pair_key, signal):
                         regime_data = detect_market_regime(bot, pair)
                         state = bot._rl_get_state(signal["ml_confidence"], regime_data.get("regime", "RANGE"), "NEUTRAL")
                         bot._rl_update(state, "SELL", reward)
+        elif is_dry_run and hasattr(bot.db, 'get_autotrade_position'):
+            normalized_position = bot.db.get_autotrade_position(pair, user_id)
+            if normalized_position and normalized_position['status'] == 'OPEN' \
+                    and float(normalized_position['quantity']) > 1e-12:
+                logger.warning(
+                    "🧭 [PROJECTION_DRIFT] %s is OPEN only in normalized ledger; "
+                    "executing normalized protective SELL", pair
+                )
+                await execute_normalized_drift_sell(
+                    bot, pair, signal, current_price, user_id, normalized_position
+                )
+            else:
+                logger.info(f"⏸️ SELL signal for {pair} - no open position to sell")
+                _remember_autotrade_block_reason(bot, pair, "NO_OPEN_POSITION: SELL has no position to close")
         else:
             logger.info(f"⏸️ SELL signal for {pair} - no open position to sell")
             _remember_autotrade_block_reason(bot, pair, "NO_OPEN_POSITION: SELL has no position to close")
@@ -2367,7 +2404,10 @@ def detect_market_regime(bot, pair):
 async def execute_auto_sell(bot, pair, signal, current_price, user_id, is_dry_run):
     try:
         open_trades = bot.db.get_open_trades(user_id)
-        pair_trades = [t for t in open_trades if t["pair"] == pair]
+        pair_trades = [
+            t for t in open_trades
+            if _normalize_pair(t["pair"]) == _normalize_pair(pair)
+        ]
         if not pair_trades:
             logger.debug(f"⏸️ No open position for {pair}, skipping SELL")
             return
@@ -2464,6 +2504,61 @@ async def execute_auto_sell(bot, pair, signal, current_price, user_id, is_dry_ru
                     logger.error(f"❌ Auto-sell order failed for {pair}: {result}")
     except Exception as e:
         logger.error(f"❌ Auto-sell execution error for {pair}: {e}")
+
+
+async def execute_normalized_drift_sell(bot, pair, signal, current_price, user_id, position):
+    """Close normalized-only dry-run inventory without replaying a legacy SELL."""
+    try:
+        position = dict(position) if hasattr(position, 'keys') else position
+        quantity = float(position['quantity'])
+        ticker = bot.indodax.get_ticker(pair)
+        sell_price = float(ticker.get('bid') or 0) if ticker else 0.0
+        if not math.isfinite(sell_price) or sell_price <= 0:
+            logger.warning(
+                "⏸️ [PROJECTION_DRIFT] Protective SELL deferred for %s: fresh bid unavailable",
+                pair,
+            )
+            _remember_autotrade_block_reason(
+                bot, pair, "PRICE_INVALID: normalized protective SELL requires fresh bid"
+            )
+            return
+        fee_rate = float(getattr(Config, 'TRADING_FEE_RATE', 0.0) or 0.0)
+        exit_fee = sell_price * quantity * fee_rate
+        fill_key = f"normalized-position:{position['id']}:drift-close:{quantity:.12g}"
+        order_id = f"DRY-DRIFT-SELL-{position['id']}"
+        inserted = bot.db.record_dryrun_sell(
+            fill_key=fill_key,
+            order_id=order_id,
+            pair=pair,
+            user_id=user_id,
+            price=sell_price,
+            quantity=quantity,
+            fee=exit_fee,
+        )
+        if not inserted:
+            return
+        cost_basis = float(position['cost_basis'])
+        known_fees = float(position['fees'])
+        pnl = sell_price * quantity - cost_basis - known_fees - exit_fee
+        pnl_pct = pnl / cost_basis * 100 if cost_basis > 0 else 0.0
+        await bot._broadcast_to_subscribers(pair, f"""
+🧪 **DRY RUN: NORMALIZED PROTECTIVE SELL** 🧪
+
+📊 Pair: `{pair}`
+💰 Price: `{Utils.format_price(sell_price)}` IDR
+📦 Amount: `{quantity}`
+📊 Estimated normalized P&L: `{Utils.format_currency(pnl)}` ({pnl_pct:+.2f}%)
+
+🧭 Legacy projection was already closed; canonical inventory is now settled.
+""")
+        logger.info(
+            "🧪 [DRY RUN] Normalized protective SELL for %s: %s @ %s, P&L=%+.2f%%",
+            pair, quantity, sell_price, pnl_pct,
+        )
+        _record_trade_outcome_to_kelly(bot, pair, pnl_pct)
+    except Exception as e:
+        logger.error(f"❌ Normalized protective sell error for {pair}: {e}")
+
 
 
 def _record_trade_outcome_to_kelly(bot, pair, pnl_pct):
