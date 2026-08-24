@@ -13,6 +13,7 @@ class TestTradeIntent(unittest.TestCase):
             "POSITION_SIZING: invalid calculated size": "POSITION_SIZING",
             "LIQUIDITY: SPREAD_TOO_WIDE": "LIQUIDITY",
             "PAIR_BLACKLIST: temporary blacklist": "PAIR_GUARD",
+            "PAIR_LOSS_STREAK: consecutive loss guard": "PAIR_GUARD",
             "fresh entry price unavailable": "PRICE_INVALID",
             "fresh price deviates 51% from signal price": "PRICE_INVALID",
             "SIGNAL_INVALID: recommendation missing": "SIGNAL_INVALID",
@@ -37,6 +38,19 @@ class TestTradeIntent(unittest.TestCase):
             classify_autotrade_block_reason("unexpected branch without taxonomy"),
             "UNCLASSIFIED_INTERNAL_ERROR",
         )
+
+    def test_pair_loss_streak_code_is_specific_case_insensitive_and_precedence_safe(self):
+        self.assertEqual(
+            classify_autotrade_block_reason(
+                "pair_loss_streak: consecutive loss guard; spread metric unavailable"
+            ),
+            "PAIR_GUARD",
+        )
+        self.assertEqual(
+            classify_autotrade_block_reason("PORTFOLIO_LOSS_STREAK_METRIC_UNAVAILABLE"),
+            "UNCLASSIFIED_INTERNAL_ERROR",
+        )
+
     def test_exact_semantic_payload_is_preserved(self):
         raw = {"signal_id": "x", "pair": "btc_idr", "signal_type": "BUY",
                "confidence": .7, "price": 100, "created_at": 1_800_000_000,

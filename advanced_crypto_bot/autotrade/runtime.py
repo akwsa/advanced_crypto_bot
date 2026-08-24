@@ -110,6 +110,9 @@ def classify_autotrade_block_reason(reason):
     text = str(reason or "").upper()
     if not text.strip():
         return "UNCLASSIFIED_INTERNAL_ERROR"
+    reason_code = text.strip().partition(":")[0].strip()
+    if reason_code == "PAIR_LOSS_STREAK":
+        return "PAIR_GUARD"
     if "ENTRY_QUALITY" in text:
         return "ENTRY_QUALITY"
     if "NO OPEN POSITION" in text or "NO_OPEN_POSITION" in text:
