@@ -112,6 +112,7 @@ class PricePoller:
         """Poll prices for all watched pairs (sequential, original working code)"""
         # Get all watched pairs from bot subscribers + config
         all_pairs = set()
+        canonical_position_pairs = set()
 
         # Pairs from user subscriptions
         for pairs in self.bot.subscribers.values():
@@ -121,8 +122,26 @@ class PricePoller:
         for pair in Config.WATCH_PAIRS:
             all_pairs.add(pair.lower().strip())
 
+        # Canonical open inventory must always receive executable bid/ask marks,
+        # even when a pair has fallen out of the current watchlist. Otherwise a
+        # restart leaves risk equity unavailable and blocks every new entry.
+        try:
+            positions = self.bot.db.get_all_open_autotrade_positions()
+            for position in positions:
+                raw_pair = position['pair'] if hasattr(position, 'keys') else position.get('pair')
+                pair = str(raw_pair or '').lower().replace('/', '').replace('_', '').strip()
+                if pair:
+                    canonical_position_pairs.add(pair)
+                    all_pairs.add(pair)
+        except Exception as exc:
+            logging.getLogger(__name__).warning(
+                "⚠️ Could not load canonical open-position pairs for polling: %s", exc
+            )
+
         # Remove invalid/blacklisted pairs
-        valid_pairs = all_pairs - self.invalid_pairs
+        # Open inventory overrides the invalid-pair cache: repeated public ticker
+        # attempts are safer than permanently losing the position's risk mark.
+        valid_pairs = (all_pairs - self.invalid_pairs) | canonical_position_pairs
 
         # Log if any pairs were filtered out (rate limited)
         filtered_pairs = all_pairs - valid_pairs

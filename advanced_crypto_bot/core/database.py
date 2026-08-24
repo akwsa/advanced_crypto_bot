@@ -1721,6 +1721,15 @@ class Database:
                 ORDER BY pair
             ''', (user_id,)).fetchall()
 
+    def get_all_open_autotrade_positions(self):
+        """Return every normalized position requiring mark-to-market monitoring."""
+        with self.get_connection() as conn:
+            return conn.execute('''
+                SELECT * FROM autotrade_positions
+                WHERE status='OPEN' AND quantity>1e-12
+                ORDER BY user_id, pair
+            ''').fetchall()
+
     def audit_autotrade_projection_drift(self, user_id):
         """Read-only comparison of legacy and normalized open-position state."""
         with self.get_connection() as conn:
