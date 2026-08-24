@@ -874,6 +874,16 @@ class Database:
                 elif isinstance(timestamp, (int, float)):
                     timestamp = pd.to_datetime(timestamp, unit='s')
 
+                # sqlite3 only adapts exact stdlib datetime/date objects. Pandas
+                # Timestamp (including values produced by DataFrame iteration)
+                # is a datetime subclass but is not handled by that adapter.
+                # Persist an ISO string so batch inserts work consistently for
+                # pandas, Python datetime, and parsed string inputs.
+                timestamp = pd.Timestamp(timestamp)
+                if pd.isna(timestamp):
+                    raise ValueError("timestamp is missing or invalid")
+                timestamp = timestamp.isoformat(sep=' ')
+
                 records.append((
                     pair,
                     timestamp,
