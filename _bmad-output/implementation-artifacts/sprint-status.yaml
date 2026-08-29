@@ -32,7 +32,7 @@ development_status:
   2-2-membentuk-executable-market-snapshot-dan-instrument-eligibility: done
   2-3-menjalankan-satu-deterministic-simulator-lifecycle: done
   2-4-menyelesaikan-intent-dan-order-melalui-fill-authoritative-accounting: done
-  2-5-mempertahankan-position-protection-melalui-unified-exit: backlog
+  2-5-mempertahankan-position-protection-melalui-unified-exit: done
   2-6-memulihkan-lifecycle-tanpa-decision-baru: backlog
   2-7-menghasilkan-execution-calibration-evidence: backlog
   epic-2-retrospective: optional
