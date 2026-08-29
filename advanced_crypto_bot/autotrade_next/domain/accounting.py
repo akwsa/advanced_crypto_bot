@@ -71,7 +71,8 @@ class PositionAccount:
             )
             return self, entry
 
-        total_cost_units = quantity.units * price.units
+        raw_cost_units = quantity.units * price.units
+        total_cost_units = raw_cost_units // (10 ** quantity.scale)
         fee_units = fee.units
 
         if is_buy:
