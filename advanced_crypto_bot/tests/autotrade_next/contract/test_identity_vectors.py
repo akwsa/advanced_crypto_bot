@@ -284,7 +284,7 @@ def test_domain_package_only_imports_stdlib_or_relative_domain_modules():
         "unicodedata",
     }
     allowed_relative_by_module = {
-        "__init__": {"accounting", "candidate", "content", "decision", "encoding", "errors", "exit_protection", "identity", "market", "numeric", "policy", "replay", "simulator"},
+        "__init__": {"accounting", "candidate", "content", "decision", "encoding", "errors", "exit_protection", "identity", "market", "numeric", "policy", "recovery", "replay", "simulator"},
         "accounting": {"content", "errors", "numeric"},
         "candidate": {"encoding", "errors", "identity", "market"},
         "content": {"encoding", "errors"},
@@ -296,6 +296,7 @@ def test_domain_package_only_imports_stdlib_or_relative_domain_modules():
         "market": {"content", "encoding", "errors", "numeric"},
         "numeric": {"errors"},
         "policy": {"candidate", "decision", "encoding", "errors", "numeric"},
+        "recovery": {"accounting", "errors", "numeric", "simulator"},
         "replay": {"candidate", "content", "decision", "encoding", "errors", "numeric", "policy"},
         "simulator": {"content", "encoding", "errors", "market", "numeric"},
     }

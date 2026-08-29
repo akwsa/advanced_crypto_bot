@@ -43,6 +43,7 @@ from .market import (
 )
 from .accounting import CashLedgerEntry, MovementType, PositionAccount
 from .exit_protection import ExitDecision, ExitEvaluator, ExitReason, ProtectionState
+from .recovery import LifecycleRecoveryManager, RecoveryAction, RecoveryState
 from .numeric import ScaledInteger
 from .simulator import FeeType, OrderSimulator, OrderStatus, SimulatedFill, SimulatorEvent
 from .policy import (
