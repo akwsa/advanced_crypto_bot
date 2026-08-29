@@ -42,7 +42,7 @@ development_status:
   3-2-mengalokasikan-exposure-dan-reservation-secara-atomik: done
   3-3-menerapkan-portfolio-risk-governor: done
   3-4-menggabungkan-safety-cause-tanpa-premature-clear: done
-  3-5-menjalankan-kill-dan-hard-drawdown-zeroing: backlog
+  3-5-menjalankan-kill-dan-hard-drawdown-zeroing: done
   3-6-menjalankan-degradation-dan-delivery-secara-terisolasi: backlog
   3-7-menyajikan-integrity-cockpit-dan-audited-recovery: backlog
   epic-3-retrospective: optional
