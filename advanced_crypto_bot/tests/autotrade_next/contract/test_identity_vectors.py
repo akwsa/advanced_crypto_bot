@@ -284,7 +284,7 @@ def test_domain_package_only_imports_stdlib_or_relative_domain_modules():
         "unicodedata",
     }
     allowed_relative_by_module = {
-        "__init__": {"accounting", "calibration", "candidate", "comparison", "content", "cutover", "decision", "degradation", "encoding", "errors", "evidence_report", "exit_protection", "experiment", "fact_import", "fencing", "identity", "kill_switch", "legacy_inventory", "market", "migration_gate", "numeric", "policy", "policy_isolation", "portfolio_allocation", "promotion", "recovery", "replay", "risk_governor", "runtime_artifact", "safety_state", "simulator", "trial_ledger"},
+        "__init__": {"accounting", "calibration", "candidate", "comparison", "content", "cutover", "decision", "degradation", "encoding", "errors", "evidence_report", "exit_protection", "experiment", "fact_import", "fencing", "identity", "kill_switch", "legacy_inventory", "market", "migration_gate", "numeric", "policy", "policy_isolation", "portfolio_allocation", "promotion", "recovery", "replay", "risk_governor", "rollback_retention", "runtime_artifact", "safety_state", "simulator", "trial_ledger"},
         "accounting": {"content", "errors", "numeric"},
         "calibration": {"content", "numeric"},
         "candidate": {"encoding", "errors", "identity", "market"},
@@ -313,6 +313,7 @@ def test_domain_package_only_imports_stdlib_or_relative_domain_modules():
         "recovery": {"accounting", "errors", "numeric", "simulator"},
         "replay": {"candidate", "content", "decision", "encoding", "errors", "numeric", "policy"},
         "risk_governor": {"numeric"},
+        "rollback_retention": {"content", "errors", "fencing"},
         "runtime_artifact": {"content", "errors"},
         "safety_state": {"errors"},
         "simulator": {"content", "encoding", "errors", "market", "numeric"},

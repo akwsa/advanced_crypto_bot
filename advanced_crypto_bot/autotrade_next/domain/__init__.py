@@ -61,6 +61,7 @@ from .runtime_artifact import QualifiedRuntimeManifest
 from .migration_gate import MigrationVerificationResult
 from .fact_import import ApprovedExternalFact
 from .cutover import CutoverState, CutoverStep
+from .rollback_retention import AdditiveRollbackRecord
 from .recovery import LifecycleRecoveryManager, RecoveryAction, RecoveryState
 from .numeric import ScaledInteger
 from .simulator import FeeType, OrderSimulator, OrderStatus, SimulatedFill, SimulatorEvent

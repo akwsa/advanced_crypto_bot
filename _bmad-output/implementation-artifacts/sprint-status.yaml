@@ -56,11 +56,11 @@ development_status:
   4-6-mengontrol-promotion-demotion-dan-evidence-cockpit: done
   epic-4-retrospective: optional
 
-  epic-5: in-progress
+  epic-5: done
   5-1-menginventarisasi-seluruh-legacy-authority-dan-fakta: done
   5-2-menghasilkan-qualified-immutable-runtime-artifact: done
   5-3-menjalankan-offline-migration-serta-backup-restore-gate: done
   5-4-mengimpor-fakta-terbukti-dan-mengarantina-ambiguity: done
   5-5-melakukan-stop-the-world-fenced-cutover: done
-  5-6-melakukan-additive-rollback-dan-evidence-retention: backlog
+  5-6-melakukan-additive-rollback-dan-evidence-retention: done
   epic-5-retrospective: optional
