@@ -59,6 +59,7 @@ from .promotion import PolicyAuthorityState, PolicyPromotionRecord
 from .legacy_inventory import LegacyEntityDisposition, LegacyInventoryClassifier, LegacyInventoryRecord
 from .runtime_artifact import QualifiedRuntimeManifest
 from .migration_gate import MigrationVerificationResult
+from .fact_import import ApprovedExternalFact
 from .recovery import LifecycleRecoveryManager, RecoveryAction, RecoveryState
 from .numeric import ScaledInteger
 from .simulator import FeeType, OrderSimulator, OrderStatus, SimulatedFill, SimulatorEvent
