@@ -2117,6 +2117,13 @@ class Database:
                 WHERE user_id = ?
             ''', (user_id,))
             
+            # Ensure user exists in telegram_users to prevent foreign key constraint failures
+            cursor.execute('''
+                INSERT INTO telegram_users (user_id, role, is_active)
+                VALUES (?, 'admin', 1)
+                ON CONFLICT(user_id) DO NOTHING
+            ''', (user_id,))
+
             # Upsert new pairs as active
             activated = 0
             for pair in pairs:
