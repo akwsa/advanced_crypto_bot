@@ -1983,6 +1983,11 @@ class Database:
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute('''
+                INSERT INTO telegram_users (user_id, role, is_active)
+                VALUES (?, 'admin', 1)
+                ON CONFLICT(user_id) DO NOTHING
+            ''', (user_id,))
+            cursor.execute('''
                 INSERT OR REPLACE INTO watchlist (user_id, pair, is_active)
                 VALUES (?, ?, 1)
             ''', (user_id, pair.lower().strip()))
