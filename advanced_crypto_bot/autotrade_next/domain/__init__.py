@@ -52,6 +52,7 @@ from .kill_switch import KillState, KillSwitchStateMachine
 from .degradation import DegradationGovernor, DegradationLevel
 from .experiment import EvidenceSpecification
 from .policy_isolation import PolicyExecutionFrame, PolicyRole
+from .trial_ledger import MaturedOutcomeTaxonomy, TrialLedgerEntry
 from .recovery import LifecycleRecoveryManager, RecoveryAction, RecoveryState
 from .numeric import ScaledInteger
 from .simulator import FeeType, OrderSimulator, OrderStatus, SimulatedFill, SimulatorEvent
