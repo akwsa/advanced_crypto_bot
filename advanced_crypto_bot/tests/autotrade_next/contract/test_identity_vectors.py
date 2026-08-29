@@ -284,7 +284,7 @@ def test_domain_package_only_imports_stdlib_or_relative_domain_modules():
         "unicodedata",
     }
     allowed_relative_by_module = {
-        "__init__": {"accounting", "calibration", "candidate", "content", "decision", "degradation", "encoding", "errors", "exit_protection", "experiment", "fencing", "identity", "kill_switch", "market", "numeric", "policy", "portfolio_allocation", "recovery", "replay", "risk_governor", "safety_state", "simulator"},
+        "__init__": {"accounting", "calibration", "candidate", "content", "decision", "degradation", "encoding", "errors", "exit_protection", "experiment", "fencing", "identity", "kill_switch", "market", "numeric", "policy", "policy_isolation", "portfolio_allocation", "recovery", "replay", "risk_governor", "safety_state", "simulator"},
         "accounting": {"content", "errors", "numeric"},
         "calibration": {"content", "numeric"},
         "candidate": {"encoding", "errors", "identity", "market"},
@@ -301,6 +301,7 @@ def test_domain_package_only_imports_stdlib_or_relative_domain_modules():
         "market": {"content", "encoding", "errors", "numeric"},
         "numeric": {"errors"},
         "policy": {"candidate", "decision", "encoding", "errors", "numeric"},
+        "policy_isolation": {"errors"},
         "portfolio_allocation": {"errors", "numeric"},
         "recovery": {"accounting", "errors", "numeric", "simulator"},
         "replay": {"candidate", "content", "decision", "encoding", "errors", "numeric", "policy"},

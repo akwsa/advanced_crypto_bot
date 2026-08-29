@@ -51,6 +51,7 @@ from .safety_state import SafetyCause, SafetyCauseKind, SafetyScopeLevel, Safety
 from .kill_switch import KillState, KillSwitchStateMachine
 from .degradation import DegradationGovernor, DegradationLevel
 from .experiment import EvidenceSpecification
+from .policy_isolation import PolicyExecutionFrame, PolicyRole
 from .recovery import LifecycleRecoveryManager, RecoveryAction, RecoveryState
 from .numeric import ScaledInteger
 from .simulator import FeeType, OrderSimulator, OrderStatus, SimulatedFill, SimulatorEvent
