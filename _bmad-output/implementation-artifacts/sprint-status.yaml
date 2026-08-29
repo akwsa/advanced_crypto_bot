@@ -37,8 +37,8 @@ development_status:
   2-7-menghasilkan-execution-calibration-evidence: done
   epic-2-retrospective: optional
 
-  epic-3: backlog
-  3-1-menegakkan-fenced-command-authority: backlog
+  epic-3: in-progress
+  3-1-menegakkan-fenced-command-authority: done
   3-2-mengalokasikan-exposure-dan-reservation-secara-atomik: backlog
   3-3-menerapkan-portfolio-risk-governor: backlog
   3-4-menggabungkan-safety-cause-tanpa-premature-clear: backlog
