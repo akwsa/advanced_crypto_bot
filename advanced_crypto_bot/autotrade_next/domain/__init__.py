@@ -55,6 +55,7 @@ from .policy_isolation import PolicyExecutionFrame, PolicyRole
 from .trial_ledger import MaturedOutcomeTaxonomy, TrialLedgerEntry
 from .comparison import CommonComparisonResult
 from .evidence_report import SealedEvidenceReport
+from .promotion import PolicyAuthorityState, PolicyPromotionRecord
 from .recovery import LifecycleRecoveryManager, RecoveryAction, RecoveryState
 from .numeric import ScaledInteger
 from .simulator import FeeType, OrderSimulator, OrderStatus, SimulatedFill, SimulatorEvent
