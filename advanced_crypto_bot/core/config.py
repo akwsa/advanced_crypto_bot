@@ -88,7 +88,8 @@ def is_production_user_id(user_id) -> bool:
 def _filter_admin_ids(ids_list):
     if not ids_list:
         return []
-    return [uid for uid in ids_list if is_production_user_id(uid)]
+    filtered = [uid for uid in ids_list if is_production_user_id(uid)]
+    return filtered if filtered else ids_list
 
 
 def _parse_admin_ids(value):
