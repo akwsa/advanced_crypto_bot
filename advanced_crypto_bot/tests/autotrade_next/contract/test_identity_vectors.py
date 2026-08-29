@@ -284,12 +284,13 @@ def test_domain_package_only_imports_stdlib_or_relative_domain_modules():
         "unicodedata",
     }
     allowed_relative_by_module = {
-        "__init__": {"accounting", "calibration", "candidate", "content", "decision", "encoding", "errors", "exit_protection", "fencing", "identity", "kill_switch", "market", "numeric", "policy", "portfolio_allocation", "recovery", "replay", "risk_governor", "safety_state", "simulator"},
+        "__init__": {"accounting", "calibration", "candidate", "content", "decision", "degradation", "encoding", "errors", "exit_protection", "fencing", "identity", "kill_switch", "market", "numeric", "policy", "portfolio_allocation", "recovery", "replay", "risk_governor", "safety_state", "simulator"},
         "accounting": {"content", "errors", "numeric"},
         "calibration": {"content", "numeric"},
         "candidate": {"encoding", "errors", "identity", "market"},
         "content": {"encoding", "errors"},
         "decision": {"candidate", "encoding", "errors", "identity", "numeric"},
+        "degradation": {"errors"},
         "encoding": {"errors", "numeric"},
         "errors": set(),
         "exit_protection": {"errors", "numeric"},
