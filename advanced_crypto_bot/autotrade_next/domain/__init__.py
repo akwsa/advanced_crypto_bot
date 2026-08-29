@@ -60,6 +60,7 @@ from .legacy_inventory import LegacyEntityDisposition, LegacyInventoryClassifier
 from .runtime_artifact import QualifiedRuntimeManifest
 from .migration_gate import MigrationVerificationResult
 from .fact_import import ApprovedExternalFact
+from .cutover import CutoverState, CutoverStep
 from .recovery import LifecycleRecoveryManager, RecoveryAction, RecoveryState
 from .numeric import ScaledInteger
 from .simulator import FeeType, OrderSimulator, OrderStatus, SimulatedFill, SimulatorEvent

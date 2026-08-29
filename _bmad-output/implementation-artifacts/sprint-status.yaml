@@ -61,6 +61,6 @@ development_status:
   5-2-menghasilkan-qualified-immutable-runtime-artifact: done
   5-3-menjalankan-offline-migration-serta-backup-restore-gate: done
   5-4-mengimpor-fakta-terbukti-dan-mengarantina-ambiguity: done
-  5-5-melakukan-stop-the-world-fenced-cutover: backlog
+  5-5-melakukan-stop-the-world-fenced-cutover: done
   5-6-melakukan-additive-rollback-dan-evidence-retention: backlog
   epic-5-retrospective: optional
