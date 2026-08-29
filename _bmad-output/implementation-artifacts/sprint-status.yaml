@@ -47,8 +47,8 @@ development_status:
   3-7-menyajikan-integrity-cockpit-dan-audited-recovery: done
   epic-3-retrospective: optional
 
-  epic-4: backlog
-  4-1-membekukan-experiment-dan-opportunity-universe: backlog
+  epic-4: in-progress
+  4-1-membekukan-experiment-dan-opportunity-universe: done
   4-2-menjalankan-champion-dan-challenger-secara-terisolasi: backlog
   4-3-menyimpan-trial-dan-matured-outcome-lengkap: backlog
   4-4-menjalankan-leakage-safe-common-comparison: backlog

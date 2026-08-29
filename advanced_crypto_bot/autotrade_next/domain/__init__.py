@@ -50,6 +50,7 @@ from .risk_governor import RiskCheckReason, RiskEvaluationResult, RiskGovernor
 from .safety_state import SafetyCause, SafetyCauseKind, SafetyScopeLevel, SafetyStateLattice
 from .kill_switch import KillState, KillSwitchStateMachine
 from .degradation import DegradationGovernor, DegradationLevel
+from .experiment import EvidenceSpecification
 from .recovery import LifecycleRecoveryManager, RecoveryAction, RecoveryState
 from .numeric import ScaledInteger
 from .simulator import FeeType, OrderSimulator, OrderStatus, SimulatedFill, SimulatorEvent
