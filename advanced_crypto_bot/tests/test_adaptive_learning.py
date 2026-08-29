@@ -72,8 +72,9 @@ class TestAdaptiveLearningEngine(unittest.TestCase):
 
     def test_record_trade_outcome(self):
         """Trade outcome harus tersimpan untuk V4 training."""
+        tid = self.db.add_trade(1, 'manualpair', 'BUY', 1000, 1.0, 1000, 3, 'test', 0.75)
         self.engine.record_trade_outcome(
-            trade_id=9999, pair='manualpair', entry_price=1000,
+            trade_id=tid, pair='manualpair', entry_price=1000,
             exit_price=1100, ml_confidence=0.75,
             recommendation='BUY', pnl_pct=10.0,
             hold_duration_minutes=120

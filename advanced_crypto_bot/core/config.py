@@ -70,8 +70,30 @@ def _parse_id_list(value, env_name):
     return ids
 
 
+KNOWN_TEST_USER_IDS = {42, 123, 999, 12345}
+
+
+def is_production_user_id(user_id) -> bool:
+    if user_id is None:
+        return False
+    try:
+        uid = int(user_id)
+    except (TypeError, ValueError):
+        return False
+    if uid in KNOWN_TEST_USER_IDS:
+        return False
+    return uid >= 100_000_000
+
+
+def _filter_admin_ids(ids_list):
+    if not ids_list:
+        return []
+    return [uid for uid in ids_list if is_production_user_id(uid)]
+
+
 def _parse_admin_ids(value):
-    return _parse_id_list(value, "ADMIN_IDS")
+    parsed = _parse_id_list(value, "ADMIN_IDS")
+    return _filter_admin_ids(parsed)
 
 
 def _strategy2_mode(value):
