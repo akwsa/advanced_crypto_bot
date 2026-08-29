@@ -345,8 +345,9 @@ def test_ports_and_projections_obey_explicit_read_only_layer_matrix():
         ("ports", "__init__"): {"market", "query"},
         ("ports", "market"): set(),
         ("ports", "query"): set(),
-        ("projections", "__init__"): {"decision_provenance"},
+        ("projections", "__init__"): {"decision_provenance", "integrity_cockpit"},
         ("projections", "decision_provenance"): set(),
+        ("projections", "integrity_cockpit"): set(),
     }
     allowed_absolute_by_module = {
         ("ports", "__init__"): set(),
@@ -360,6 +361,10 @@ def test_ports_and_projections_obey_explicit_read_only_layer_matrix():
             "enum", "hashlib", "json", "autotrade_next.domain.candidate",
             "autotrade_next.domain.decision", "autotrade_next.domain.encoding",
             "autotrade_next.domain.numeric", "autotrade_next.domain.policy",
+        },
+        ("projections", "integrity_cockpit"): {
+            "__future__", "dataclasses", "datetime", "autotrade_next.domain.degradation",
+            "autotrade_next.domain.numeric",
         },
     }
     for layer in ("ports", "projections"):
