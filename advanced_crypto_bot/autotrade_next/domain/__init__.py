@@ -42,6 +42,7 @@ from .market import (
     TimestampUnit, evaluate_recovery_gate,
 )
 from .numeric import ScaledInteger
+from .simulator import FeeType, OrderSimulator, OrderStatus, SimulatedFill, SimulatorEvent
 from .policy import (
     CalibrationEvidence,
     CalibrationStatus,

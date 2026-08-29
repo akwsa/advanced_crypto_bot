@@ -283,7 +283,7 @@ def test_domain_package_only_imports_stdlib_or_relative_domain_modules():
         "unicodedata",
     }
     allowed_relative_by_module = {
-        "__init__": {"candidate", "content", "decision", "encoding", "errors", "identity", "market", "numeric", "policy", "replay"},
+        "__init__": {"candidate", "content", "decision", "encoding", "errors", "identity", "market", "numeric", "policy", "replay", "simulator"},
         "candidate": {"encoding", "errors", "identity", "market"},
         "content": {"encoding", "errors"},
         "decision": {"candidate", "encoding", "errors", "identity", "numeric"},
@@ -294,6 +294,7 @@ def test_domain_package_only_imports_stdlib_or_relative_domain_modules():
         "numeric": {"errors"},
         "policy": {"candidate", "decision", "encoding", "errors", "numeric"},
         "replay": {"candidate", "content", "decision", "encoding", "errors", "numeric", "policy"},
+        "simulator": {"content", "encoding", "errors", "market", "numeric"},
     }
 
     for path in source_root.rglob("*.py"):
