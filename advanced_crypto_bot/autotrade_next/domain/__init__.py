@@ -47,6 +47,7 @@ from .exit_protection import ExitDecision, ExitEvaluator, ExitReason, Protection
 from .fencing import FencedWriterAuthority, FencedWriterLease
 from .portfolio_allocation import PortfolioAllocation, RiskReservation
 from .risk_governor import RiskCheckReason, RiskEvaluationResult, RiskGovernor
+from .safety_state import SafetyCause, SafetyCauseKind, SafetyScopeLevel, SafetyStateLattice
 from .recovery import LifecycleRecoveryManager, RecoveryAction, RecoveryState
 from .numeric import ScaledInteger
 from .simulator import FeeType, OrderSimulator, OrderStatus, SimulatedFill, SimulatorEvent
