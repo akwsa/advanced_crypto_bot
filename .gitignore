@@ -103,3 +103,4 @@ credentials.json
 state.json
 install_ollama_windows.ps1
 setup_windows.bat
+.agents/.story-automator-active

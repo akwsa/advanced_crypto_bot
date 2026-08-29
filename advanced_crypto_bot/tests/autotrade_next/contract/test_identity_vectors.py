@@ -276,12 +276,25 @@ def test_domain_package_only_imports_stdlib_or_relative_domain_modules():
         "decimal",
         "enum",
         "hashlib",
+        "hmac",
         "json",
         "types",
         "typing",
         "unicodedata",
     }
-    allowed_relative_modules = {"encoding", "errors", "identity", "numeric"}
+    allowed_relative_by_module = {
+        "__init__": {"candidate", "content", "decision", "encoding", "errors", "identity", "market", "numeric", "policy", "replay"},
+        "candidate": {"encoding", "errors", "identity", "market"},
+        "content": {"encoding", "errors"},
+        "decision": {"candidate", "encoding", "errors", "identity", "numeric"},
+        "encoding": {"errors", "numeric"},
+        "errors": set(),
+        "identity": {"encoding", "errors"},
+        "market": {"content", "encoding", "errors"},
+        "numeric": {"errors"},
+        "policy": {"candidate", "decision", "encoding", "errors", "numeric"},
+        "replay": {"candidate", "content", "decision", "encoding", "errors", "numeric", "policy"},
+    }
 
     for path in source_root.rglob("*.py"):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
@@ -295,7 +308,8 @@ def test_domain_package_only_imports_stdlib_or_relative_domain_modules():
             elif isinstance(node, ast.ImportFrom):
                 if node.level:
                     assert node.level == 1, (path, "parent-relative import")
-                    assert node.module in allowed_relative_modules, (path, node.module)
+                    allowed = allowed_relative_by_module[path.stem]
+                    assert node.module in allowed, (path, node.module, allowed)
                 elif node.module:
                     root = node.module.split(".", 1)[0]
                     assert root in allowed_absolute_roots, (path, node.module)
@@ -311,3 +325,100 @@ def test_domain_package_only_imports_stdlib_or_relative_domain_modules():
                     path,
                     "dynamic import",
                 )
+
+
+def test_ports_and_projections_obey_explicit_read_only_layer_matrix():
+    root = Path(__file__).parents[3] / "autotrade_next"
+    allowed_relative_by_module = {
+        ("ports", "__init__"): {"market", "query"},
+        ("ports", "market"): set(),
+        ("ports", "query"): set(),
+        ("projections", "__init__"): {"decision_provenance"},
+        ("projections", "decision_provenance"): set(),
+    }
+    allowed_absolute_by_module = {
+        ("ports", "__init__"): set(),
+        ("ports", "market"): {
+            "__future__", "typing", "autotrade_next.domain.market",
+        },
+        ("ports", "query"): {"typing"},
+        ("projections", "__init__"): set(),
+        ("projections", "decision_provenance"): {
+            "__future__", "base64", "binascii", "dataclasses", "datetime",
+            "enum", "hashlib", "json", "autotrade_next.domain.candidate",
+            "autotrade_next.domain.decision", "autotrade_next.domain.encoding",
+            "autotrade_next.domain.numeric", "autotrade_next.domain.policy",
+        },
+    }
+    for layer in ("ports", "projections"):
+        for path in (root / layer).glob("*.py"):
+            key = (layer, path.stem)
+            assert key in allowed_relative_by_module
+            assert key in allowed_absolute_by_module
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    modules = {alias.name for alias in node.names}
+                    assert modules <= allowed_absolute_by_module[key], (path, modules)
+                    continue
+                if not isinstance(node, ast.ImportFrom) or node.module is None:
+                    if isinstance(node, ast.Call):
+                        is_dunder_import = (
+                            isinstance(node.func, ast.Name) and node.func.id == "__import__"
+                        )
+                        is_import_module = (
+                            isinstance(node.func, ast.Attribute)
+                            and node.func.attr == "import_module"
+                        )
+                        assert not (is_dunder_import or is_import_module), (path, "dynamic import")
+                    continue
+                if node.level:
+                    assert node.level == 1, (path, "parent-relative import")
+                    assert node.module in allowed_relative_by_module[key], (path, node.module)
+                    continue
+                assert node.module in allowed_absolute_by_module[key], (path, node.module)
+
+
+def test_adapters_obey_explicit_domain_port_dependency_matrix_without_horizontal_imports():
+    root = Path(__file__).parents[3] / "autotrade_next" / "adapters"
+    allowed_relative_by_module = {
+        "__init__": set(),
+        "indodax/__init__": {"capability_registry", "market_evidence"},
+        "indodax/capability_registry": set(),
+        "indodax/market_evidence": set(),
+    }
+    allowed_absolute_by_module = {
+        "__init__": set(),
+        "indodax/__init__": set(),
+        "indodax/capability_registry": {
+            "__future__", "datetime", "hashlib",
+            "autotrade_next.domain.content", "autotrade_next.domain.encoding",
+            "autotrade_next.domain.market",
+        },
+        "indodax/market_evidence": {
+            "__future__", "collections.abc", "datetime",
+            "autotrade_next.domain.content", "autotrade_next.domain.encoding",
+            "autotrade_next.domain.errors", "autotrade_next.domain.market",
+        },
+    }
+    for path in root.rglob("*.py"):
+        module = path.relative_to(root).with_suffix("").as_posix()
+        assert module in allowed_relative_by_module
+        assert module in allowed_absolute_by_module
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                modules = {alias.name for alias in node.names}
+                assert modules <= allowed_absolute_by_module[module], (path, modules)
+                continue
+            if isinstance(node, ast.ImportFrom) and node.module is not None:
+                if node.level:
+                    assert path.name == "__init__.py" and node.level == 1, (path, node.module)
+                    assert node.module in allowed_relative_by_module[module], (path, node.module)
+                    continue
+                assert node.module in allowed_absolute_by_module[module], (path, node.module)
+                assert ".adapters." not in node.module, (path, "horizontal adapter import")
+            elif isinstance(node, ast.Call):
+                is_dunder_import = isinstance(node.func, ast.Name) and node.func.id == "__import__"
+                is_import_module = isinstance(node.func, ast.Attribute) and node.func.attr == "import_module"
+                assert not (is_dunder_import or is_import_module), (path, "dynamic import")

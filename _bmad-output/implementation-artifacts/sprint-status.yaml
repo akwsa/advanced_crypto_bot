@@ -1,5 +1,5 @@
 # generated: 2026-08-26T00:46:50+07:00
-# last_updated: 2026-08-26T01:24:00+07:00
+# last_updated: 2026-08-29T19:50:55+07:00
 # project: advanced_crypto_bot
 # project_key: NOKEY
 # tracking_system: file-system
@@ -11,7 +11,7 @@
 # Retrospective: optional <-> done
 
 generated: 2026-08-26T00:46:50+07:00
-last_updated: 2026-08-26T01:24:00+07:00
+last_updated: 2026-08-29T19:50:55+07:00
 project: advanced_crypto_bot
 project_key: NOKEY
 tracking_system: file-system
@@ -20,15 +20,15 @@ story_location: /home/officer/advanced_crypto_bot/_bmad-output/implementation-ar
 development_status:
   epic-1: in-progress
   1-1-menghasilkan-identity-dan-canonical-bytes-yang-stabil: done
-  1-2-menangkap-candidate-snapshot-point-in-time: backlog
-  1-3-menghasilkan-satu-action-yang-legal-dan-beralasan: backlog
-  1-4-menerapkan-cost-aware-abstention-dan-hysteresis: backlog
-  1-5-membuktikan-deterministic-decision-replay: backlog
-  1-6-menyajikan-provenance-decision-read-only: backlog
+  1-2-menangkap-candidate-snapshot-point-in-time: done
+  1-3-menghasilkan-satu-action-yang-legal-dan-beralasan: done
+  1-4-menerapkan-cost-aware-abstention-dan-hysteresis: done
+  1-5-membuktikan-deterministic-decision-replay: done
+  1-6-menyajikan-provenance-decision-read-only: done
   epic-1-retrospective: optional
 
-  epic-2: backlog
-  2-1-mengkualifikasi-market-evidence-per-produk-indodax: backlog
+  epic-2: in-progress
+  2-1-mengkualifikasi-market-evidence-per-produk-indodax: done
   2-2-membentuk-executable-market-snapshot-dan-instrument-eligibility: backlog
   2-3-menjalankan-satu-deterministic-simulator-lifecycle: backlog
   2-4-menyelesaikan-intent-dan-order-melalui-fill-authoritative-accounting: backlog

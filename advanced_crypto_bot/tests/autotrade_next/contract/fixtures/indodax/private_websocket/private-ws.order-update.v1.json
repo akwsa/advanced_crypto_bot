@@ -1,0 +1,1 @@
+{"push":{"channel":"pws:sanitized","pub":{"data":[{"eventType":"order_update","order":{"clientOrderId":"sanitized-client","description":"BTC/IDR","executedQty":"1","orderId":"sanitized-order","origQty":"1","price":"100","side":"BUY","status":"FILLED","symbol":"btcidr","transactionTime":1787832000000,"unfilledQty":"0"}}]}}}

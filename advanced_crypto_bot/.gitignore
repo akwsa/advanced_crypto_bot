@@ -58,3 +58,4 @@ health_check_results.txt
 retrain_output.log
 scalper_manual_history.csv
 scalper_positions.json
+.agents/.story-automator-active
