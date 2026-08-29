@@ -284,8 +284,9 @@ def test_domain_package_only_imports_stdlib_or_relative_domain_modules():
         "unicodedata",
     }
     allowed_relative_by_module = {
-        "__init__": {"accounting", "candidate", "content", "decision", "encoding", "errors", "exit_protection", "identity", "market", "numeric", "policy", "recovery", "replay", "simulator"},
+        "__init__": {"accounting", "calibration", "candidate", "content", "decision", "encoding", "errors", "exit_protection", "identity", "market", "numeric", "policy", "recovery", "replay", "simulator"},
         "accounting": {"content", "errors", "numeric"},
+        "calibration": {"content", "numeric"},
         "candidate": {"encoding", "errors", "identity", "market"},
         "content": {"encoding", "errors"},
         "decision": {"candidate", "encoding", "errors", "identity", "numeric"},
