@@ -290,7 +290,7 @@ def test_domain_package_only_imports_stdlib_or_relative_domain_modules():
         "encoding": {"errors", "numeric"},
         "errors": set(),
         "identity": {"encoding", "errors"},
-        "market": {"content", "encoding", "errors"},
+        "market": {"content", "encoding", "errors", "numeric"},
         "numeric": {"errors"},
         "policy": {"candidate", "decision", "encoding", "errors", "numeric"},
         "replay": {"candidate", "content", "decision", "encoding", "errors", "numeric", "policy"},

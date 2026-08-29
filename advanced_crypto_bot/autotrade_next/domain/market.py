@@ -10,6 +10,7 @@ from typing import Any
 from .content import ContentRecipe, ContentRef
 from .encoding import canonical_bytes
 from .errors import CapabilityRegistryError, MarketEvidenceError, RecoveryEvaluationError
+from .numeric import ScaledInteger
 
 
 class ProductFamily(str, Enum):
@@ -1011,13 +1012,175 @@ def _freeze_evidence(value: object, expected: type, path: tuple[str | int, ...],
     return frozen
 
 
+class OrderBookSide(str, Enum):
+    BID = "BID"
+    ASK = "ASK"
+
+
+class EligibilityStatus(str, Enum):
+    ELIGIBLE = "ELIGIBLE"
+    INELIGIBLE = "INELIGIBLE"
+
+
+class EligibilityReason(str, Enum):
+    QUALIFIED = "QUALIFIED"
+    STALE_EVIDENCE = "STALE_EVIDENCE"
+    UNORDERED_DEPTH = "UNORDERED_DEPTH"
+    INSUFFICIENT_DEPTH = "INSUFFICIENT_DEPTH"
+    EXCEEDS_MAX_SPREAD = "EXCEEDS_MAX_SPREAD"
+    NOT_UNIVERSE_MEMBER = "NOT_UNIVERSE_MEMBER"
+    MIN_SIZE_BREACH = "MIN_SIZE_BREACH"
+    SYSTEMIC_INTEGRITY_FAILURE = "SYSTEMIC_INTEGRITY_FAILURE"
+
+
+@dataclass(frozen=True, slots=True)
+class OrderBookLevel:
+    price: ScaledInteger
+    quantity: ScaledInteger
+
+    def __post_init__(self) -> None:
+        if type(self.price) is not ScaledInteger or type(self.quantity) is not ScaledInteger:
+            _evidence_fail("INVALID_ORDERBOOK_LEVEL")
+
+    def to_canonical_value(self) -> dict[str, dict[str, int]]:
+        return {
+            "price": {"units": self.price.units, "scale": self.price.scale},
+            "quantity": {"units": self.quantity.units, "scale": self.quantity.scale},
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class MarketSnapshot:
+    instrument_id: str
+    event_at_utc: datetime
+    received_at_utc: datetime
+    venue_cursor: str | None
+    ingest_cursor: str
+    bids: tuple[OrderBookLevel, ...]
+    asks: tuple[OrderBookLevel, ...]
+    snapshot_ref: ContentRef
+
+    def __post_init__(self) -> None:
+        _evidence_text(self.instrument_id, ("instrument_id",))
+        _evidence_utc(self.event_at_utc, ("event_at_utc",))
+        _evidence_utc(self.received_at_utc, ("received_at_utc",))
+        _evidence_text(self.ingest_cursor, ("ingest_cursor",))
+        if self.venue_cursor is not None:
+            _evidence_text(self.venue_cursor, ("venue_cursor",))
+
+    def calculate_executable_price(
+        self, side: OrderBookSide, requested_size: ScaledInteger
+    ) -> tuple[ScaledInteger, ScaledInteger]:
+        levels = self.asks if side is OrderBookSide.ASK else self.bids
+        total_capacity_units = sum(level.quantity.units for level in levels)
+        total_units = 0
+        total_cost_scaled = 0
+        req_units = requested_size.units
+
+        for level in levels:
+            take_units = min(req_units - total_units, level.quantity.units)
+            total_cost_scaled += take_units * level.price.units
+            total_units += take_units
+            if total_units >= req_units:
+                break
+
+        capacity = ScaledInteger(total_capacity_units, requested_size.scale)
+        if total_units == 0:
+            return capacity, ScaledInteger(0, levels[0].price.scale if levels else 2)
+
+        avg_price_units = total_cost_scaled // total_units
+        avg_price = ScaledInteger(avg_price_units, levels[0].price.scale)
+        return capacity, avg_price
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        instrument_id: str,
+        event_at_utc: datetime,
+        received_at_utc: datetime,
+        venue_cursor: str | None,
+        ingest_cursor: str,
+        bids: tuple[OrderBookLevel, ...] | list[OrderBookLevel],
+        asks: tuple[OrderBookLevel, ...] | list[OrderBookLevel],
+    ) -> MarketSnapshot:
+        frozen_bids = tuple(bids)
+        frozen_asks = tuple(asks)
+
+        # Validate order: bids descending price
+        for index in range(len(frozen_bids) - 1):
+            if frozen_bids[index].price.units < frozen_bids[index + 1].price.units:
+                _evidence_fail("UNORDERED_BIDS")
+
+        # Validate order: asks ascending price
+        for index in range(len(frozen_asks) - 1):
+            if frozen_asks[index].price.units > frozen_asks[index + 1].price.units:
+                _evidence_fail("UNORDERED_ASKS")
+
+        value = {
+            "instrument_id": instrument_id,
+            "event_at_utc": event_at_utc,
+            "received_at_utc": received_at_utc,
+            "venue_cursor": venue_cursor,
+            "ingest_cursor": ingest_cursor,
+            "bids": tuple(level.to_canonical_value() for level in frozen_bids),
+            "asks": tuple(level.to_canonical_value() for level in frozen_asks),
+        }
+        snapshot_ref = ContentRef.v2("market.snapshot", "market-snapshot", value)
+        return cls(
+            instrument_id=instrument_id,
+            event_at_utc=event_at_utc,
+            received_at_utc=received_at_utc,
+            venue_cursor=venue_cursor,
+            ingest_cursor=ingest_cursor,
+            bids=frozen_bids,
+            asks=frozen_asks,
+            snapshot_ref=snapshot_ref,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class InstrumentEligibility:
+    instrument_id: str
+    status: EligibilityStatus
+    reason: EligibilityReason
+
+    @classmethod
+    def evaluate(
+        cls,
+        *,
+        instrument_id: str,
+        min_order_size: ScaledInteger,
+        max_spread_ratio_bps: int,
+        freshness_micros: int,
+        max_freshness_micros: int,
+        is_universe_member: bool,
+        current_spread_ratio_bps: int,
+        depth_capacity: ScaledInteger,
+        requested_size: ScaledInteger,
+    ) -> InstrumentEligibility:
+        if not is_universe_member:
+            return cls(instrument_id, EligibilityStatus.INELIGIBLE, EligibilityReason.NOT_UNIVERSE_MEMBER)
+        if freshness_micros > max_freshness_micros:
+            return cls(instrument_id, EligibilityStatus.INELIGIBLE, EligibilityReason.STALE_EVIDENCE)
+        if current_spread_ratio_bps > max_spread_ratio_bps:
+            return cls(instrument_id, EligibilityStatus.INELIGIBLE, EligibilityReason.EXCEEDS_MAX_SPREAD)
+        if depth_capacity.units < requested_size.units:
+            return cls(instrument_id, EligibilityStatus.INELIGIBLE, EligibilityReason.INSUFFICIENT_DEPTH)
+        if requested_size.units < min_order_size.units:
+            return cls(instrument_id, EligibilityStatus.INELIGIBLE, EligibilityReason.MIN_SIZE_BREACH)
+
+        return cls(instrument_id, EligibilityStatus.ELIGIBLE, EligibilityReason.QUALIFIED)
+
+
 __all__ = (
     "AffectedScope", "AuthScope", "AuthoritativeFieldEvidence", "CapabilityArtifact", "CapabilityEntry",
     "CapabilityLookup", "CapabilityRegistry", "ContinuityResult", "CursorCapability",
-    "EvidenceAdmission", "EvidenceDisposition", "EvidencePolicy", "EvidenceRequirement", "EvidenceRequirementSet",
-    "FreezeRequest", "MarketEvidence", "ReconciliationCheckpoint", "ReconciliationRequest",
-    "ProductFamily", "QualificationReason", "QualificationStatus", "RateLimitContract", "RateLimitStatus",
-    "RecoveryContract", "RecoveryDisposition", "RecoveryGateResult", "RecoveryMode", "RecoveryProof", "RecoveryRequest",
-    "ScopedClearRequest", "ScopeKind", "evaluate_recovery_gate",
+    "EligibilityReason", "EligibilityStatus", "EvidenceAdmission", "EvidenceDisposition", "EvidencePolicy",
+    "EvidenceRequirement", "EvidenceRequirementSet", "FreezeRequest", "InstrumentEligibility",
+    "MarketEvidence", "MarketSnapshot", "OrderBookLevel", "OrderBookSide", "ReconciliationCheckpoint",
+    "ReconciliationRequest", "ProductFamily", "QualificationReason", "QualificationStatus", "RateLimitContract",
+    "RateLimitStatus", "RecoveryContract", "RecoveryDisposition", "RecoveryGateResult", "RecoveryMode",
+    "RecoveryProof", "RecoveryRequest", "ScopedClearRequest", "ScopeKind", "evaluate_recovery_gate",
     "TimestampContract", "TimestampUnit",
 )
