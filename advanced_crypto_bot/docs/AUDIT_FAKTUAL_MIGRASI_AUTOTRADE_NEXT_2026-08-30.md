@@ -690,3 +690,15 @@ Dokumen ini adalah baseline audit. Perubahan verdict harus mencantumkan commit b
 - Implementasi tidak mengedit atau bergantung pada dirty user/Gemini `domain/numeric.py`/`domain/accounting.py`; seluruh file user lain tetap tidak masuk commit dan VM tidak diakses atau diubah.
 - Application handler yang mengikat final Decisions, reservations, RiskState, event, dan outbox ke satu `SQLiteFencedJournal` expected-sequence CAS belum tersedia. Karena atomic persistence acceptance tersebut masih deferred, Story 3.2 tetap `review` dengan factual verdict **PARTIAL**, bukan PASS/done.
 - Baseline Story 3.2 sudah **PARTIAL**, sehingga rolling total tidak berubah: **9 PASS / 7 PARTIAL / 16 FAIL**. Migrasi tetap belum selesai dan belum siap deploy/promotion.
+
+### 16.9 Story 3.3 — versioned RiskGovernor kernel selesai, authenticated runtime state masih terbuka 2026-08-30
+
+- Baseline remediasi: `9b97fb6b7a50908515c141e3b2c6dd58578f4e3c`.
+- Commit implementasi review-ready: `7beb3b4eabca0c5663d58ac0ded23b92d06f527f` (`feat(autotrade-next): add versioned portfolio risk governor`).
+- Bukti final: focused risk 14/14 PASS; risk+identity/import 37/37 PASS; seluruh AutoTrade Next contracts 416/416 PASS; canonical Strategy2/dry-run regression command 61/61 PASS; `compileall` dan `git diff --check` exit 0.
+- Versioned policy hanya dapat memperketat ceiling canonical: position 10%, portfolio exposure 40%, daily loss 2%, planned loss 0.5%, hard drawdown trigger tepat 10%, dan rolling entry turnover 40%. Semua comparison memakai exact mixed-scale arithmetic.
+- Daily loss dan drawdown diturunkan dari canonical equity facts, bukan boolean caller. Planned loss tidak dapat di-understate di bawah exact `quantity × (mark − stop)`; position/exposure/planned-loss/turnover/depth/exit-capacity dan adjustment liquidity/correlation/stop-distance/volatility/cost/uncertainty hanya dapat menurunkan quantity.
+- Stale/future mark, stale equity, missing stop/exit capacity, insufficient minimum depth/capacity, serta high-water mismatch menghasilkan content-bound zero-quantity rejection. Direct result dengan quantity meningkat atau kombinasi allowed+rejection fail closed. Risk-reducing EXIT turnover-exempt tetapi tetap position-bounded.
+- Implementasi tidak mengedit atau bergantung pada dirty user/Gemini `domain/numeric.py`; seluruh protected dirty files tetap tidak masuk commit dan VM tidak diakses atau diubah.
+- Authenticated policy/evidence resolver, persisted RiskState/reservation update, dan runtime entry/EXIT composition melalui fenced CAS tetap deferred. Story 3.3 berada pada `review` dengan factual verdict **PARTIAL**, bukan PASS/done.
+- Verdict rolling Story 3.3 berubah dari **FAIL** menjadi **PARTIAL**; rolling total menjadi **9 PASS / 8 PARTIAL / 15 FAIL**. Migrasi Epic 1–5 tetap belum selesai dan belum siap deploy/promotion.
