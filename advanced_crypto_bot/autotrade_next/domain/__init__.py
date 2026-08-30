@@ -59,7 +59,12 @@ from .exit_protection import (
     build_exit_execution, evaluate_exit, exit_command_ref,
 )
 from .fencing import FencedWriterAuthority, FencedWriterLease
-from .portfolio_allocation import PortfolioAllocation, RiskReservation
+from .portfolio_allocation import (
+    AllocationProposal, AllocationRejectCode, AllocationRejection, AppliedFill,
+    ConstituentCheckpoint, PortfolioAllocation, PortfolioConsistencyCut,
+    ReservationBucket, ReservationConsumption, ReservationLifecycle,
+    ReservationVector, RiskReservation, build_portfolio_allocation,
+)
 from .risk_governor import RiskCheckReason, RiskEvaluationResult, RiskGovernor
 from .safety_state import SafetyCause, SafetyCauseKind, SafetyScopeLevel, SafetyStateLattice
 from .kill_switch import KillState, KillSwitchStateMachine
@@ -122,6 +127,10 @@ from .replay import (
 )
 
 __all__ = (
+    "AllocationProposal",
+    "AllocationRejectCode",
+    "AllocationRejection",
+    "AppliedFill",
     "CANONICAL_ENCODING_VERSION",
     "CandidateCaptureError",
     "CandidateEligibility",
@@ -148,6 +157,7 @@ __all__ = (
     "CanonicalDecision",
     "CostRules",
     "CommitStatus",
+    "ConstituentCheckpoint",
     "ContentRecipe",
     "ContentRef",
     "ContinuityResult",
@@ -205,6 +215,8 @@ __all__ = (
     "PolicyEvaluationError",
     "PolicyState",
     "PolicyTransition",
+    "PortfolioAllocation",
+    "PortfolioConsistencyCut",
     "ReplayComparison",
     "ReplayError",
     "ReplayManifest",
@@ -220,6 +232,11 @@ __all__ = (
     "RecoveryMode",
     "RecoveryProof",
     "RecoveryRequest",
+    "ReservationBucket",
+    "ReservationConsumption",
+    "ReservationLifecycle",
+    "ReservationVector",
+    "RiskReservation",
     "RecoveryPlan",
     "RecoveryAction",
     "RecoveryState",
@@ -245,6 +262,7 @@ __all__ = (
     "CorrectionRequest",
     "ProjectionHighWater",
     "VenueOrderEvidence",
+    "build_portfolio_allocation",
     "DustIncident",
     "AuthScope",
     "AuthoritativeFieldEvidence",

@@ -309,7 +309,7 @@ def test_domain_package_only_imports_stdlib_or_relative_domain_modules():
         "numeric": {"errors"},
         "policy": {"candidate", "decision", "encoding", "errors", "numeric"},
         "policy_isolation": {"errors"},
-        "portfolio_allocation": {"errors", "numeric"},
+        "portfolio_allocation": {"content", "errors", "numeric"},
         "promotion": {"errors"},
         "recovery": {"content", "execution", "exit_protection", "simulator"},
         "replay": {"candidate", "content", "decision", "encoding", "errors", "numeric", "policy"},
