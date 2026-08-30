@@ -29,7 +29,7 @@ development_status:
 
   epic-2: in-progress
   2-1-mengkualifikasi-market-evidence-per-produk-indodax: done
-  2-2-membentuk-executable-market-snapshot-dan-instrument-eligibility: review
+  2-2-membentuk-executable-market-snapshot-dan-instrument-eligibility: done
   2-3-menjalankan-satu-deterministic-simulator-lifecycle: done
   2-4-menyelesaikan-intent-dan-order-melalui-fill-authoritative-accounting: done
   2-5-mempertahankan-position-protection-melalui-unified-exit: done

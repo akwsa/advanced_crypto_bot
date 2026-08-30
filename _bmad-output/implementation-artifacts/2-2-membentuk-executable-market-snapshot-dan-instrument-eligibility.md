@@ -2,13 +2,13 @@
 story_id: "2.2"
 title: "Membentuk executable MarketSnapshot dan instrument eligibility"
 epic: "2"
-status: "review"
+status: "done"
 baseline_commit: "5a83c99bc67f44917ac08188b45003c057bd88cb"
 ---
 
 # Story 2.2: Membentuk executable MarketSnapshot dan instrument eligibility
 
-Status: review
+Status: done
 
 ## Story
 
@@ -49,7 +49,7 @@ so that DRY RUN tidak mengisi order pada candle/last price yang tidak executable
 - Strategy2 dan dry-run regression suite: 61/61 lulus.
 - `compileall` untuk `autotrade_next`: exit 0.
 - `git diff --check`: exit 0.
-- Audit/review independen belum selesai; karena itu status faktual adalah `review`, bukan `done`.
+- Dua putaran adversarial review selesai; acceptance pengguna diterima melalui instruksi `continue` pada 2026-08-30.
 
 ## File List
 
@@ -66,3 +66,4 @@ so that DRY RUN tidak mengisi order pada candle/last price yang tidak executable
 
 - 2026-08-30: Remediasi kontrak executable snapshot dan eligibility dibuat review-ready berdasarkan audit faktual migrasi.
 - 2026-08-30: Review loop 1 memperbaiki arithmetic simulator mixed-scale atas persetujuan eksplisit pengguna; RED 1 gagal/2 lulus, GREEN simulator 3/3 dan combined focused 24/24 setelah hardening review.
+- 2026-08-30: Human acceptance diterima; status Story 2.2 disinkronkan dari `review` ke `done`.

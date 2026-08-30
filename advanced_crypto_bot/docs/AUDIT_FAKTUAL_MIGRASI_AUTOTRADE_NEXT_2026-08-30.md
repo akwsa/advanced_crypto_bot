@@ -600,3 +600,15 @@ Pernyataan yang didukung bukti saat dokumen ini dibuat adalah:
 ---
 
 Dokumen ini adalah baseline audit. Perubahan verdict harus mencantumkan commit baru, test evidence baru, hasil acceptance review, dan—untuk klaim deployment—bukti runtime VM yang tersanitasi.
+
+## 16. Ledger Remediasi Pasca-Audit
+
+### 16.1 Story 2.2 — diterima 2026-08-30
+
+- Baseline remediasi: `5a83c99bc67f44917ac08188b45003c057bd88cb`.
+- Commit implementasi review-ready: `b687d1c` (`fix(autotrade-next): remediate executable market snapshot`).
+- Bukti final: focused contracts 26/26 PASS; seluruh AutoTrade Next contracts 324/324 PASS; Strategy2/dry-run regression 61/61 PASS; `compileall` dan `git diff --check` exit 0.
+- Dua putaran adversarial review dijalankan. Patch final mencakup frozen execution side, common-scale depth/WAP, pair-local precision/increment reasons, systemic signal provenance, bounded scale/aggregate overflow, serta simulator mixed-scale compatibility.
+- Human acceptance diterima melalui instruksi `continue` pada 2026-08-30.
+- Verdict rolling Story 2.2 berubah dari **PARTIAL** menjadi **PASS**. Baseline tabel audit di atas tidak ditulis ulang agar snapshot historis tetap dapat direproduksi.
+- Rolling total setelah acceptance Story 2.2: **8 PASS / 2 PARTIAL / 22 FAIL**. Ini bukan klaim migrasi selesai.
