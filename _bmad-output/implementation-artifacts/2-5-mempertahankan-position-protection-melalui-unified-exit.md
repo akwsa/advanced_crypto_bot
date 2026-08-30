@@ -39,6 +39,7 @@ so that remaining quantity selalu protected dan tidak ditutup dua kali.
 
 ## Completion Evidence — 2026-08-30
 
+- Review-ready implementation commit: `a568aee`.
 - RED: collection error `autotrade_next.application.exit` belum tersedia.
 - Focused unified EXIT + identity/import matrix: 39/39 PASS.
 - Seluruh AutoTrade Next contracts: 367/367 PASS.

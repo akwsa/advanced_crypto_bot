@@ -633,3 +633,14 @@ Dokumen ini adalah baseline audit. Perubahan verdict harus mencantumkan commit b
 - Durable SQLite adapter, persistent writer fence/freeze recovery, canonical account-cash plus per-instrument position storage, cross-order reservation, offline migration, dan crash/restart proof tetap deferred. Karena veto dependency tersebut, Story 2.4 tetap `review` dengan factual verdict **PARTIAL**, bukan PASS/done.
 - Verdict rolling Story 2.4 berubah dari **FAIL** menjadi **PARTIAL**; baseline tabel historis tidak ditulis ulang.
 - Rolling total setelah semantic acceptance Story 2.4: **9 PASS / 3 PARTIAL / 20 FAIL**. Migrasi Epic 1–5 tetap belum selesai dan belum siap dipromosikan/deploy.
+
+### 16.4 Story 2.5 — semantic unified EXIT selesai, dependency masih terbuka 2026-08-30
+
+- Baseline remediasi: `9244accad0acd82361b6aa43bfa8aaef82525e2d`.
+- Commit implementasi review-ready: `a568aee` (`feat(autotrade-next): add unified protective exit kernel`).
+- Bukti final: focused unified EXIT/identity 39/39 PASS; seluruh AutoTrade Next contracts 367/367 PASS; Strategy2/dry-run regression 63/63 PASS; `compileall` dan `git diff --check` exit 0.
+- Semantic kernel sekarang mempunyai fixed AD-04 precedence, exact mixed-scale arithmetic, bounded scale/time, evidence references, persisted entry/high-water/trailing/invalidation/deadline/remaining state, deterministic Position event/outbox dan pending SELL order, expected sequence, composite commit-before-dispatch, exact retry, canonical Fill-only reduction, protection-preserving partial exit, exact close, serta preexisting/post-Fill quarantined dust dengan incident dan valuation provenance.
+- Commit tidak mencakup atau mengubah dirty user/Gemini files `domain/accounting.py`, `domain/numeric.py`, `domain/fencing.py`, `core/config.py`, maupun `scalper_pairs.txt`; tidak ada akses, restart, atau deployment VM.
+- Durable SQLite/fence/migration/restart, atomic coupling antara exit Fill dan settlement persistence, authenticated approval verifier, dan runtime OrderCoordinator composition tetap deferred. Karena dependency veto tersebut, Story 2.5 tetap `review` dengan factual verdict **PARTIAL**, bukan PASS/done.
+- Verdict rolling Story 2.5 berubah dari **FAIL** menjadi **PARTIAL**; baseline tabel historis tidak ditulis ulang.
+- Rolling total setelah semantic acceptance Story 2.5: **9 PASS / 4 PARTIAL / 19 FAIL**. Migrasi Epic 1–5 tetap belum selesai dan belum siap dipromosikan/deploy.
