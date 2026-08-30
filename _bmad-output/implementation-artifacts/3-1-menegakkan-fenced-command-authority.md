@@ -31,6 +31,7 @@ so that restart, takeover, atau network partition tidak menciptakan split brain.
 
 ## Completion Evidence — 2026-08-30
 
+- Review-ready implementation commit: `1094c7704bbde23f673a460c7835f223337ff3ad`.
 - RED: collection gagal karena `autotrade_next.adapters.sqlite` belum ada.
 - GREEN awal 15/15; review final durable fencing 19/19 PASS.
 - Fencing+identity/import 42/42 PASS; seluruh AutoTrade Next contracts 397/397 PASS.

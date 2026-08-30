@@ -666,3 +666,15 @@ Dokumen ini adalah baseline audit. Perubahan verdict harus mencantumkan commit b
 - Commit tidak mencakup dirty user/Gemini files `domain/accounting.py`, `domain/numeric.py`, `domain/fencing.py`, `core/config.py`, maupun `scalper_pairs.txt`; tidak ada akses, restart, atau perubahan VM.
 - Runtime corpus ingestion, evidence resolver/persistence, shadow/venue observation aktual, dan promotion-policy consumer tetap deferred. Karena bukti runtime tersebut belum tersedia, Story 2.7 tetap `review` dengan factual verdict **PARTIAL**, bukan PASS/done.
 - Verdict rolling Story 2.7 berubah dari **FAIL** menjadi **PARTIAL**; rolling total menjadi **9 PASS / 6 PARTIAL / 17 FAIL**. Migrasi tetap belum selesai dan belum siap deploy/promotion.
+
+### 16.7 Story 3.1 — durable fenced journal foundation selesai, runtime wiring masih terbuka 2026-08-30
+
+- Baseline remediasi: `bcfac1683d433854d3c14a727b39e1f1948a612a`.
+- Commit implementasi review-ready: `1094c7704bbde23f673a460c7835f223337ff3ad` (`feat(autotrade-next): add durable fenced journal`).
+- Bukti final: durable fencing 19/19 PASS; fencing+identity/import 42/42 PASS; seluruh AutoTrade Next contracts 397/397 PASS; canonical Strategy2/dry-run regression command 61/61 PASS; `compileall` dan `git diff --check` exit 0.
+- SQLite foundation menegakkan satu authority row per scope, `BEGIN IMMEDIATE` exact expected-epoch CAS, epoch `+1`, token history non-reuse, serta immutable idempotent claim identity. Append memverifikasi exact scope/epoch/token, authoritative lease window, backward clock, dan expected aggregate sequence sebelum journal/event/PENDING-outbox/high-water committed atomically.
+- Negative contracts membuktikan stale/future epoch, token loss, lease expiry, clock anomaly, sequence conflict, identity conflict, dan `SQLITE_BUSY` menghasilkan typed fail-closed outcome tanpa stale write. Crash-before-commit meninggalkan nol write; indeterminate commit return direkonsiliasi menggunakan immutable claim/command identity.
+- Architecture allowlist hanya menambahkan dependency stdlib `contextlib`, `dataclasses`, `datetime`, `enum`, `pathlib`, dan `sqlite3`; transaction adapter tidak mengimpor network atau Redis.
+- Dirty perubahan user/Gemini pada `domain/fencing.py` memang menutup reproduksi future-epoch lama, tetapi file tersebut—bersama `domain/accounting.py`, `domain/numeric.py`, `core/config.py`, dan `scalper_pairs.txt`—tidak dimasukkan ke commit Codex. Adapter baru tidak bergantung pada guard uncommitted tersebut. VM tidak diakses atau diubah.
+- Wiring adapter sebagai satu-satunya boundary seluruh canonical mutation, versioned production schema migration, backup/restore, multi-process crash/restart matrix, dan deployment evidence tetap deferred. Story 3.1 berada pada `review` dengan factual verdict **PARTIAL**, bukan PASS/done.
+- Verdict rolling Story 3.1 berubah dari **FAIL** menjadi **PARTIAL**; rolling total menjadi **9 PASS / 7 PARTIAL / 16 FAIL**. Migrasi Epic 1–5 tetap belum selesai dan belum siap deploy/promotion.
