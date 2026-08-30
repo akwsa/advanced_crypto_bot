@@ -644,3 +644,14 @@ Dokumen ini adalah baseline audit. Perubahan verdict harus mencantumkan commit b
 - Durable SQLite/fence/migration/restart, atomic coupling antara exit Fill dan settlement persistence, authenticated approval verifier, dan runtime OrderCoordinator composition tetap deferred. Karena dependency veto tersebut, Story 2.5 tetap `review` dengan factual verdict **PARTIAL**, bukan PASS/done.
 - Verdict rolling Story 2.5 berubah dari **FAIL** menjadi **PARTIAL**; baseline tabel historis tidak ditulis ulang.
 - Rolling total setelah semantic acceptance Story 2.5: **9 PASS / 4 PARTIAL / 19 FAIL**. Migrasi Epic 1–5 tetap belum selesai dan belum siap dipromosikan/deploy.
+
+### 16.5 Story 2.6 — semantic recovery plan selesai, dependency masih terbuka 2026-08-30
+
+- Baseline remediasi: `51f1660451d0519d133fef2e04e34e2b88f6b839`.
+- Commit implementasi review-ready: `9dbde0c` (`feat(autotrade-next): add deterministic recovery plan`).
+- Bukti final: recovery 8/8 PASS; recovery+identity/import 31/31 PASS; seluruh AutoTrade Next contracts 373/373 PASS; Strategy2/dry-run regression 63/63 PASS; `compileall` dan `git diff --check` exit 0.
+- Content-bound checkpoint mencakup Account, Order, Position/protection/policy reference, preparation, pending command refs, inbox, PENDING outbox, projection high-water, freeze, UNKNOWN deadline, dan capture time. Deterministic plan melarang strategy evaluation/decision baru, menjalankan query-before-resubmit, membekukan mismatch, serta membatasi correction ke empat taxonomy dengan evidence/approval/idempotency/exact high-water.
+- Review menghapus duplicate-submit hazard: pending `IntentPrepared` hanya dipulihkan melalui deterministic outbox redelivery; tidak ada direct redispatch kedua untuk order yang sama.
+- Commit tidak mencakup dirty user/Gemini files dan tidak mengakses/mengubah VM.
+- Durable startup loader, SQLite journal replay, inbox acknowledgment, dispatcher, projection rebuild, correction commit handler, fencing, restart crash matrix, dan RTO/RPO proof tetap deferred. Story 2.6 tetap `review` dengan factual verdict **PARTIAL**, bukan PASS/done.
+- Verdict rolling Story 2.6 berubah dari **FAIL** menjadi **PARTIAL**; rolling total menjadi **9 PASS / 5 PARTIAL / 18 FAIL**. Migrasi tetap belum selesai dan belum siap deploy/promotion.

@@ -31,6 +31,7 @@ so that crash atau ambiguous acknowledgment tidak mengubah sejarah atau menambah
 
 ## Completion Evidence — 2026-08-30
 
+- Review-ready implementation commit: `9dbde0c`.
 - RED: import error karena canonical recovery checkpoint/correction/plan surface belum ada.
 - Focused recovery contracts: 8/8 PASS; recovery + identity/import matrix: 31/31 PASS.
 - Seluruh AutoTrade Next contracts: 373/373 PASS.
