@@ -678,3 +678,15 @@ Dokumen ini adalah baseline audit. Perubahan verdict harus mencantumkan commit b
 - Dirty perubahan user/Gemini pada `domain/fencing.py` memang menutup reproduksi future-epoch lama, tetapi file tersebut—bersama `domain/accounting.py`, `domain/numeric.py`, `core/config.py`, dan `scalper_pairs.txt`—tidak dimasukkan ke commit Codex. Adapter baru tidak bergantung pada guard uncommitted tersebut. VM tidak diakses atau diubah.
 - Wiring adapter sebagai satu-satunya boundary seluruh canonical mutation, versioned production schema migration, backup/restore, multi-process crash/restart matrix, dan deployment evidence tetap deferred. Story 3.1 berada pada `review` dengan factual verdict **PARTIAL**, bukan PASS/done.
 - Verdict rolling Story 3.1 berubah dari **FAIL** menjadi **PARTIAL**; rolling total menjadi **9 PASS / 7 PARTIAL / 16 FAIL**. Migrasi Epic 1–5 tetap belum selesai dan belum siap deploy/promotion.
+
+### 16.8 Story 3.2 — atomic allocation semantic kernel diperkuat, persistence CAS masih terbuka 2026-08-30
+
+- Baseline remediasi: `2907e3ea6a2d8b03e322622e0b07b7c34a29cf02`.
+- Commit implementasi review-ready: `e8e3a39e77ca021fae0bf189d2d70fa0176bf298` (`feat(autotrade-next): harden atomic portfolio allocation`).
+- Bukti final: focused allocation 8/8 PASS; allocation+identity/import 31/31 PASS; seluruh AutoTrade Next contracts 404/404 PASS; canonical Strategy2/dry-run regression command 61/61 PASS; `compileall` dan `git diff --check` exit 0.
+- Defect R04 ditutup di kernel baru: conservation memakai exact common-scale arithmetic, bukan raw units. Reservation mengikat notional, planned loss, fees, slippage/impact, dan turnover; multiple/partial Fill content-bound sementara UNKNOWN/partial mempertahankan remainder dan rounding residual sampai terminal evidence.
+- Frozen consistency cut mengikat opportunity set, equity, market cutoff, journal high-water, Positions, working orders, RiskState, dan observed constituent checkpoints. Batch scan-order independent dan all-or-none menolak stale constituent, duplicate decision/reservation/pair ownership, atau equity overflow tanpa executable subset.
+- Accepted maupun rejected batch reference diturunkan ulang dari preimage. Direct construction dengan forged event/outbox, stale risk-increasing constituent, terminal active remainder, atau over-equity allocation fail closed.
+- Implementasi tidak mengedit atau bergantung pada dirty user/Gemini `domain/numeric.py`/`domain/accounting.py`; seluruh file user lain tetap tidak masuk commit dan VM tidak diakses atau diubah.
+- Application handler yang mengikat final Decisions, reservations, RiskState, event, dan outbox ke satu `SQLiteFencedJournal` expected-sequence CAS belum tersedia. Karena atomic persistence acceptance tersebut masih deferred, Story 3.2 tetap `review` dengan factual verdict **PARTIAL**, bukan PASS/done.
+- Baseline Story 3.2 sudah **PARTIAL**, sehingga rolling total tidak berubah: **9 PASS / 7 PARTIAL / 16 FAIL**. Migrasi tetap belum selesai dan belum siap deploy/promotion.

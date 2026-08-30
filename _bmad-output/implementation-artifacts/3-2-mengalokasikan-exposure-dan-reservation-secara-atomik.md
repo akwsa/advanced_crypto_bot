@@ -30,6 +30,7 @@ so that pair, Horizon, capacity, dan exposure tidak bergantung pada scan order a
 
 ## Completion Evidence — 2026-08-30
 
+- Review-ready implementation commit: `e8e3a39e77ca021fae0bf189d2d70fa0176bf298`.
 - RED: import/collection gagal karena atomic allocation types belum ada.
 - Focused allocation 8/8; allocation+identity/import 31/31 PASS.
 - Seluruh AutoTrade Next contracts 404/404; canonical Strategy2/dry-run regression 61/61 PASS.
