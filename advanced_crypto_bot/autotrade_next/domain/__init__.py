@@ -47,7 +47,11 @@ from .market import (
     TimestampUnit, evaluate_recovery_gate,
 )
 from .accounting import CashLedgerEntry, MovementType, PositionAccount
-from .calibration import ExecutionCalibrationReport
+from .calibration import (
+    CalibrationContext, CalibrationError, CalibrationMetric, CalibrationPoint,
+    CalibrationTolerance, CalibrationVerdict, EvidenceAuthority, EvidenceLabel,
+    ExecutionCalibrationReport,
+)
 from .exit_protection import (
     DustIncident, ExitDecision, ExitError, ExitEvaluation, ExitEvaluator,
     ExitFillResult, ExitReason, ExitSignals, PositionProtectionState,
@@ -127,6 +131,12 @@ __all__ = (
     "CandidateSnapshot",
     "CandidateTrigger",
     "CandidateUse",
+    "CalibrationContext",
+    "CalibrationError",
+    "CalibrationMetric",
+    "CalibrationPoint",
+    "CalibrationTolerance",
+    "CalibrationVerdict",
     "CapabilityArtifact",
     "CapabilityEntry",
     "CapabilityLookup",
@@ -152,6 +162,8 @@ __all__ = (
     "DeterministicIdentity",
     "EligibilityReason",
     "EvidenceAdmission",
+    "EvidenceAuthority",
+    "EvidenceLabel",
     "EvidenceDisposition",
     "EvidencePolicy",
     "EvidenceRequirement",
