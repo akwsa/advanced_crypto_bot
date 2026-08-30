@@ -1,5 +1,13 @@
 # Deferred Work
 
+- source_spec: `spec-3-1-durable-fenced-journal.md`
+  summary: Wire `SQLiteFencedJournal.append` sebagai satu-satunya commit boundary untuk settlement, protective EXIT, recovery correction, safety/risk policy, inbox, outbox, dan projection high-water.
+  evidence: Persistent adapter dan crash/fence contracts lulus, tetapi handler saat ini masih memakai port/reference memory UoW sehingga Story 3.1 belum membuktikan bahwa setiap canonical mutation melewati fence.
+
+- source_spec: `spec-3-1-durable-fenced-journal.md`
+  summary: Tambahkan versioned production schema migration, backup/restore, multi-process crash/restart matrix, dan operational deployment evidence untuk fenced journal.
+  evidence: `initialize()` hanya membuat isolated test foundation; offline migration/cutover dan VM runtime belum diotorisasi atau dijalankan.
+
 - source_spec: `spec-2-2-market-snapshot-eligibility-remediation.md`
   summary: Tetapkan fee rounding policy simulator berdasarkan exact walked notional, bukan rounded WAP.
   evidence: Review Story 2.2 menemukan ASK-ceil/BID-floor WAP dapat menggeser fee; ini merupakan kebijakan Story 2.3 yang tidak termasuk izin arithmetic quantity terbatas.

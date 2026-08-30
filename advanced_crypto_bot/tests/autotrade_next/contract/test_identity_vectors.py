@@ -444,6 +444,8 @@ def test_adapters_obey_explicit_domain_port_dependency_matrix_without_horizontal
         "indodax/__init__": {"capability_registry", "market_evidence"},
         "indodax/capability_registry": set(),
         "indodax/market_evidence": set(),
+        "sqlite/__init__": {"fenced_journal"},
+        "sqlite/fenced_journal": set(),
     }
     allowed_absolute_by_module = {
         "__init__": set(),
@@ -457,6 +459,11 @@ def test_adapters_obey_explicit_domain_port_dependency_matrix_without_horizontal
             "__future__", "collections.abc", "datetime",
             "autotrade_next.domain.content", "autotrade_next.domain.encoding",
             "autotrade_next.domain.errors", "autotrade_next.domain.market",
+        },
+        "sqlite/__init__": set(),
+        "sqlite/fenced_journal": {
+            "__future__", "contextlib", "dataclasses", "datetime", "enum",
+            "pathlib", "sqlite3",
         },
     }
     for path in root.rglob("*.py"):
