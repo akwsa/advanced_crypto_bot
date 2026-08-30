@@ -28,6 +28,11 @@ from .decision import (
     PositionContext, PositionState, commit_decision, evaluate_decision,
 )
 from .identity import DeterministicIdentity, IdentityError, build_identity, identity_preimage
+from .execution import (
+    AccountState, DispatchEnvelope, ExecutionError, ExecutionIntent, ExecutionOrder,
+    ExecutionPreparation, ExecutionSide, OrderSettlementState, OutboxMessage,
+    OutboxStatus, SettlementEntry, SettlementResult, prepare_execution, settle_event,
+)
 from .errors import CapabilityRegistryError, MarketEvidenceError, RecoveryEvaluationError
 from .market import (
     AffectedScope, AuthScope, AuthoritativeFieldEvidence, CapabilityArtifact,
@@ -142,6 +147,11 @@ __all__ = (
     "EvidencePolicy",
     "EvidenceRequirement",
     "EvidenceRequirementSet",
+    "ExecutionError",
+    "ExecutionIntent",
+    "ExecutionOrder",
+    "ExecutionPreparation",
+    "ExecutionSide",
     "FeeType",
     "FreezeRequest",
     "GapBehavior",
@@ -154,6 +164,9 @@ __all__ = (
     "LifecycleScenario",
     "OrderSimulator",
     "OrderStatus",
+    "OrderSettlementState",
+    "OutboxMessage",
+    "OutboxStatus",
     "RngRef",
     "IdentityError",
     "IntegrityIncident",
@@ -181,6 +194,8 @@ __all__ = (
     "ReconciliationCheckpoint",
     "ReconciliationRequest",
     "ScaledInteger",
+    "SettlementEntry",
+    "SettlementResult",
     "ScenarioOutcome",
     "SimulatedFill",
     "SimulatorError",
@@ -192,6 +207,7 @@ __all__ = (
     "SourceCursor",
     "StableRef",
     "AffectedScope",
+    "AccountState",
     "AuthScope",
     "AuthoritativeFieldEvidence",
     "ShortfallComponent",
@@ -206,6 +222,7 @@ __all__ = (
     "canonical_bytes",
     "clock_read_ref",
     "identity_preimage",
+    "prepare_execution",
     "policy_state_ref",
     "capture_candidate",
     "capture_candidate_v2",
@@ -219,6 +236,7 @@ __all__ = (
     "evaluate_recovery_gate",
     "regenerate_replay",
     "reduce_lifecycle",
+    "settle_event",
     "revise_candidate",
     "semantic_hash",
     "semantic_projection",
@@ -226,4 +244,5 @@ __all__ = (
     "stable_ref_key",
     "TimestampContract",
     "TimestampUnit",
+    "DispatchEnvelope",
 )

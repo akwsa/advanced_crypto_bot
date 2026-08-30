@@ -284,7 +284,7 @@ def test_domain_package_only_imports_stdlib_or_relative_domain_modules():
         "unicodedata",
     }
     allowed_relative_by_module = {
-        "__init__": {"accounting", "calibration", "candidate", "comparison", "content", "cutover", "decision", "degradation", "encoding", "errors", "evidence_report", "exit_protection", "experiment", "fact_import", "fencing", "identity", "kill_switch", "legacy_inventory", "market", "migration_gate", "numeric", "policy", "policy_isolation", "portfolio_allocation", "promotion", "recovery", "replay", "risk_governor", "rollback_retention", "runtime_artifact", "safety_state", "simulator", "trial_ledger"},
+        "__init__": {"accounting", "calibration", "candidate", "comparison", "content", "cutover", "decision", "degradation", "encoding", "errors", "evidence_report", "execution", "exit_protection", "experiment", "fact_import", "fencing", "identity", "kill_switch", "legacy_inventory", "market", "migration_gate", "numeric", "policy", "policy_isolation", "portfolio_allocation", "promotion", "recovery", "replay", "risk_governor", "rollback_retention", "runtime_artifact", "safety_state", "simulator", "trial_ledger"},
         "accounting": {"content", "errors", "numeric"},
         "calibration": {"content", "numeric"},
         "candidate": {"encoding", "errors", "identity", "market"},
@@ -296,6 +296,7 @@ def test_domain_package_only_imports_stdlib_or_relative_domain_modules():
         "encoding": {"errors", "numeric"},
         "errors": set(),
         "evidence_report": {"content", "numeric"},
+        "execution": {"content", "identity", "numeric", "simulator"},
         "exit_protection": {"errors", "numeric"},
         "experiment": {"content", "errors"},
         "fact_import": {"content", "errors"},
@@ -351,23 +352,36 @@ def test_domain_package_only_imports_stdlib_or_relative_domain_modules():
                 )
 
 
-def test_ports_and_projections_obey_explicit_read_only_layer_matrix():
+def test_application_ports_and_projections_obey_explicit_layer_matrix():
     root = Path(__file__).parents[3] / "autotrade_next"
     allowed_relative_by_module = {
-        ("ports", "__init__"): {"market", "query", "venue"},
+        ("application", "__init__"): {"settlement"},
+        ("application", "settlement"): set(),
+        ("ports", "__init__"): {"market", "query", "settlement", "venue"},
         ("ports", "market"): set(),
         ("ports", "query"): set(),
+        ("ports", "settlement"): set(),
         ("ports", "venue"): set(),
         ("projections", "__init__"): {"decision_provenance", "integrity_cockpit"},
         ("projections", "decision_provenance"): set(),
         ("projections", "integrity_cockpit"): set(),
     }
     allowed_absolute_by_module = {
+        ("application", "__init__"): set(),
+        ("application", "settlement"): {
+            "__future__", "dataclasses", "datetime",
+            "autotrade_next.domain.execution", "autotrade_next.domain.numeric",
+            "autotrade_next.domain.simulator", "autotrade_next.ports.settlement",
+        },
         ("ports", "__init__"): set(),
         ("ports", "market"): {
             "__future__", "typing", "autotrade_next.domain.market",
         },
         ("ports", "query"): {"typing"},
+        ("ports", "settlement"): {
+            "__future__", "dataclasses", "typing",
+            "autotrade_next.domain.execution", "autotrade_next.domain.simulator",
+        },
         ("ports", "venue"): {"typing", "autotrade_next.domain.simulator"},
         ("projections", "__init__"): set(),
         ("projections", "decision_provenance"): {
@@ -381,7 +395,7 @@ def test_ports_and_projections_obey_explicit_read_only_layer_matrix():
             "autotrade_next.domain.numeric",
         },
     }
-    for layer in ("ports", "projections"):
+    for layer in ("application", "ports", "projections"):
         for path in (root / layer).glob("*.py"):
             key = (layer, path.stem)
             assert key in allowed_relative_by_module
