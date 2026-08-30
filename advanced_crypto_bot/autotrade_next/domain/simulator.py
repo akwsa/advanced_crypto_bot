@@ -14,6 +14,16 @@ from .market import MarketSnapshot, OrderBookSide
 from .numeric import ScaledInteger
 
 
+def _units_at_scale(value: ScaledInteger, scale: int) -> int:
+    """Represent a quantity exactly at the instrument's common scale."""
+    if value.scale <= scale:
+        return value.units * (10 ** (scale - value.scale))
+    divisor = 10 ** (value.scale - scale)
+    if value.units % divisor:
+        raise MarketEvidenceError("SILENT_PRECISION_LOSS", path=("quantity",))
+    return value.units // divisor
+
+
 class OrderStatus(str, Enum):
     ACCEPTED = "ACCEPTED"
     OPEN = "OPEN"
@@ -146,16 +156,20 @@ class OrderSimulator:
                 event_at_utc=evaluated_at_utc,
             )
 
-        filled_units = min(capacity.units, requested_size.units)
-        remaining_units = requested_size.units - filled_units
+        quantity_scale = snapshot.rules.quantity_scale
+        capacity_units = _units_at_scale(capacity, quantity_scale)
+        requested_units = _units_at_scale(requested_size, quantity_scale)
+        filled_units = min(capacity_units, requested_units)
+        remaining_units = requested_units - filled_units
 
         fee_units = (filled_units * avg_price.units * self.taker_fee_bps) // 10000
+        fee_scale = quantity_scale + avg_price.scale
         fill = SimulatedFill(
             fill_id=f"fill-{order_id}-1",
             order_id=order_id,
             price=avg_price,
-            quantity=ScaledInteger(filled_units, requested_size.scale),
-            fee=ScaledInteger(fee_units, 2),
+            quantity=ScaledInteger(filled_units, quantity_scale),
+            fee=ScaledInteger(fee_units, fee_scale),
             fee_type=FeeType.TAKER,
             filled_at_utc=evaluated_at_utc,
         )
@@ -165,8 +179,8 @@ class OrderSimulator:
             event_id=f"sim-evt-{order_id}-exec",
             order_id=order_id,
             status=status,
-            filled_quantity=ScaledInteger(filled_units, requested_size.scale),
-            remaining_quantity=ScaledInteger(remaining_units, requested_size.scale),
+            filled_quantity=ScaledInteger(filled_units, quantity_scale),
+            remaining_quantity=ScaledInteger(remaining_units, quantity_scale),
             average_price=avg_price,
             fills=(fill,),
             event_at_utc=evaluated_at_utc,
