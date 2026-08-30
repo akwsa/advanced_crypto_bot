@@ -64,7 +64,11 @@ from .cutover import CutoverState, CutoverStep
 from .rollback_retention import AdditiveRollbackRecord
 from .recovery import LifecycleRecoveryManager, RecoveryAction, RecoveryState
 from .numeric import ScaledInteger
-from .simulator import FeeType, OrderSimulator, OrderStatus, SimulatedFill, SimulatorEvent
+from .simulator import (
+    CostRules, FeeType, LifecycleAction, LifecycleActionType, LifecycleResult,
+    LifecycleScenario, OrderSimulator, OrderStatus, ScenarioOutcome, SimulatedFill,
+    SimulatorError, SimulatorEvent, reduce_lifecycle,
+)
 from .policy import (
     CalibrationEvidence,
     CalibrationStatus,
@@ -118,6 +122,7 @@ __all__ = (
     "CalibrationStatus",
     "CanonicalEncodingError",
     "CanonicalDecision",
+    "CostRules",
     "CommitStatus",
     "ContentRecipe",
     "ContentRef",
@@ -137,11 +142,18 @@ __all__ = (
     "EvidencePolicy",
     "EvidenceRequirement",
     "EvidenceRequirementSet",
+    "FeeType",
     "FreezeRequest",
     "GapBehavior",
     "GrossReturnEvidence",
     "MarketEvidence",
     "MarketEvidenceError",
+    "LifecycleAction",
+    "LifecycleActionType",
+    "LifecycleResult",
+    "LifecycleScenario",
+    "OrderSimulator",
+    "OrderStatus",
     "RngRef",
     "IdentityError",
     "IntegrityIncident",
@@ -169,6 +181,10 @@ __all__ = (
     "ReconciliationCheckpoint",
     "ReconciliationRequest",
     "ScaledInteger",
+    "ScenarioOutcome",
+    "SimulatedFill",
+    "SimulatorError",
+    "SimulatorEvent",
     "ScopeKind",
     "ScopedClearRequest",
     "ClockRead",
@@ -202,6 +218,7 @@ __all__ = (
     "evaluate_policy_transition",
     "evaluate_recovery_gate",
     "regenerate_replay",
+    "reduce_lifecycle",
     "revise_candidate",
     "semantic_hash",
     "semantic_projection",

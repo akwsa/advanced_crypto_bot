@@ -354,9 +354,10 @@ def test_domain_package_only_imports_stdlib_or_relative_domain_modules():
 def test_ports_and_projections_obey_explicit_read_only_layer_matrix():
     root = Path(__file__).parents[3] / "autotrade_next"
     allowed_relative_by_module = {
-        ("ports", "__init__"): {"market", "query"},
+        ("ports", "__init__"): {"market", "query", "venue"},
         ("ports", "market"): set(),
         ("ports", "query"): set(),
+        ("ports", "venue"): set(),
         ("projections", "__init__"): {"decision_provenance", "integrity_cockpit"},
         ("projections", "decision_provenance"): set(),
         ("projections", "integrity_cockpit"): set(),
@@ -367,6 +368,7 @@ def test_ports_and_projections_obey_explicit_read_only_layer_matrix():
             "__future__", "typing", "autotrade_next.domain.market",
         },
         ("ports", "query"): {"typing"},
+        ("ports", "venue"): {"typing", "autotrade_next.domain.simulator"},
         ("projections", "__init__"): set(),
         ("projections", "decision_provenance"): {
             "__future__", "base64", "binascii", "dataclasses", "datetime",

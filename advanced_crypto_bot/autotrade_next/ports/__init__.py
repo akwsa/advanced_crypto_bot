@@ -2,5 +2,6 @@
 
 from .query import ReadOnlyQueryPort
 from .market import MarketEvidenceAdapterPort, RecoveryGatePort
+from .venue import VenuePort
 
-__all__ = ("MarketEvidenceAdapterPort", "ReadOnlyQueryPort", "RecoveryGatePort")
+__all__ = ("MarketEvidenceAdapterPort", "ReadOnlyQueryPort", "RecoveryGatePort", "VenuePort")
