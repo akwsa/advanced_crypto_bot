@@ -33,6 +33,7 @@ so that partial/retry tidak menciptakan ghost Position atau P&L ganda.
 
 ## Completion Evidence — 2026-08-30
 
+- Review-ready implementation commit: `a835b7a`.
 - RED: collection error `autotrade_next.application` belum tersedia.
 - Focused settlement + AST matrix: 37/37 PASS setelah adversarial patch.
 - Seluruh AutoTrade Next contracts: 353/353 PASS.

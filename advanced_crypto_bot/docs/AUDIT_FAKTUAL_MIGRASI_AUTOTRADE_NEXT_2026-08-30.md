@@ -622,3 +622,14 @@ Dokumen ini adalah baseline audit. Perubahan verdict harus mencantumkan commit b
 - Human acceptance diterima melalui instruksi `continue` pada 2026-08-30.
 - Verdict rolling Story 2.3 berubah dari **FAIL** menjadi **PASS**; baseline tabel historis tidak ditulis ulang.
 - Rolling total setelah acceptance Story 2.3: **9 PASS / 2 PARTIAL / 21 FAIL**. Migrasi Epic 1–5 tetap belum selesai.
+
+### 16.3 Story 2.4 — semantic kernel selesai, dependency masih terbuka 2026-08-30
+
+- Baseline remediasi: `6a215cea3ff470c7a3f980e4acbede84d56bd548`.
+- Commit implementasi review-ready: `a835b7a` (`feat(autotrade-next): add fill-authoritative settlement kernel`).
+- Bukti final pada working tree implementasi: focused settlement/identity 37/37 PASS; seluruh AutoTrade Next contracts 353/353 PASS; Strategy2/dry-run regression 63/63 PASS; `compileall` dan `git diff --check` exit 0.
+- Dua adversarial reviewer dijalankan. Patch review mencakup coarse quote-scale notional compatibility dengan stream Story 2.3, bounded scale, pinned schema dan monotonic event time, strict quantity scale/prefix, UNKNOWN mutation/freeze, account revision CAS contract, account+instrument lookup, cross-aggregate DTO/bundle binding, settlement-entry provenance, fill-history split-brain detection, serta cleanup UoW pada read/noop/error.
+- Commit tidak mencakup atau mengubah dirty user/Gemini files `domain/accounting.py`, `domain/numeric.py`, `domain/fencing.py`, `core/config.py`, maupun `scalper_pairs.txt`.
+- Durable SQLite adapter, persistent writer fence/freeze recovery, canonical account-cash plus per-instrument position storage, cross-order reservation, offline migration, dan crash/restart proof tetap deferred. Karena veto dependency tersebut, Story 2.4 tetap `review` dengan factual verdict **PARTIAL**, bukan PASS/done.
+- Verdict rolling Story 2.4 berubah dari **FAIL** menjadi **PARTIAL**; baseline tabel historis tidak ditulis ulang.
+- Rolling total setelah semantic acceptance Story 2.4: **9 PASS / 3 PARTIAL / 20 FAIL**. Migrasi Epic 1–5 tetap belum selesai dan belum siap dipromosikan/deploy.
