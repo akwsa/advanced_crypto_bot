@@ -65,7 +65,11 @@ from .portfolio_allocation import (
     ReservationBucket, ReservationConsumption, ReservationLifecycle,
     ReservationVector, RiskReservation, build_portfolio_allocation,
 )
-from .risk_governor import RiskCheckReason, RiskEvaluationResult, RiskGovernor
+from .risk_governor import (
+    AdjustmentKind, CanonicalEquitySnapshot, EntryRiskRequest,
+    QuantityAdjustment, RiskCheckReason, RiskEvaluationResult, RiskGovernor,
+    RiskPolicy, RiskPortfolioState,
+)
 from .safety_state import SafetyCause, SafetyCauseKind, SafetyScopeLevel, SafetyStateLattice
 from .kill_switch import KillState, KillSwitchStateMachine
 from .degradation import DegradationGovernor, DegradationLevel
@@ -127,6 +131,7 @@ from .replay import (
 )
 
 __all__ = (
+    "AdjustmentKind",
     "AllocationProposal",
     "AllocationRejectCode",
     "AllocationRejection",
@@ -155,6 +160,7 @@ __all__ = (
     "CalibrationStatus",
     "CanonicalEncodingError",
     "CanonicalDecision",
+    "CanonicalEquitySnapshot",
     "CostRules",
     "CommitStatus",
     "ConstituentCheckpoint",
@@ -171,6 +177,7 @@ __all__ = (
     "DecisionReplayBundle",
     "DeterministicIdentity",
     "EligibilityReason",
+    "EntryRiskRequest",
     "EvidenceAdmission",
     "EvidenceAuthority",
     "EvidenceLabel",
@@ -212,6 +219,7 @@ __all__ = (
     "ProductFamily",
     "QualificationReason",
     "QualificationStatus",
+    "QuantityAdjustment",
     "PolicyEvaluationError",
     "PolicyState",
     "PolicyTransition",
@@ -237,6 +245,11 @@ __all__ = (
     "ReservationLifecycle",
     "ReservationVector",
     "RiskReservation",
+    "RiskCheckReason",
+    "RiskEvaluationResult",
+    "RiskGovernor",
+    "RiskPolicy",
+    "RiskPortfolioState",
     "RecoveryPlan",
     "RecoveryAction",
     "RecoveryState",

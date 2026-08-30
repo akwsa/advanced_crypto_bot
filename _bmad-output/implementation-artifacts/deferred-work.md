@@ -1,5 +1,9 @@
 # Deferred Work
 
+- source_spec: `spec-3-3-versioned-risk-governor.md`
+  summary: Resolve authenticated RiskPolicy/equity/market/adjustment evidence dan atomically persist RiskState, reservation, decision, event, serta outbox through fenced expected-sequence CAS.
+  evidence: Pure RiskGovernor menegakkan seluruh canonical ceilings dan quantity monotonicity, tetapi ContentRef existence/authority dan runtime state mutation belum diverifikasi; Story 3.3 maksimal PARTIAL.
+
 - source_spec: `spec-3-2-atomic-portfolio-allocation.md`
   summary: Commit accepted PortfolioAllocation decisions, five-dimensional reservations, next RiskState, canonical event, dan PENDING outbox melalui satu `SQLiteFencedJournal` expected-sequence CAS.
   evidence: Pure kernel membuktikan consistency cut, conservation, uniqueness, stale rejection, dan content binding, tetapi belum menjadi runtime persistence boundary sehingga Story 3.2 tetap PARTIAL.
