@@ -72,7 +72,11 @@ from .migration_gate import MigrationVerificationResult
 from .fact_import import ApprovedExternalFact
 from .cutover import CutoverState, CutoverStep
 from .rollback_retention import AdditiveRollbackRecord
-from .recovery import LifecycleRecoveryManager, RecoveryAction, RecoveryState
+from .recovery import (
+    CorrectionKind, CorrectionRequest, LifecycleRecoveryManager,
+    ProjectionHighWater, RecoveryAction, RecoveryCheckpoint, RecoveryError,
+    RecoveryPlan, RecoveryState, VenueOrderEvidence, plan_recovery,
+)
 from .numeric import ScaledInteger
 from .simulator import (
     CostRules, FeeType, LifecycleAction, LifecycleActionType, LifecycleResult,
@@ -196,12 +200,18 @@ __all__ = (
     "ReplayObservability",
     "ReplayResult",
     "RecoveryContract",
+    "RecoveryCheckpoint",
     "RecoveryDisposition",
     "RecoveryEvaluationError",
+    "RecoveryError",
     "RecoveryGateResult",
     "RecoveryMode",
     "RecoveryProof",
     "RecoveryRequest",
+    "RecoveryPlan",
+    "RecoveryAction",
+    "RecoveryState",
+    "LifecycleRecoveryManager",
     "ReconciliationCheckpoint",
     "ReconciliationRequest",
     "ScaledInteger",
@@ -219,6 +229,10 @@ __all__ = (
     "StableRef",
     "AffectedScope",
     "AccountState",
+    "CorrectionKind",
+    "CorrectionRequest",
+    "ProjectionHighWater",
+    "VenueOrderEvidence",
     "DustIncident",
     "AuthScope",
     "AuthoritativeFieldEvidence",
@@ -235,6 +249,7 @@ __all__ = (
     "clock_read_ref",
     "identity_preimage",
     "prepare_execution",
+    "plan_recovery",
     "apply_exit_fill",
     "build_exit_execution",
     "evaluate_exit",
