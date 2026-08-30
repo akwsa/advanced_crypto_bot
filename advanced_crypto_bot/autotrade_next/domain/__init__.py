@@ -48,7 +48,12 @@ from .market import (
 )
 from .accounting import CashLedgerEntry, MovementType, PositionAccount
 from .calibration import ExecutionCalibrationReport
-from .exit_protection import ExitDecision, ExitEvaluator, ExitReason, ProtectionState
+from .exit_protection import (
+    DustIncident, ExitDecision, ExitError, ExitEvaluation, ExitEvaluator,
+    ExitFillResult, ExitReason, ExitSignals, PositionProtectionState,
+    PositionProtectionStatus, ProtectionState, apply_exit_fill,
+    build_exit_execution, evaluate_exit, exit_command_ref,
+)
 from .fencing import FencedWriterAuthority, FencedWriterLease
 from .portfolio_allocation import PortfolioAllocation, RiskReservation
 from .risk_governor import RiskCheckReason, RiskEvaluationResult, RiskGovernor
@@ -152,6 +157,10 @@ __all__ = (
     "ExecutionOrder",
     "ExecutionPreparation",
     "ExecutionSide",
+    "ExitError",
+    "ExitEvaluation",
+    "ExitFillResult",
+    "ExitSignals",
     "FeeType",
     "FreezeRequest",
     "GapBehavior",
@@ -172,6 +181,8 @@ __all__ = (
     "IntegrityIncident",
     "PositionContext",
     "PositionState",
+    "PositionProtectionState",
+    "PositionProtectionStatus",
     "ProductFamily",
     "QualificationReason",
     "QualificationStatus",
@@ -208,6 +219,7 @@ __all__ = (
     "StableRef",
     "AffectedScope",
     "AccountState",
+    "DustIncident",
     "AuthScope",
     "AuthoritativeFieldEvidence",
     "ShortfallComponent",
@@ -223,6 +235,10 @@ __all__ = (
     "clock_read_ref",
     "identity_preimage",
     "prepare_execution",
+    "apply_exit_fill",
+    "build_exit_execution",
+    "evaluate_exit",
+    "exit_command_ref",
     "policy_state_ref",
     "capture_candidate",
     "capture_candidate_v2",

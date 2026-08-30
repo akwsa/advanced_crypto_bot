@@ -6,8 +6,10 @@ from .venue import VenuePort
 from .settlement import (
     PreparationCommitBundle, SettlementCommitBundle, SettlementUnitOfWork,
 )
+from .exit import ExitCommitBundle, ExitUnitOfWork
 
 __all__ = (
-    "MarketEvidenceAdapterPort", "PreparationCommitBundle", "ReadOnlyQueryPort",
+    "ExitCommitBundle", "ExitUnitOfWork", "MarketEvidenceAdapterPort",
+    "PreparationCommitBundle", "ReadOnlyQueryPort",
     "RecoveryGatePort", "SettlementCommitBundle", "SettlementUnitOfWork", "VenuePort",
 )

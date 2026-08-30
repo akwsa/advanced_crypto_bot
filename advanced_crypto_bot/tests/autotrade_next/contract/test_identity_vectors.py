@@ -297,7 +297,7 @@ def test_domain_package_only_imports_stdlib_or_relative_domain_modules():
         "errors": set(),
         "evidence_report": {"content", "numeric"},
         "execution": {"content", "identity", "numeric", "simulator"},
-        "exit_protection": {"errors", "numeric"},
+        "exit_protection": {"content", "execution", "identity", "numeric"},
         "experiment": {"content", "errors"},
         "fact_import": {"content", "errors"},
         "fencing": {"errors"},
@@ -355,9 +355,11 @@ def test_domain_package_only_imports_stdlib_or_relative_domain_modules():
 def test_application_ports_and_projections_obey_explicit_layer_matrix():
     root = Path(__file__).parents[3] / "autotrade_next"
     allowed_relative_by_module = {
-        ("application", "__init__"): {"settlement"},
+        ("application", "__init__"): {"exit", "settlement"},
+        ("application", "exit"): set(),
         ("application", "settlement"): set(),
-        ("ports", "__init__"): {"market", "query", "settlement", "venue"},
+        ("ports", "__init__"): {"exit", "market", "query", "settlement", "venue"},
+        ("ports", "exit"): set(),
         ("ports", "market"): set(),
         ("ports", "query"): set(),
         ("ports", "settlement"): set(),
@@ -373,6 +375,12 @@ def test_application_ports_and_projections_obey_explicit_layer_matrix():
             "autotrade_next.domain.execution", "autotrade_next.domain.numeric",
             "autotrade_next.domain.simulator", "autotrade_next.ports.settlement",
         },
+        ("application", "exit"): {
+            "__future__", "dataclasses", "datetime",
+                "autotrade_next.domain.content", "autotrade_next.domain.execution",
+                "autotrade_next.domain.exit_protection", "autotrade_next.domain.numeric",
+            "autotrade_next.ports.exit",
+        },
         ("ports", "__init__"): set(),
         ("ports", "market"): {
             "__future__", "typing", "autotrade_next.domain.market",
@@ -381,6 +389,11 @@ def test_application_ports_and_projections_obey_explicit_layer_matrix():
         ("ports", "settlement"): {
             "__future__", "dataclasses", "typing",
             "autotrade_next.domain.execution", "autotrade_next.domain.simulator",
+        },
+        ("ports", "exit"): {
+            "__future__", "dataclasses", "typing",
+            "autotrade_next.domain.content", "autotrade_next.domain.execution",
+            "autotrade_next.domain.exit_protection",
         },
         ("ports", "venue"): {"typing", "autotrade_next.domain.simulator"},
         ("projections", "__init__"): set(),

@@ -19,3 +19,11 @@
 - source_spec: `spec-2-4-fill-authoritative-settlement-kernel.md`
   summary: Persist dan pulihkan UNKNOWN entry freeze lintas restart/process sebelum runtime authority diberikan.
   evidence: Prepare handler fail-closed melalui `is_entry_frozen(scope, account)`, tetapi durable freeze cause, clear predicate, dan audited recovery merupakan dependency Story 3.4/3.7.
+
+- source_spec: `spec-2-5-unified-protective-exit-kernel.md`
+  summary: Implementasikan durable ExitUnitOfWork yang atomically mengikat Position/Policy transition, canonical event, outbox, Intent/Order, Story 2.4 settlement Fill, writer fence, dan expected sequence.
+  evidence: Semantic composite bundle serta commit-fault reference tests lulus, tetapi belum ada SQLite adapter/migration/crash proof; dependency Story 3.1/5.3 dan verdict Story 2.5 maksimal PARTIAL.
+
+- source_spec: `spec-2-5-unified-protective-exit-kernel.md`
+  summary: Verifikasi operator/risk/reconciliation evidence reference melalui authenticated approval/cause registry sebelum runtime command diterima.
+  evidence: Kernel tidak lagi menerima boolean self-attestation, tetapi reference existence/authorization verification merupakan dependency Story 3.4/3.7.
