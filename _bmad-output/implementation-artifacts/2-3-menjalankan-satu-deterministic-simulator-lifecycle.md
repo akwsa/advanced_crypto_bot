@@ -2,13 +2,13 @@
 story_id: "2.3"
 title: "Menjalankan satu deterministic simulator lifecycle"
 epic: "2"
-status: "review"
+status: "done"
 baseline_commit: "13c46fa231deb0de4606cea60f10e496c03f3877"
 ---
 
 # Story 2.3: Menjalankan satu deterministic simulator lifecycle
 
-Status: review
+Status: done
 
 ## Story
 
@@ -42,7 +42,7 @@ so that evidence fill tidak berasal dari model berbeda.
 - Seluruh AutoTrade Next contract suite: 339/339 PASS.
 - Strategy2/dry-run regression: 61/61 PASS.
 - `compileall` dan `git diff --check`: exit 0.
-- Status tetap `review` sampai adversarial review dan human acceptance selesai.
+- Dua adversarial reviewer selesai dan seluruh patch tervalidasi; acceptance pengguna diterima melalui instruksi `continue` pada 2026-08-30.
 
 ## File List
 
@@ -60,3 +60,4 @@ so that evidence fill tidak berasal dari model berbeda.
 ## Change Log
 
 - 2026-08-30: Story 2.3 diremediasi dari enum-only/single-terminal simulator menjadi review-ready deterministic lifecycle stream.
+- 2026-08-30: Human acceptance diterima; status Story 2.3 disinkronkan ke `done`.

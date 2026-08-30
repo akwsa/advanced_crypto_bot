@@ -612,3 +612,13 @@ Dokumen ini adalah baseline audit. Perubahan verdict harus mencantumkan commit b
 - Human acceptance diterima melalui instruksi `continue` pada 2026-08-30.
 - Verdict rolling Story 2.2 berubah dari **PARTIAL** menjadi **PASS**. Baseline tabel audit di atas tidak ditulis ulang agar snapshot historis tetap dapat direproduksi.
 - Rolling total setelah acceptance Story 2.2: **8 PASS / 2 PARTIAL / 22 FAIL**. Ini bukan klaim migrasi selesai.
+
+### 16.2 Story 2.3 — diterima 2026-08-30
+
+- Baseline remediasi: `13c46fa231deb0de4606cea60f10e496c03f3877`.
+- Commit implementasi review-ready: `c73a139` (`feat(autotrade-next): complete deterministic simulator lifecycle`).
+- Bukti final: focused lifecycle/isolation 18/18 PASS; seluruh AutoTrade Next contracts 339/339 PASS; Strategy2/dry-run regression 61/61 PASS; `compileall` dan `git diff --check` exit 0.
+- Dua adversarial reviewer dijalankan. Patch final mencakup recorded action timing, ambiguity/UNKNOWN, legal-transition reducer, cumulative conservation/fill-prefix checks, explicit nonterminal PARTIAL, exact single-rounding fee-tax, full subprocess replay, transitive dependency isolation, serta shared VenuePort schema.
+- Human acceptance diterima melalui instruksi `continue` pada 2026-08-30.
+- Verdict rolling Story 2.3 berubah dari **FAIL** menjadi **PASS**; baseline tabel historis tidak ditulis ulang.
+- Rolling total setelah acceptance Story 2.3: **9 PASS / 2 PARTIAL / 21 FAIL**. Migrasi Epic 1–5 tetap belum selesai.
