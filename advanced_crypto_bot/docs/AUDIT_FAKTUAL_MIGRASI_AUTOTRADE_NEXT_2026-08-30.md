@@ -655,3 +655,14 @@ Dokumen ini adalah baseline audit. Perubahan verdict harus mencantumkan commit b
 - Commit tidak mencakup dirty user/Gemini files dan tidak mengakses/mengubah VM.
 - Durable startup loader, SQLite journal replay, inbox acknowledgment, dispatcher, projection rebuild, correction commit handler, fencing, restart crash matrix, dan RTO/RPO proof tetap deferred. Story 2.6 tetap `review` dengan factual verdict **PARTIAL**, bukan PASS/done.
 - Verdict rolling Story 2.6 berubah dari **FAIL** menjadi **PARTIAL**; rolling total menjadi **9 PASS / 5 PARTIAL / 18 FAIL**. Migrasi tetap belum selesai dan belum siap deploy/promotion.
+
+### 16.6 Story 2.7 — labeled calibration kernel selesai, runtime corpus masih terbuka 2026-08-30
+
+- Baseline remediasi: `79df26cd57bd7bf5a11b2dc1086f2f11f4dd7da9`.
+- Commit implementasi review-ready: `8baacf13b41728cf5de1c0c40e35b70fa820d34e` (`feat(autotrade-next): add labeled execution calibration`).
+- Bukti final: focused calibration 6/6 PASS; calibration+identity/import 29/29 PASS; seluruh AutoTrade Next contracts 378/378 PASS; Strategy2/dry-run regression 63/63 PASS; `compileall` dan `git diff --check` exit 0.
+- Frozen calibration context mengikat instrument, horizon, size, regime, estimator, window, tolerance version, dan scenario corpus. Report mewajibkan tepat delapan metric execution dalam urutan canonical, masing-masing dengan predicted/comparison value exact-scale, evidence label, authority, sample count, evidence reference, serta tolerance yang content-bound.
+- Verdict report diturunkan secara deterministik dan tidak dapat di-self-attest. Label-authority mismatch, metric hilang/duplikat, invalid rate/scale/window, atau forged verdict fail closed; evidence inferred, simulated, dan counterfactual selalu `UNSCORABLE` untuk venue calibration walaupun error numeriknya kecil.
+- Commit tidak mencakup dirty user/Gemini files `domain/accounting.py`, `domain/numeric.py`, `domain/fencing.py`, `core/config.py`, maupun `scalper_pairs.txt`; tidak ada akses, restart, atau perubahan VM.
+- Runtime corpus ingestion, evidence resolver/persistence, shadow/venue observation aktual, dan promotion-policy consumer tetap deferred. Karena bukti runtime tersebut belum tersedia, Story 2.7 tetap `review` dengan factual verdict **PARTIAL**, bukan PASS/done.
+- Verdict rolling Story 2.7 berubah dari **FAIL** menjadi **PARTIAL**; rolling total menjadi **9 PASS / 6 PARTIAL / 17 FAIL**. Migrasi tetap belum selesai dan belum siap deploy/promotion.

@@ -30,6 +30,7 @@ so that cost model dan simulator latency/shortfall terus terkalibrasi.
 
 ## Completion Evidence — 2026-08-30
 
+- Review-ready implementation commit: `8baacf13b41728cf5de1c0c40e35b70fa820d34e`.
 - RED: import error karena labeled calibration types belum ada.
 - Focused calibration 6/6; calibration+identity/import 29/29 PASS.
 - Seluruh AutoTrade Next contracts 378/378; Strategy2/dry-run regression 63/63 PASS.
