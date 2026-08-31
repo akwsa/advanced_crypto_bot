@@ -316,7 +316,7 @@ def test_domain_package_only_imports_stdlib_or_relative_domain_modules():
         "risk_governor": {"content", "errors", "numeric"},
         "rollback_retention": {"content", "errors", "fencing"},
         "runtime_artifact": {"content", "errors"},
-        "safety_state": {"errors"},
+        "safety_state": {"content", "errors"},
         "simulator": {"content", "encoding", "errors", "market", "numeric"},
         "trial_ledger": {"content"},
     }

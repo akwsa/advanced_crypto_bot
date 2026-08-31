@@ -169,6 +169,7 @@ def _position_value(state: PositionProtectionState) -> dict[str, object]:
         "policy_state_ref": state.policy_state_ref,
         "protection": state.protection.to_canonical_value(),
         "pending_exit_key": state.pending_exit_key,
+        "pending_exit_sequence": state.pending_exit_sequence,
         "pending_order_id": state.pending_order_id,
         "processed_exit_fill_ids": state.processed_exit_fill_ids,
         "dust_incident_ref": (
@@ -309,7 +310,7 @@ class RecoveryCheckpoint:
 
     def binding_value(self) -> dict[str, object]:
         return {
-            "schema_version": "recovery-checkpoint:v1",
+            "schema_version": "recovery-checkpoint:v2",
             "authority_scope_id": self.authority_scope_id,
             "journal_high_water": self.journal_high_water,
             "account_snapshot": _account_value(self.account_snapshot),
@@ -330,7 +331,7 @@ class RecoveryCheckpoint:
     @classmethod
     def create(cls, **values) -> RecoveryCheckpoint:
         binding = {
-            "schema_version": "recovery-checkpoint:v1",
+            "schema_version": "recovery-checkpoint:v2",
             "authority_scope_id": values["authority_scope_id"],
             "journal_high_water": values["journal_high_water"],
             "account_snapshot": _account_value(values["account_snapshot"]),

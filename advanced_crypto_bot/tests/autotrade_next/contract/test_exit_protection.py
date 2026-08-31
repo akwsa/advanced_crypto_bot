@@ -7,9 +7,16 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from autotrade_next import domain as domain_package
 from autotrade_next.application.exit import EvaluateExitCommand, prepare_protective_exit
-from autotrade_next.domain.execution import ExecutionSide, SettlementEntry
+from autotrade_next.domain.content import ContentRef
+from autotrade_next.domain.execution import (
+    ExecutionSide,
+    SettlementEntry,
+    prepare_execution,
+)
 from autotrade_next.domain.exit_protection import (
+    DustIncident,
     ExitError,
     ExitReason,
     ExitSignals,
@@ -20,6 +27,7 @@ from autotrade_next.domain.exit_protection import (
     build_exit_execution,
     evaluate_exit,
 )
+from autotrade_next.domain.identity import build_identity
 from autotrade_next.domain.numeric import ScaledInteger
 from autotrade_next.ports.exit import ExitCommitBundle
 
@@ -44,6 +52,22 @@ def protection() -> ProtectionState:
 
 def position(*, quantity=amount(10000, 4), sequence=4,
              status=None, pending_target=None) -> PositionProtectionState:
+    pending_key = None
+    pending_order_id = None
+    if pending_target is not None:
+        pending_key = build_identity("event", {
+            "authority_scope_id": "dryrun:primary",
+            "aggregate_id": "position:btc:1",
+            "aggregate_seq": sequence,
+            "event_type": "ExitRequested",
+            "schema_version": 1,
+        }).key
+        pending_intent_id = build_identity("intent", {"decision_id": pending_key})
+        pending_order_id = build_identity("client_order", {
+            "authority_scope_id": "dryrun:primary",
+            "intent_id": pending_intent_id.key,
+            "order_ordinal": 0,
+        }).key
     return PositionProtectionState(
         position_id="position:btc:1",
         authority_scope_id="dryrun:primary",
@@ -58,8 +82,9 @@ def position(*, quantity=amount(10000, 4), sequence=4,
         protection=protection(),
         policy_state_ref="policy-state:v1:abc",
         partial_exit=False,
-        pending_exit_key=("event:v1:" + "a" * 64) if pending_target else None,
-        pending_order_id="client_order:v1:" + "b" * 64 if pending_target else None,
+        pending_exit_key=pending_key,
+        pending_exit_sequence=sequence if pending_target else None,
+        pending_order_id=pending_order_id,
         pending_reason=ExitReason.STOP_LOSS if pending_target else None,
         pending_target_quantity=pending_target,
         processed_exit_fill_ids=(),
@@ -81,6 +106,16 @@ def signals(**changes) -> ExitSignals:
     }
     values.update(changes)
     return ExitSignals(**values)
+
+
+def test_domain_package_exports_the_complete_unified_exit_surface():
+    assert {
+        "DustIncident", "ExitDecision", "ExitError", "ExitEvaluation",
+        "ExitEvaluator", "ExitFillResult", "ExitReason", "ExitSignals",
+        "PositionProtectionState", "PositionProtectionStatus", "ProtectionState",
+        "apply_exit_fill", "build_exit_execution", "evaluate_exit",
+        "exit_command_ref",
+    } <= set(domain_package.__all__)
 
 
 def entry(fill_id: str, quantity: ScaledInteger, order_id: str) -> SettlementEntry:
@@ -159,6 +194,31 @@ def test_high_water_advances_without_exit_and_partial_profit_has_explicit_target
     assert partial.next_state.pending_target_quantity == amount(2500, 4)
 
 
+def test_completed_partial_profit_does_not_retrigger_the_consumed_target():
+    evaluated = evaluate_exit(
+        position(), current_price=amount(5600, 2), evaluated_at_utc=AT,
+        signals=signals(profit_target_quantity=amount(2500, 4)),
+    )
+    filled = apply_exit_fill(
+        evaluated.next_state,
+        entry("profit-fill", amount(2500, 4), evaluated.next_state.pending_order_id),
+        minimum_venue_quantity=amount(100, 4), valuation=amount(4200, 2),
+        valuation_evidence_ref="valuation:l2:profit-fill",
+        recorded_at_utc=AT,
+    )
+
+    assert filled.next_state.status is PositionProtectionStatus.ACTIVE
+    assert filled.next_state.protection.take_profit_price is None
+    assert filled.next_state.protection.stop_loss_price == protection().stop_loss_price
+    assert (filled.next_state.protection.trailing_high_water
+            == evaluated.next_state.protection.trailing_high_water)
+    repeated = evaluate_exit(
+        filled.next_state, current_price=amount(5600, 2), evaluated_at_utc=AT,
+        signals=signals(profit_target_quantity=amount(2500, 4)),
+    )
+    assert repeated.reason is ExitReason.NO_EXIT
+
+
 def test_trailing_transition_time_monotonicity_and_protection_ranges_fail_closed():
     trailing = replace(
         position(),
@@ -197,6 +257,85 @@ def test_exit_builds_story_24_sell_execution_from_deterministic_event():
     assert prepared.order.side is ExecutionSide.SELL
     assert prepared.order.requested_quantity == evaluated.target_quantity
     assert prepared.intent.account_id == evaluated.next_state.account_id
+
+
+def test_exit_commit_rejects_a_buy_preparation_with_otherwise_matching_identity():
+    evaluated = evaluate_exit(
+        position(), current_price=amount(4400, 2), evaluated_at_utc=AT,
+        signals=signals(),
+    )
+    buy = prepare_execution(
+        decision_id=evaluated.event_id.key,
+        authority_scope_id=evaluated.next_state.authority_scope_id,
+        account_id=evaluated.next_state.account_id,
+        instrument_id=evaluated.next_state.instrument_id,
+        side=ExecutionSide.BUY,
+        requested_quantity=evaluated.target_quantity,
+        order_ordinal=0,
+        created_at_utc=AT,
+    )
+
+    with pytest.raises(TypeError, match="EXIT_COMMIT_MISMATCH"):
+        ExitCommitBundle.create(command(), evaluated, buy)
+
+
+def test_exit_values_reject_forged_content_reference_namespaces():
+    evaluated = evaluate_exit(
+        position(), current_price=amount(4400, 2), evaluated_at_utc=AT,
+        signals=signals(),
+    )
+    forged_event_ref = ContentRef.v2(
+        "forged.exit", "forged-event", evaluated.binding_value(),
+    )
+    with pytest.raises(ExitError, match="EXIT_EVENT_REFERENCE_MISMATCH"):
+        replace(
+            evaluated,
+            event_ref=forged_event_ref,
+            outbox=replace(evaluated.outbox, payload_ref=forged_event_ref),
+        )
+
+    incident = DustIncident.create(
+        position_id="position:btc:1",
+        remaining_quantity=amount(50, 4),
+        minimum_venue_quantity=amount(100, 4),
+        valuation=amount(22, 2),
+        valuation_evidence_ref="valuation:l2:dust",
+        triggering_fill_id="dust-fill",
+        recorded_at_utc=AT,
+    )
+    forged_incident_ref = ContentRef.v2(
+        "forged.dust", "forged-incident", incident.binding_value(),
+    )
+    with pytest.raises(ExitError, match="DUST_INCIDENT_REFERENCE_MISMATCH"):
+        replace(incident, incident_ref=forged_incident_ref)
+
+
+def test_pending_exit_and_closed_state_require_canonical_fill_provenance():
+    state = position()
+    attacker_key = "event:v1:" + "f" * 64
+    intent_id = build_identity("intent", {"decision_id": attacker_key})
+    attacker_order_id = build_identity("client_order", {
+        "authority_scope_id": state.authority_scope_id,
+        "intent_id": intent_id.key,
+        "order_ordinal": 0,
+    }).key
+    with pytest.raises(ExitError, match="EXIT_EVENT_ID_MISMATCH"):
+        replace(
+            state,
+            status=PositionProtectionStatus.EXIT_PENDING,
+            pending_exit_key=attacker_key,
+            pending_exit_sequence=state.sequence,
+            pending_order_id=attacker_order_id,
+            pending_reason=ExitReason.STOP_LOSS,
+            pending_target_quantity=state.remaining_quantity,
+        )
+
+    with pytest.raises(ExitError, match="MISSING_EXIT_FILL_HISTORY"):
+        replace(
+            state,
+            remaining_quantity=amount(0, 4),
+            status=PositionProtectionStatus.CLOSED,
+        )
 
 
 class MemoryExitUnitOfWork:

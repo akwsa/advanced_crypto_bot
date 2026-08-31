@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from autotrade_next.domain.content import ContentRef
-from autotrade_next.domain.execution import ExecutionPreparation
+from autotrade_next.domain.execution import ExecutionPreparation, ExecutionSide
 from autotrade_next.domain.exit_protection import (
     ExitEvaluation,
     PositionProtectionState,
@@ -49,6 +49,7 @@ class ExitCommitBundle:
                 raise TypeError("MISSING_EXIT_EXECUTION")
             state = self.evaluation.next_state
             if (self.evaluation.event_id is None
+                    or self.execution.intent.side is not ExecutionSide.SELL
                     or self.execution.intent.decision_id != self.evaluation.event_id.key
                     or self.execution.intent.authority_scope_id != state.authority_scope_id
                     or self.execution.intent.account_id != state.account_id

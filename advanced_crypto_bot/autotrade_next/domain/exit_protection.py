@@ -224,7 +224,9 @@ class DustIncident:
         if _compare(self.remaining_quantity, self.minimum_venue_quantity) >= 0:
             _fail("INVALID_DUST_QUANTITY")
         if (type(self.incident_ref) is not ContentRef
-                or not self.incident_ref.verify(self.binding_value())):
+                or self.incident_ref != ContentRef.v2(
+                    "execution.dust", "dust-incident", self.binding_value(),
+                )):
             _fail("DUST_INCIDENT_REFERENCE_MISMATCH")
 
     def binding_value(self) -> dict[str, object]:
@@ -278,6 +280,7 @@ class PositionProtectionState:
     policy_state_ref: str
     partial_exit: bool
     pending_exit_key: str | None
+    pending_exit_sequence: int | None
     pending_order_id: str | None
     pending_reason: ExitReason | None
     pending_target_quantity: ScaledInteger | None
@@ -300,7 +303,8 @@ class PositionProtectionState:
             _fail("INVALID_PROTECTION_STATUS")
         if type(self.protection) is not ProtectionState or type(self.partial_exit) is not bool:
             _fail("INVALID_PROTECTION_STATE")
-        pending = (self.pending_exit_key, self.pending_order_id, self.pending_reason,
+        pending = (self.pending_exit_key, self.pending_exit_sequence,
+                   self.pending_order_id, self.pending_reason,
                    self.pending_target_quantity)
         if self.status is PositionProtectionStatus.EXIT_PENDING:
             if (any(value is None for value in pending)
@@ -308,11 +312,23 @@ class PositionProtectionState:
                 _fail("INCOMPLETE_PENDING_EXIT")
             _reference(self.pending_exit_key)
             _reference(self.pending_order_id)
+            if (type(self.pending_exit_sequence) is not int
+                    or not 0 < self.pending_exit_sequence <= self.sequence):
+                _fail("INVALID_PENDING_EXIT_SEQUENCE")
             _scaled(self.pending_target_quantity, "INVALID_EXIT_TARGET", positive=True)
             if _compare(self.pending_target_quantity, self.remaining_quantity) > 0:
                 _fail("INVALID_EXIT_TARGET")
             if self.pending_reason is ExitReason.NO_EXIT:
                 _fail("INVALID_PENDING_EXIT_REASON")
+            expected_exit_key = build_identity("event", {
+                "authority_scope_id": self.authority_scope_id,
+                "aggregate_id": self.position_id,
+                "aggregate_seq": self.pending_exit_sequence,
+                "event_type": "ExitRequested",
+                "schema_version": 1,
+            }).key
+            if self.pending_exit_key != expected_exit_key:
+                _fail("EXIT_EVENT_ID_MISMATCH")
             intent_id = build_identity("intent", {"decision_id": self.pending_exit_key})
             expected_order_id = build_identity("client_order", {
                 "authority_scope_id": self.authority_scope_id,
@@ -326,6 +342,8 @@ class PositionProtectionState:
         if self.status is PositionProtectionStatus.CLOSED:
             if self.remaining_quantity.units != 0:
                 _fail("FALSE_CLOSED_POSITION")
+            if not self.processed_exit_fill_ids:
+                _fail("MISSING_EXIT_FILL_HISTORY")
         elif self.remaining_quantity.units <= 0:
             _fail("INVALID_POSITION_QUANTITY")
         if self.status is PositionProtectionStatus.QUARANTINED_DUST:
@@ -418,7 +436,9 @@ class ExitEvaluation:
             if (type(self.event_id) is not DeterministicIdentity
                     or type(self.event_ref) is not ContentRef
                     or type(self.outbox) is not OutboxMessage
-                    or not self.event_ref.verify(self.binding_value())):
+                    or self.event_ref != ContentRef.v2(
+                        "execution.exit", "exit-evaluation", self.binding_value(),
+                    )):
                 _fail("EXIT_EVENT_REFERENCE_MISMATCH")
             event_type = (
                 "DustQuarantined"
@@ -644,6 +664,7 @@ def evaluate_exit(state: PositionProtectionState, *, current_price: ScaledIntege
         ),
         protection=updated_protection,
         pending_exit_key=event_id.key if should_exit and not dust else None,
+        pending_exit_sequence=sequence if should_exit and not dust else None,
         pending_order_id=pending_order_id if should_exit and not dust else None,
         pending_reason=reason if should_exit and not dust else None,
         pending_target_quantity=target if should_exit and not dust else None,
@@ -698,10 +719,17 @@ class ExitFillResult:
                 != self.previous_state.authority_scope_id
                 or self.next_state.account_id != self.previous_state.account_id
                 or self.next_state.instrument_id != self.previous_state.instrument_id
-                or self.next_state.protection != self.previous_state.protection
                 or self.settlement_entry.fill_id
                 not in self.next_state.processed_exit_fill_ids
                 or self.next_state.dust_incident != self.incident):
+            _fail("EXIT_FILL_RESULT_MISMATCH")
+        expected_protection = self.previous_state.protection
+        if (self.previous_state.pending_reason is ExitReason.TAKE_PROFIT
+                and self.next_state.status is PositionProtectionStatus.ACTIVE):
+            expected_protection = replace(
+                expected_protection, take_profit_price=None,
+            )
+        if self.next_state.protection != expected_protection:
             _fail("EXIT_FILL_RESULT_MISMATCH")
 
 
@@ -769,14 +797,20 @@ def apply_exit_fill(state: PositionProtectionState, entry: SettlementEntry, *,
     else:
         status = PositionProtectionStatus.ACTIVE
     keep_pending = status is PositionProtectionStatus.EXIT_PENDING
+    next_protection = state.protection
+    if (state.pending_reason is ExitReason.TAKE_PROFIT
+            and status is PositionProtectionStatus.ACTIVE):
+        next_protection = replace(next_protection, take_profit_price=None)
     next_state = replace(
         state,
         remaining_quantity=remaining,
         sequence=state.sequence + 1,
         last_evaluated_at_utc=recorded_at_utc,
         status=status,
+        protection=next_protection,
         partial_exit=True,
         pending_exit_key=state.pending_exit_key if keep_pending else None,
+        pending_exit_sequence=state.pending_exit_sequence if keep_pending else None,
         pending_order_id=state.pending_order_id if keep_pending else None,
         pending_reason=state.pending_reason if keep_pending else None,
         pending_target_quantity=pending_remaining if keep_pending else None,

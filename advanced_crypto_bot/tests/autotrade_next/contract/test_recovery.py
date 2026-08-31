@@ -70,7 +70,8 @@ def position():
             AT + timedelta(hours=2), amount(500, 2), "invalidation:v1",
         ),
         policy_state_ref="policy-state:v1:abc", partial_exit=False,
-        pending_exit_key=None, pending_order_id=None, pending_reason=None,
+        pending_exit_key=None, pending_exit_sequence=None, pending_order_id=None,
+        pending_reason=None,
         pending_target_quantity=None, processed_exit_fill_ids=(), dust_incident=None,
     )
 
