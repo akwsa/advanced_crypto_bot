@@ -7,9 +7,11 @@ from .settlement import (
     PreparationCommitBundle, SettlementCommitBundle, SettlementUnitOfWork,
 )
 from .exit import ExitCommitBundle, ExitUnitOfWork
+from .recovery import CorrectionApprovalVerifier
 
 __all__ = (
     "ExitCommitBundle", "ExitUnitOfWork", "MarketEvidenceAdapterPort",
     "PreparationCommitBundle", "ReadOnlyQueryPort",
-    "RecoveryGatePort", "SettlementCommitBundle", "SettlementUnitOfWork", "VenuePort",
+    "CorrectionApprovalVerifier", "RecoveryGatePort", "SettlementCommitBundle",
+    "SettlementUnitOfWork", "VenuePort",
 )

@@ -11,7 +11,7 @@
 # Retrospective: optional <-> done
 
 generated: 2026-08-26T00:46:50+07:00
-last_updated: 2026-08-31T11:14:06+07:00
+last_updated: 2026-08-31T16:47:45+07:00
 project: advanced_crypto_bot
 project_key: NOKEY
 tracking_system: file-system
@@ -33,7 +33,7 @@ development_status:
   2-3-menjalankan-satu-deterministic-simulator-lifecycle: done
   2-4-menyelesaikan-intent-dan-order-melalui-fill-authoritative-accounting: done
   2-5-mempertahankan-position-protection-melalui-unified-exit: done
-  2-6-memulihkan-lifecycle-tanpa-decision-baru: review
+  2-6-memulihkan-lifecycle-tanpa-decision-baru: done
   2-7-menghasilkan-execution-calibration-evidence: review
   epic-2-retrospective: optional
 

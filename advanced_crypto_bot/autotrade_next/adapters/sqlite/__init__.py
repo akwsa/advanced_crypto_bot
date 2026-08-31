@@ -11,6 +11,16 @@ from .fenced_journal import (
     IndeterminateCommit,
     SQLiteFencedJournal,
 )
+from .recovery_store import (
+    RecoveryCheckpointCommand,
+    RecoveryCommitResult,
+    RecoveryCommitStatus,
+    RecoveryIndeterminateCommit,
+    RecoveryPersistenceError,
+    SQLiteRecoveryStore,
+    decode_recovery_checkpoint,
+    encode_recovery_checkpoint,
+)
 
 __all__ = (
     "AppendCommand",
@@ -22,4 +32,12 @@ __all__ = (
     "ClaimStatus",
     "IndeterminateCommit",
     "SQLiteFencedJournal",
+    "RecoveryCheckpointCommand",
+    "RecoveryCommitResult",
+    "RecoveryCommitStatus",
+    "RecoveryIndeterminateCommit",
+    "RecoveryPersistenceError",
+    "SQLiteRecoveryStore",
+    "decode_recovery_checkpoint",
+    "encode_recovery_checkpoint",
 )

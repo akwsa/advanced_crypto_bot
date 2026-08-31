@@ -13,8 +13,10 @@ from .execution import (
     OrderSettlementState,
     OutboxMessage,
     OutboxStatus,
+    SettlementEntry,
 )
 from .exit_protection import PositionProtectionState
+from .policy import PolicyState
 from .simulator import OrderStatus
 
 
@@ -43,6 +45,14 @@ def _utc(value: object) -> datetime:
 
 def _number(value) -> dict[str, int]:
     return {"units": value.units, "scale": value.scale}
+
+
+def _same_total(total, values: tuple[object, ...]) -> bool:
+    scale = max((item.scale for item in values), default=total.scale)
+    scale = max(scale, total.scale)
+    expected = total.units * 10 ** (scale - total.scale)
+    actual = sum(item.units * 10 ** (scale - item.scale) for item in values)
+    return expected == actual
 
 
 class RecoveryAction(str, Enum):
@@ -141,6 +151,25 @@ def _account_value(account: AccountState) -> dict[str, object]:
     }
 
 
+def _settlement_value(entry: SettlementEntry) -> dict[str, object]:
+    return {
+        "authority_scope_id": entry.authority_scope_id,
+        "account_id": entry.account_id,
+        "instrument_id": entry.instrument_id,
+        "order_id": entry.order_id,
+        "event_id": entry.event_id,
+        "side": entry.side.value,
+        "fill_id": entry.fill_id,
+        "quantity": _number(entry.quantity),
+        "notional": _number(entry.notional),
+        "fee": _number(entry.fee),
+        "tax": _number(entry.tax),
+        "cash_delta": _number(entry.cash_delta),
+        "quantity_delta": _number(entry.quantity_delta),
+        "recorded_at_utc": entry.recorded_at_utc,
+    }
+
+
 def _order_value(state: OrderSettlementState) -> dict[str, object]:
     return {
         "order_id": state.order.order_id.key,
@@ -158,6 +187,7 @@ def _order_value(state: OrderSettlementState) -> dict[str, object]:
 def _position_value(state: PositionProtectionState) -> dict[str, object]:
     return {
         "position_id": state.position_id,
+        "authority_scope_id": state.authority_scope_id,
         "account_id": state.account_id,
         "instrument_id": state.instrument_id,
         "entry_price": _number(state.entry_price),
@@ -168,9 +198,18 @@ def _position_value(state: PositionProtectionState) -> dict[str, object]:
         "status": state.status.value,
         "policy_state_ref": state.policy_state_ref,
         "protection": state.protection.to_canonical_value(),
+        "partial_exit": state.partial_exit,
         "pending_exit_key": state.pending_exit_key,
         "pending_exit_sequence": state.pending_exit_sequence,
         "pending_order_id": state.pending_order_id,
+        "pending_reason": (
+            None if state.pending_reason is None else state.pending_reason.value
+        ),
+        "pending_target_quantity": (
+            None
+            if state.pending_target_quantity is None
+            else _number(state.pending_target_quantity)
+        ),
         "processed_exit_fill_ids": state.processed_exit_fill_ids,
         "dust_incident_ref": (
             None if state.dust_incident is None else state.dust_incident.incident_ref.key
@@ -191,10 +230,12 @@ def _preparation_value(value: ExecutionPreparation) -> dict[str, object]:
 def _outbox_value(value: OutboxMessage) -> dict[str, object]:
     return {
         "message_id": value.message_id.key,
+        "authority_scope_id": value.authority_scope_id,
         "aggregate_id": value.aggregate_id,
         "aggregate_sequence": value.aggregate_sequence,
         "event_type": value.event_type,
         "payload_ref": value.payload_ref.key,
+        "status": value.status.value,
         "created_at_utc": value.created_at_utc,
     }
 
@@ -204,11 +245,14 @@ class RecoveryCheckpoint:
     authority_scope_id: str
     journal_high_water: int
     account_snapshot: AccountState
+    settlement_entries: tuple[SettlementEntry, ...]
     order_states: tuple[OrderSettlementState, ...]
     positions: tuple[PositionProtectionState, ...]
+    policy_states: tuple[PolicyState, ...]
     preparations: tuple[ExecutionPreparation, ...]
     pending_command_refs: tuple[str, ...]
     inbox_ids: tuple[str, ...]
+    applied_correction_refs: tuple[str, ...]
     outbox: tuple[OutboxMessage, ...]
     projection_high_waters: tuple[ProjectionHighWater, ...]
     entry_frozen: bool
@@ -223,8 +267,11 @@ class RecoveryCheckpoint:
         if type(self.account_snapshot) is not AccountState:
             _fail("INVALID_RECOVERY_ACCOUNT")
         typed_tuples = (
+            (self.settlement_entries, SettlementEntry,
+             "INVALID_RECOVERY_SETTLEMENT_ENTRIES"),
             (self.order_states, OrderSettlementState, "INVALID_RECOVERY_ORDERS"),
             (self.positions, PositionProtectionState, "INVALID_RECOVERY_POSITIONS"),
+            (self.policy_states, PolicyState, "INVALID_RECOVERY_POLICY_STATES"),
             (self.preparations, ExecutionPreparation, "INVALID_RECOVERY_PREPARATIONS"),
             (self.outbox, OutboxMessage, "INVALID_RECOVERY_OUTBOX"),
             (self.projection_high_waters, ProjectionHighWater,
@@ -233,7 +280,11 @@ class RecoveryCheckpoint:
         for values, expected, code in typed_tuples:
             if type(values) is not tuple or any(type(value) is not expected for value in values):
                 _fail(code)
-        for values in (self.pending_command_refs, self.inbox_ids):
+        for values in (
+            self.pending_command_refs,
+            self.inbox_ids,
+            self.applied_correction_refs,
+        ):
             if (type(values) is not tuple
                     or any(type(value) is not str or not value.strip() for value in values)
                     or len(set(values)) != len(values)):
@@ -242,6 +293,8 @@ class RecoveryCheckpoint:
         if len(set(order_ids)) != len(order_ids):
             _fail("DUPLICATE_RECOVERY_ORDER")
         for values, code in (
+            (tuple(item.fill_id for item in self.settlement_entries),
+             "DUPLICATE_RECOVERY_SETTLEMENT_ENTRY"),
             (tuple(item.position_id for item in self.positions),
              "DUPLICATE_RECOVERY_POSITION"),
             (tuple(item.intent.intent_id.key for item in self.preparations),
@@ -256,6 +309,9 @@ class RecoveryCheckpoint:
         if any(item.authority_scope_id != self.authority_scope_id
                for item in self.positions):
             _fail("RECOVERY_SCOPE_MISMATCH")
+        if any(item.authority_scope_id != self.authority_scope_id
+               for item in self.settlement_entries):
+            _fail("RECOVERY_SCOPE_MISMATCH")
         if any(item.order.authority_scope_id != self.authority_scope_id
                for item in self.order_states):
             _fail("RECOVERY_SCOPE_MISMATCH")
@@ -265,17 +321,52 @@ class RecoveryCheckpoint:
         if any(item.authority_scope_id != self.authority_scope_id
                or item.status is not OutboxStatus.PENDING for item in self.outbox):
             _fail("INVALID_RECOVERY_OUTBOX")
+        account_key = (
+            self.account_snapshot.account_id,
+            self.account_snapshot.instrument_id,
+        )
+        if (any((item.account_id, item.instrument_id) != account_key
+                for item in self.settlement_entries)
+                or any((item.order.account_id, item.order.instrument_id) != account_key
+                for item in self.order_states)
+                or any((item.account_id, item.instrument_id) != account_key
+                       for item in self.positions)
+                or any(item.instrument_id != self.account_snapshot.instrument_id
+                       for item in self.policy_states)):
+            _fail("RECOVERY_ACCOUNT_MISMATCH")
+        if not _same_total(
+            self.account_snapshot.position_quantity,
+            tuple(item.remaining_quantity for item in self.positions),
+        ):
+            _fail("RECOVERY_POSITION_ACCOUNT_MISMATCH")
+        policy_refs = tuple(
+            ContentRef.v1("policy-state", item.to_canonical_value()).key
+            for item in self.policy_states
+        )
+        if (len(set(policy_refs)) != len(policy_refs)
+                or any(item.policy_state_ref not in policy_refs
+                       for item in self.positions)):
+            _fail("RECOVERY_POLICY_STATE_MISMATCH")
         if any(item.sequence > self.journal_high_water
                for item in self.projection_high_waters):
             _fail("PROJECTION_AHEAD_OF_JOURNAL")
+        if (self.account_snapshot.revision > self.journal_high_water
+                or any(item.last_sequence > self.journal_high_water
+                       for item in self.order_states)
+                or any(item.sequence > self.journal_high_water
+                       for item in self.positions)
+                or any(item.aggregate_sequence > self.journal_high_water
+                       for item in self.outbox)):
+            _fail("STATE_AHEAD_OF_JOURNAL")
         state_by_order = {
             item.order.order_id.key: item for item in self.order_states
         }
-        outbox_ids = {item.message_id.key for item in self.outbox}
+        outbox_by_id = {item.message_id.key: item for item in self.outbox}
         for prepared in self.preparations:
             state = state_by_order.get(prepared.order.order_id.key)
+            pending = outbox_by_id.get(prepared.outbox.message_id.key)
             if (state is None or state.order != prepared.order
-                    or prepared.outbox.message_id.key not in outbox_ids):
+                    or (pending is not None and pending != prepared.outbox)):
                 _fail("RECOVERY_PREPARATION_MISMATCH")
         known_fill_ids = {
             fill.fill_id for state in self.order_states
@@ -283,6 +374,12 @@ class RecoveryCheckpoint:
         }
         if not known_fill_ids.issubset(set(self.account_snapshot.processed_fill_ids)):
             _fail("RECOVERY_FILL_HISTORY_MISMATCH")
+        if (tuple(item.fill_id for item in self.settlement_entries)
+                != self.account_snapshot.processed_fill_ids
+                or not known_fill_ids.issubset(
+                    {item.fill_id for item in self.settlement_entries}
+                )):
+            _fail("RECOVERY_CASH_LEDGER_MISMATCH")
         unknown_ids = tuple(
             item.order.order_id.key for item in self.order_states
             if item.status is OrderStatus.UNKNOWN
@@ -305,20 +402,29 @@ class RecoveryCheckpoint:
             _fail("INVALID_UNKNOWN_DEADLINE")
         if (type(self.entry_frozen) is not bool
                 or type(self.checkpoint_ref) is not ContentRef
+                or self.checkpoint_ref.domain != "recovery.checkpoint"
+                or self.checkpoint_ref.kind != "recovery-checkpoint"
                 or not self.checkpoint_ref.verify(self.binding_value())):
             _fail("RECOVERY_CHECKPOINT_REFERENCE_MISMATCH")
 
     def binding_value(self) -> dict[str, object]:
         return {
-            "schema_version": "recovery-checkpoint:v2",
+            "schema_version": "recovery-checkpoint:v5",
             "authority_scope_id": self.authority_scope_id,
             "journal_high_water": self.journal_high_water,
             "account_snapshot": _account_value(self.account_snapshot),
+            "settlement_entries": tuple(
+                _settlement_value(item) for item in self.settlement_entries
+            ),
             "order_states": tuple(_order_value(item) for item in self.order_states),
             "positions": tuple(_position_value(item) for item in self.positions),
+            "policy_states": tuple(
+                item.to_canonical_value() for item in self.policy_states
+            ),
             "preparations": tuple(_preparation_value(item) for item in self.preparations),
             "pending_command_refs": self.pending_command_refs,
             "inbox_ids": self.inbox_ids,
+            "applied_correction_refs": self.applied_correction_refs,
             "outbox": tuple(_outbox_value(item) for item in self.outbox),
             "projection_high_waters": tuple(
                 item.to_canonical_value() for item in self.projection_high_waters
@@ -331,17 +437,24 @@ class RecoveryCheckpoint:
     @classmethod
     def create(cls, **values) -> RecoveryCheckpoint:
         binding = {
-            "schema_version": "recovery-checkpoint:v2",
+            "schema_version": "recovery-checkpoint:v5",
             "authority_scope_id": values["authority_scope_id"],
             "journal_high_water": values["journal_high_water"],
             "account_snapshot": _account_value(values["account_snapshot"]),
+            "settlement_entries": tuple(
+                _settlement_value(item) for item in values["settlement_entries"]
+            ),
             "order_states": tuple(_order_value(item) for item in values["order_states"]),
             "positions": tuple(_position_value(item) for item in values["positions"]),
+            "policy_states": tuple(
+                item.to_canonical_value() for item in values["policy_states"]
+            ),
             "preparations": tuple(
                 _preparation_value(item) for item in values["preparations"]
             ),
             "pending_command_refs": values["pending_command_refs"],
             "inbox_ids": values["inbox_ids"],
+            "applied_correction_refs": values["applied_correction_refs"],
             "outbox": tuple(_outbox_value(item) for item in values["outbox"]),
             "projection_high_waters": tuple(
                 item.to_canonical_value() for item in values["projection_high_waters"]
@@ -366,32 +479,76 @@ class RecoveryPlan:
     mismatch_order_ids: tuple[str, ...]
     redispatch_order_ids: tuple[str, ...]
     redeliver_message_ids: tuple[str, ...]
+    venue_evidence: tuple[VenueOrderEvidence, ...]
     corrections: tuple[CorrectionRequest, ...]
     entry_frozen: bool
     no_strategy_evaluation: bool
     plan_ref: ContentRef
 
     def __post_init__(self) -> None:
+        reference_tuples = (
+            self.query_order_ids,
+            self.mismatch_order_ids,
+            self.redispatch_order_ids,
+            self.redeliver_message_ids,
+        )
         if (type(self.checkpoint_ref) is not ContentRef
+                or self.checkpoint_ref.domain != "recovery.checkpoint"
+                or self.checkpoint_ref.kind != "recovery-checkpoint"
                 or type(self.actions) is not tuple
                 or any(type(item) is not RecoveryAction for item in self.actions)
+                or len(set(self.actions)) != len(self.actions)
+                or any(type(values) is not tuple
+                       or any(type(value) is not str or not value.strip()
+                              for value in values)
+                       or len(set(values)) != len(values)
+                       for values in reference_tuples)
+                or type(self.venue_evidence) is not tuple
+                or any(type(item) is not VenueOrderEvidence
+                       for item in self.venue_evidence)
+                or len({item.order_id for item in self.venue_evidence})
+                != len(self.venue_evidence)
                 or type(self.corrections) is not tuple
                 or any(type(item) is not CorrectionRequest for item in self.corrections)
                 or type(self.entry_frozen) is not bool
                 or self.no_strategy_evaluation is not True
                 or type(self.plan_ref) is not ContentRef
+                or self.plan_ref.domain != "recovery.plan"
+                or self.plan_ref.kind != "recovery-plan"
                 or not self.plan_ref.verify(self.binding_value())):
+            _fail("INVALID_RECOVERY_PLAN")
+        expected_actions = []
+        if self.query_order_ids:
+            expected_actions.append(RecoveryAction.QUERY_VENUE)
+        if self.entry_frozen:
+            expected_actions.append(RecoveryAction.FREEZE_ENTRY)
+        if self.corrections:
+            expected_actions.append(RecoveryAction.APPLY_CORRECTION)
+        if self.redeliver_message_ids:
+            expected_actions.append(RecoveryAction.REDELIVER_OUTBOX)
+        if self.redispatch_order_ids:
+            expected_actions.append(RecoveryAction.RESUME_PENDING_DISPATCH)
+        if not expected_actions:
+            expected_actions.append(RecoveryAction.NO_ACTION)
+        if (self.actions != tuple(expected_actions)
+                or ((self.query_order_ids or self.mismatch_order_ids)
+                    and not self.entry_frozen)
+                or set(self.query_order_ids) & set(self.redispatch_order_ids)
+                or set(self.mismatch_order_ids) & set(self.redispatch_order_ids)):
             _fail("INVALID_RECOVERY_PLAN")
 
     def binding_value(self) -> dict[str, object]:
         return {
-            "schema_version": "recovery-plan:v1",
+            "schema_version": "recovery-plan:v2",
             "checkpoint_ref": self.checkpoint_ref.key,
             "actions": tuple(item.value for item in self.actions),
             "query_order_ids": self.query_order_ids,
             "mismatch_order_ids": self.mismatch_order_ids,
             "redispatch_order_ids": self.redispatch_order_ids,
             "redeliver_message_ids": self.redeliver_message_ids,
+            "venue_evidence": tuple(
+                item.to_canonical_value() for item in self.venue_evidence
+            ),
             "corrections": tuple(item.to_canonical_value() for item in self.corrections),
             "entry_frozen": self.entry_frozen,
             "no_strategy_evaluation": self.no_strategy_evaluation,
@@ -409,12 +566,16 @@ def plan_recovery(checkpoint: RecoveryCheckpoint, *,
     if (type(corrections) is not tuple
             or any(type(item) is not CorrectionRequest for item in corrections)):
         _fail("INVALID_CORRECTION_REQUESTS")
+    venue_evidence = tuple(sorted(venue_evidence, key=lambda item: item.order_id))
+    corrections = tuple(sorted(corrections, key=lambda item: item.idempotency_ref))
     evidence_ids = tuple(item.order_id for item in venue_evidence)
     if len(set(evidence_ids)) != len(evidence_ids):
         _fail("DUPLICATE_VENUE_EVIDENCE")
     correction_ids = tuple(item.idempotency_ref for item in corrections)
     if len(set(correction_ids)) != len(correction_ids):
         _fail("DUPLICATE_CORRECTION_REQUEST")
+    if set(correction_ids) & set(checkpoint.applied_correction_refs):
+        _fail("CORRECTION_ALREADY_APPLIED")
     if any(item.expected_journal_high_water != checkpoint.journal_high_water
            for item in corrections):
         _fail("CORRECTION_HIGH_WATER_CONFLICT")
@@ -433,20 +594,50 @@ def plan_recovery(checkpoint: RecoveryCheckpoint, *,
         local = states[item.order_id].status
         if item.status is OrderStatus.UNKNOWN:
             query.add(item.order_id)
-        elif local is not item.status:
-            mismatch.add(item.order_id)
+        else:
+            query.discard(item.order_id)
+            if local is not item.status:
+                mismatch.add(item.order_id)
 
     frozen = checkpoint.entry_frozen or bool(query) or bool(mismatch)
     if any(item.target_id in query for item in corrections):
         _fail("UNKNOWN_CORRECTION_FORBIDDEN")
     evidence_by_order = {item.order_id: item for item in venue_evidence}
+    known_targets = {
+        checkpoint.account_snapshot.account_id,
+        *(item.order.order_id.key for item in checkpoint.order_states),
+        *(item.position_id for item in checkpoint.positions),
+    }
     for correction in corrections:
+        if correction.target_id not in known_targets:
+            _fail("FOREIGN_CORRECTION_TARGET")
         if correction.kind is CorrectionKind.ORDER_STATE_CORRECTION:
             evidence = evidence_by_order.get(correction.target_id)
             if (correction.target_id not in mismatch or evidence is None
                     or correction.evidence_ref != evidence.evidence_ref):
                 _fail("UNBOUND_ORDER_STATE_CORRECTION")
-    redeliver = tuple(item.message_id.key for item in checkpoint.outbox)
+    dispatch_order_by_message = {
+        item.outbox.message_id.key: item.order.order_id.key
+        for item in checkpoint.preparations
+    }
+    state_status_by_order = {
+        order_id: state.status for order_id, state in states.items()
+    }
+    unsafe_dispatch_orders = query | mismatch
+    redeliver = tuple(
+        item.message_id.key
+        for item in checkpoint.outbox
+        if (
+            item.message_id.key not in dispatch_order_by_message
+            or (
+                dispatch_order_by_message[item.message_id.key]
+                not in unsafe_dispatch_orders
+                and state_status_by_order[
+                    dispatch_order_by_message[item.message_id.key]
+                ] is None
+            )
+        )
+    )
     # IntentPrepared redelivery is the one dispatch-resume path. Emitting a second
     # direct redispatch action here would duplicate submit after a crash boundary.
     redispatch = ()
@@ -465,20 +656,24 @@ def plan_recovery(checkpoint: RecoveryCheckpoint, *,
     if not actions:
         actions.append(RecoveryAction.NO_ACTION)
     values = {
-        "schema_version": "recovery-plan:v1",
+        "schema_version": "recovery-plan:v2",
         "checkpoint_ref": checkpoint.checkpoint_ref.key,
         "actions": tuple(item.value for item in actions),
         "query_order_ids": tuple(sorted(query)),
         "mismatch_order_ids": tuple(sorted(mismatch)),
         "redispatch_order_ids": redispatch,
         "redeliver_message_ids": redeliver,
+        "venue_evidence": tuple(
+            item.to_canonical_value() for item in venue_evidence
+        ),
         "corrections": tuple(item.to_canonical_value() for item in corrections),
         "entry_frozen": frozen,
         "no_strategy_evaluation": True,
     }
     return RecoveryPlan(
         checkpoint.checkpoint_ref, tuple(actions), tuple(sorted(query)),
-        tuple(sorted(mismatch)), redispatch, redeliver, corrections, frozen, True,
+        tuple(sorted(mismatch)), redispatch, redeliver, venue_evidence,
+        corrections, frozen, True,
         ContentRef.v2("recovery.plan", "recovery-plan", values),
     )
 

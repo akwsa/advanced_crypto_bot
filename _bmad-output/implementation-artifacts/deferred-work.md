@@ -44,14 +44,6 @@
   summary: Verifikasi operator/risk/reconciliation evidence reference melalui authenticated approval/cause registry sebelum runtime command diterima.
   evidence: Kernel tidak lagi menerima boolean self-attestation, tetapi reference existence/authorization verification merupakan dependency Story 3.4/3.7.
 
-- source_spec: `spec-2-6-deterministic-recovery-plan.md`
-  summary: Implementasikan durable startup loader/replay untuk recovery checkpoint, inbox/outbox acknowledgment, dispatcher redelivery, projection rebuild, and RTO/RPO crash matrix.
-  evidence: Semantic checkpoint dan deterministic plan lulus contract tests, tetapi tidak membuktikan state process/database sesudah crash; dependency Story 3.1/5.3.
-
-- source_spec: `spec-2-6-deterministic-recovery-plan.md`
-  summary: Implementasikan authenticated, fenced, additive correction command handler untuk empat correction kinds.
-  evidence: Correction request sudah memerlukan evidence, approval, idempotency, dan exact journal high-water; verifier/atomic journal commit masih dependency Story 3.7/5.3.
-
 - source_spec: `spec-2-7-labeled-execution-calibration.md`
   summary: Ingest dan resolve actual shadow/venue TCA corpus ke frozen calibration window lalu persist/report ke promotion consumer.
   evidence: Pure report menolak label-authority mismatch dan non-observed venue scoring, tetapi reference resolver, scheduled corpus ingestion, persistence, dan promotion wiring belum tersedia.

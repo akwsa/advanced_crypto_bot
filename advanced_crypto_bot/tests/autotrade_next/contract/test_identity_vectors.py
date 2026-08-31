@@ -311,7 +311,7 @@ def test_domain_package_only_imports_stdlib_or_relative_domain_modules():
         "policy_isolation": {"errors"},
         "portfolio_allocation": {"content", "errors", "numeric"},
         "promotion": {"errors"},
-        "recovery": {"content", "execution", "exit_protection", "simulator"},
+        "recovery": {"content", "execution", "exit_protection", "policy", "simulator"},
         "replay": {"candidate", "content", "decision", "encoding", "errors", "numeric", "policy"},
         "risk_governor": {"content", "errors", "numeric"},
         "rollback_retention": {"content", "errors", "fencing"},
@@ -358,10 +358,13 @@ def test_application_ports_and_projections_obey_explicit_layer_matrix():
         ("application", "__init__"): {"exit", "settlement"},
         ("application", "exit"): set(),
         ("application", "settlement"): set(),
-        ("ports", "__init__"): {"exit", "market", "query", "settlement", "venue"},
+        ("ports", "__init__"): {
+            "exit", "market", "query", "recovery", "settlement", "venue",
+        },
         ("ports", "exit"): set(),
         ("ports", "market"): set(),
         ("ports", "query"): set(),
+        ("ports", "recovery"): set(),
         ("ports", "settlement"): set(),
         ("ports", "venue"): set(),
         ("projections", "__init__"): {"decision_provenance", "integrity_cockpit"},
@@ -386,6 +389,9 @@ def test_application_ports_and_projections_obey_explicit_layer_matrix():
             "__future__", "typing", "autotrade_next.domain.market",
         },
         ("ports", "query"): {"typing"},
+        ("ports", "recovery"): {
+            "__future__", "typing", "autotrade_next.domain.recovery",
+        },
         ("ports", "settlement"): {
             "__future__", "dataclasses", "typing",
             "autotrade_next.domain.execution", "autotrade_next.domain.simulator",
@@ -444,8 +450,9 @@ def test_adapters_obey_explicit_domain_port_dependency_matrix_without_horizontal
         "indodax/__init__": {"capability_registry", "market_evidence"},
         "indodax/capability_registry": set(),
         "indodax/market_evidence": set(),
-        "sqlite/__init__": {"fenced_journal"},
+        "sqlite/__init__": {"fenced_journal", "recovery_store"},
         "sqlite/fenced_journal": set(),
+        "sqlite/recovery_store": set(),
     }
     allowed_absolute_by_module = {
         "__init__": set(),
@@ -464,6 +471,15 @@ def test_adapters_obey_explicit_domain_port_dependency_matrix_without_horizontal
         "sqlite/fenced_journal": {
             "__future__", "contextlib", "dataclasses", "datetime", "enum",
             "pathlib", "sqlite3",
+        },
+        "sqlite/recovery_store": {
+            "__future__", "contextlib", "dataclasses", "datetime", "enum",
+            "json", "pathlib", "sqlite3",
+            "autotrade_next.domain.content", "autotrade_next.domain.execution",
+            "autotrade_next.domain.exit_protection", "autotrade_next.domain.identity",
+            "autotrade_next.domain.numeric", "autotrade_next.domain.policy",
+            "autotrade_next.domain.recovery", "autotrade_next.domain.simulator",
+            "autotrade_next.ports.recovery",
         },
     }
     for path in root.rglob("*.py"):
