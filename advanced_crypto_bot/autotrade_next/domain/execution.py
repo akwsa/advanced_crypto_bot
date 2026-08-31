@@ -131,6 +131,22 @@ def _validate_fill_evidence(fill: SimulatedFill) -> None:
     _utc(fill.filled_at_utc)
 
 
+def _validate_event_fill_times(
+    event: SimulatorEvent,
+    *,
+    previous_fill_count: int,
+) -> None:
+    """Reject fill timestamps that claim knowledge after their receipt."""
+    new_fills = event.fills[previous_fill_count:]
+    if any(fill.filled_at_utc > event.event_at_utc for fill in new_fills):
+        _fail("FILL_TIME_AFTER_EVENT")
+
+
+def _validate_terminal_status(event: SimulatorEvent) -> None:
+    if event.remaining_quantity.units == 0 and event.status is not OrderStatus.FILLED:
+        _fail("TERMINAL_STATUS_MISMATCH")
+
+
 class ExecutionSide(str, Enum):
     BUY = "BUY"
     SELL = "SELL"
@@ -322,6 +338,11 @@ class OrderSettlementState:
                     _fail("ILLEGAL_TRANSITION")
                 if event.fills[:len(previous_fills)] != previous_fills:
                     _fail("FILL_PREFIX_CONFLICT")
+                _validate_event_fill_times(
+                    event,
+                    previous_fill_count=len(previous_fills),
+                )
+                _validate_terminal_status(event)
                 previous_status = event.status
                 previous_fills = event.fills
                 previous_time = event.event_at_utc
@@ -633,6 +654,17 @@ def settle_event(order_state: OrderSettlementState, account: AccountState,
     if not _same(_add(event.filled_quantity, event.remaining_quantity),
                  order.requested_quantity):
         _fail("QUANTITY_CONSERVATION_BREACH")
+    new_fills = event.fills[len(order_state.cumulative_fills):]
+    if event.status is OrderStatus.UNKNOWN and (
+            new_fills
+            or not _same(event.filled_quantity, order_state.filled_quantity)
+            or not _same(event.remaining_quantity, order_state.remaining_quantity)):
+        _fail("UNKNOWN_QUANTITY_CHANGE")
+    _validate_event_fill_times(
+        event,
+        previous_fill_count=len(order_state.cumulative_fills),
+    )
+    _validate_terminal_status(event)
     fill_total = _sum(tuple(fill.quantity for fill in event.fills),
                       minimum_scale=event.filled_quantity.scale)
     if not _same(fill_total, event.filled_quantity):
@@ -643,12 +675,6 @@ def settle_event(order_state: OrderSettlementState, account: AccountState,
 
     updated_account = account
     entries: list[SettlementEntry] = []
-    new_fills = event.fills[len(order_state.cumulative_fills):]
-    if event.status is OrderStatus.UNKNOWN and (
-            new_fills
-            or not _same(event.filled_quantity, order_state.filled_quantity)
-            or not _same(event.remaining_quantity, order_state.remaining_quantity)):
-        _fail("UNKNOWN_QUANTITY_CHANGE")
     for fill in new_fills:
         if fill.order_id != order.order_id.key:
             _fail("FOREIGN_FILL")

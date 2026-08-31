@@ -150,8 +150,8 @@ class MemoryUnitOfWork:
             self.outbox.append(bundle.preparation.outbox)
         elif isinstance(bundle, SettlementCommitBundle):
             current = self.orders[bundle.order_state.order.order_id.key]
-            if (current.last_sequence != bundle.expected_sequence
-                    or self.account.revision != bundle.expected_account_revision):
+            if (current != bundle.expected_order_state
+                    or self.account != bundle.expected_account):
                 raise RuntimeError("stale settlement revision")
             self.orders[bundle.order_state.order.order_id.key] = bundle.order_state
             self.account = bundle.account
@@ -548,8 +548,30 @@ def test_composite_values_and_commit_bundles_reject_cross_aggregate_links():
     assert result.outbox is not None
     with pytest.raises(TypeError, match="SETTLEMENT_COMMIT_MISMATCH"):
         SettlementCommitBundle(
-            0, 0, result.order_state, result.account, accepted,
+            0, 0, first.order_state, account(), result.order_state,
+            result.account, accepted,
             result.entries, second.outbox,
+        )
+
+
+def test_commit_bundle_rejects_account_mutation_not_produced_by_the_event():
+    preparation = prepare_execution(**prepare_command().to_domain_arguments())
+    previous_account = account()
+    accepted = lifecycle_event(
+        preparation.order.order_id.key, 1, OrderStatus.ACCEPTED, (),
+        amount(0, 2), amount(150, 2),
+    )
+    result = settle_event(preparation.order_state, previous_account, accepted)
+    forged_account = replace(
+        result.account,
+        cash_balance=amount(result.account.cash_balance.units - 1, 2),
+    )
+
+    with pytest.raises(TypeError, match="SETTLEMENT_COMMIT_MISMATCH"):
+        SettlementCommitBundle(
+            0, 0, preparation.order_state, previous_account,
+            result.order_state, forged_account, accepted,
+            result.entries, result.outbox,
         )
 
 
@@ -599,3 +621,51 @@ def test_read_noop_and_failure_paths_close_uow_without_masking_primary_fault():
         prepare_before_dispatch(prepare_command(), faulty)
     assert faulty.rollback_count == 1
     assert faulty.close_count == 1
+
+
+def test_invalid_prepare_input_rolls_back_and_closes_uow():
+    uow = MemoryUnitOfWork(account())
+
+    with pytest.raises(ExecutionError, match="INVALID_REQUESTED_QUANTITY"):
+        prepare_before_dispatch(
+            replace(prepare_command(), requested_quantity=amount(0, 2)),
+            uow,
+        )
+
+    assert uow.rollback_count == 1
+    assert uow.close_count == 1
+
+
+def test_future_fill_time_and_terminal_status_fail_closed():
+    uow = MemoryUnitOfWork(account())
+    envelope = prepare_before_dispatch(prepare_command(), uow)
+    settle_lifecycle_event(SettleLifecycleCommand(lifecycle_event(
+        envelope.order_id, 1, OrderStatus.ACCEPTED, (),
+        amount(0, 2), amount(150, 2), at=AT,
+    )), uow)
+    settle_lifecycle_event(SettleLifecycleCommand(lifecycle_event(
+        envelope.order_id, 2, OrderStatus.OPEN, (),
+        amount(0, 2), amount(150, 2), at=AT + timedelta(seconds=2),
+    )), uow)
+
+    base_fill = fill(
+        "timed-fill", envelope.order_id, quantity=amount(150, 2),
+        price=amount(100, 0), fee=amount(0, 2), tax=amount(0, 2),
+    )
+    future_fill = replace(base_fill, filled_at_utc=AT + timedelta(seconds=4))
+    event = lifecycle_event(
+        envelope.order_id, 3, OrderStatus.FILLED, (future_fill,),
+        amount(150, 2), amount(0, 2), at=AT + timedelta(seconds=3),
+    )
+    with pytest.raises(ExecutionError, match="FILL_TIME_AFTER_EVENT"):
+        settle_lifecycle_event(SettleLifecycleCommand(event), uow)
+
+    completed_fill = replace(base_fill, filled_at_utc=AT + timedelta(seconds=3))
+    cancelled_after_full_fill = lifecycle_event(
+        envelope.order_id, 3, OrderStatus.CANCELLED, (completed_fill,),
+        amount(150, 2), amount(0, 2), at=AT + timedelta(seconds=3),
+    )
+    with pytest.raises(ExecutionError, match="TERMINAL_STATUS_MISMATCH"):
+        settle_lifecycle_event(
+            SettleLifecycleCommand(cancelled_after_full_fill), uow
+        )

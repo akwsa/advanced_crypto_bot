@@ -1,28 +1,141 @@
-"""Contract tests for Story 3.4: Safety Cause Matrix and Lattice."""
+"""Contracts for Story 3.4 additive safety cause lattice."""
 
-from datetime import UTC, datetime
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
+
 import pytest
 
-from autotrade_next.domain.safety_state import SafetyCause, SafetyCauseKind, SafetyScopeLevel, SafetyStateLattice
+from autotrade_next.domain.content import ContentRef
+from autotrade_next.domain.errors import DecisionError
+from autotrade_next.domain.safety_state import (
+    ClearPredicate,
+    ProtectiveAction,
+    SafetyCause,
+    SafetyCauseKind,
+    SafetyClearProof,
+    SafetyScope,
+    SafetyScopeLevel,
+    SafetySeverity,
+    SafetyStateLattice,
+)
 
 
-def test_safety_state_lattice_highest_level_and_no_premature_clear():
-    now = datetime(2026, 8, 29, 12, 0, 0, tzinfo=UTC)
+NOW = datetime(2026, 8, 30, 10, 0, tzinfo=UTC)
 
-    c1 = SafetyCause("c-1", SafetyCauseKind.STALE_DATA, SafetyScopeLevel.INSTRUMENT, "ev-1", now)
-    c2 = SafetyCause("c-2", SafetyCauseKind.FENCE_LOSS, SafetyScopeLevel.AUTHORITY, "ev-2", now)
 
-    lattice = SafetyStateLattice(causes=()).add_cause(c1).add_cause(c2)
+def ref(kind: str, value: str) -> ContentRef:
+    return ContentRef.v2("autotrade-next", kind, {"value": value})
 
+
+def stale() -> SafetyCause:
+    return SafetyCause.create(
+        kind=SafetyCauseKind.STALE_DATA,
+        scope=SafetyScope(SafetyScopeLevel.INSTRUMENT, "BTC-IDR"),
+        severity=SafetySeverity.ENTRY_FREEZE,
+        evidence_refs=(ref("SafetyEvidence", "stale-book"),),
+        expected_sequence=0,
+        recorded_at_utc=NOW,
+    )
+
+
+def fence() -> SafetyCause:
+    return SafetyCause.create(
+        kind=SafetyCauseKind.FENCE_LOSS,
+        scope=SafetyScope(SafetyScopeLevel.AUTHORITY, "global-writer"),
+        severity=SafetySeverity.AUTHORITY_HALT,
+        evidence_refs=(ref("SafetyEvidence", "lost-lease"),),
+        expected_sequence=1,
+        recorded_at_utc=NOW + timedelta(seconds=1),
+    )
+
+
+def proof(cause: SafetyCause, *, sequence: int, predicate: ClearPredicate | None = None,
+          evidence: str = "recovered") -> SafetyClearProof:
+    return SafetyClearProof(
+        cause_id=cause.cause_id,
+        predicate=cause.clear_predicate if predicate is None else predicate,
+        evidence_refs=(ref("RecoveryEvidence", evidence),),
+        expected_sequence=sequence,
+        observed_at_utc=NOW + timedelta(seconds=2),
+        authority_ref=ref("ClearAuthority", "operator-approval"),
+    )
+
+
+def test_cause_identity_is_deterministic_and_caller_cannot_forge_it() -> None:
+    first = stale()
+    assert first == stale()
+    with pytest.raises(DecisionError, match="SAFETY_CAUSE_ID_MISMATCH"):
+        replace(first, cause_id="caller-id")
+
+
+def test_scope_severity_join_and_protective_intersection_are_canonical() -> None:
+    lattice = SafetyStateLattice.empty().add_cause(stale(), expected_sequence=0)
+    lattice = lattice.add_cause(fence(), expected_sequence=1)
+    assert lattice.sequence == 2
     assert lattice.highest_effective_level is SafetyScopeLevel.AUTHORITY
-    assert lattice.is_entry_frozen is True
+    assert lattice.effective_severity is SafetySeverity.AUTHORITY_HALT
+    assert lattice.is_entry_frozen
+    assert lattice.allowed_protective_actions == (
+        ProtectiveAction.CANCEL,
+        ProtectiveAction.EXIT,
+        ProtectiveAction.RECONCILE,
+    )
 
-    # Clearing c1 does NOT clear c2 (no premature clear)
-    cleared_lattice = lattice.clear_cause("c-1")
-    assert cleared_lattice.highest_effective_level is SafetyScopeLevel.AUTHORITY
-    assert cleared_lattice.is_entry_frozen is True
 
-    # Clearing c2 resets
-    empty_lattice = cleared_lattice.clear_cause("c-2")
-    assert empty_lattice.highest_effective_level is None
-    assert empty_lattice.is_entry_frozen is False
+def test_clear_is_additive_and_never_clears_another_active_cause() -> None:
+    stale_cause, fence_cause = stale(), fence()
+    lattice = SafetyStateLattice.empty().add_cause(stale_cause, expected_sequence=0)
+    lattice = lattice.add_cause(fence_cause, expected_sequence=1)
+    cleared = lattice.clear_cause(proof(stale_cause, sequence=2))
+    assert cleared.sequence == 3
+    assert tuple(item.cause_id for item in cleared.active_causes) == (fence_cause.cause_id,)
+    assert len(cleared.clear_history) == 1
+    assert cleared.is_entry_frozen
+    assert cleared.clear_cause(proof(stale_cause, sequence=2)) is cleared
+
+
+@pytest.mark.parametrize(
+    "bad_proof",
+    (
+        lambda cause: proof(cause, sequence=99),
+        lambda cause: proof(cause, sequence=1, predicate=ClearPredicate.FENCE_REACQUIRED),
+        lambda cause: SafetyClearProof(
+            cause.cause_id, cause.clear_predicate, cause.evidence_refs, 1,
+            NOW + timedelta(seconds=2), ref("ClearAuthority", "operator"),
+        ),
+        lambda cause: replace(proof(cause, sequence=1), observed_at_utc=NOW - timedelta(microseconds=1)),
+    ),
+)
+def test_clear_requires_exact_sequence_predicate_new_evidence_and_causal_time(bad_proof) -> None:
+    cause = stale()
+    lattice = SafetyStateLattice.empty().add_cause(cause, expected_sequence=0)
+    with pytest.raises(DecisionError):
+        lattice.clear_cause(bad_proof(cause))
+    assert lattice.is_entry_frozen and lattice.clear_history == ()
+
+
+def test_kind_matrix_rejects_under_scoped_or_under_severity_cause() -> None:
+    with pytest.raises(DecisionError, match="SAFETY_SCOPE_BELOW_MATRIX_MINIMUM"):
+        SafetyCause.create(
+            kind=SafetyCauseKind.FENCE_LOSS,
+            scope=SafetyScope(SafetyScopeLevel.ORDER, "order-1"),
+            severity=SafetySeverity.AUTHORITY_HALT,
+            evidence_refs=(ref("Evidence", "fence"),), expected_sequence=0,
+            recorded_at_utc=NOW,
+        )
+    with pytest.raises(DecisionError, match="SAFETY_SEVERITY_BELOW_MATRIX_MINIMUM"):
+        SafetyCause.create(
+            kind=SafetyCauseKind.FENCE_LOSS,
+            scope=SafetyScope(SafetyScopeLevel.AUTHORITY, "global"),
+            severity=SafetySeverity.ENTRY_FREEZE,
+            evidence_refs=(ref("Evidence", "fence"),), expected_sequence=0,
+            recorded_at_utc=NOW,
+        )
+
+
+def test_duplicate_add_is_idempotent_but_sequence_jump_is_denied() -> None:
+    cause = stale()
+    lattice = SafetyStateLattice.empty().add_cause(cause, expected_sequence=0)
+    assert lattice.add_cause(cause, expected_sequence=0) is lattice
+    with pytest.raises(DecisionError, match="SAFETY_SEQUENCE_CONFLICT"):
+        lattice.add_cause(fence(), expected_sequence=9)

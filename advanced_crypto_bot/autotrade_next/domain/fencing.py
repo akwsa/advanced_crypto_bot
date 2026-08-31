@@ -26,9 +26,9 @@ class FencedWriterAuthority:
     def validate_lease(self, lease: FencedWriterLease, current_time_utc: datetime) -> None:
         if lease.scope_id != self.scope_id:
             raise DecisionError("FENCE_SCOPE_MISMATCH")
-        if lease.epoch < self.active_epoch:
-            raise DecisionError("STALE_EPOCH_DENIED")
-        if lease.epoch == self.active_epoch and lease.lease_token != self.active_token:
+        if lease.epoch != self.active_epoch:
+            raise DecisionError("STALE_EPOCH_DENIED" if lease.epoch < self.active_epoch else "UNCLAIMED_EPOCH_DENIED")
+        if lease.lease_token != self.active_token:
             raise DecisionError("INVALID_LEASE_TOKEN")
         if current_time_utc >= lease.expires_at_utc:
             raise DecisionError("EXPIRED_LEASE_TOKEN")

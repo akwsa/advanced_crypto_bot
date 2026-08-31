@@ -71,36 +71,31 @@ class PositionAccount:
             )
             return self, entry
 
-        raw_cost_units = quantity.units * price.units
-        total_cost_units = raw_cost_units // (10 ** quantity.scale)
-        fee_units = fee.units
+        cost = quantity.multiply(price, target_scale=self.cash_balance.scale)
+        fee_scaled = fee.rescale(self.cash_balance.scale)
 
         if is_buy:
-            new_cash_units = self.cash_balance.units - total_cost_units - fee_units
-            new_pos_units = self.position_quantity.units + quantity.units
+            new_cash = self.cash_balance.subtract(cost).subtract(fee_scaled)
+            new_pos = self.position_quantity.add(quantity)
             mtype = MovementType.FILL_BUY
         else:
-            new_cash_units = self.cash_balance.units + total_cost_units - fee_units
-            new_pos_units = self.position_quantity.units - quantity.units
+            new_cash = self.cash_balance.add(cost).subtract(fee_scaled)
+            new_pos = self.position_quantity.subtract(quantity)
             mtype = MovementType.FILL_SELL
-
-        new_cash = ScaledInteger(new_cash_units, self.cash_balance.scale)
-        new_pos = ScaledInteger(new_pos_units, self.position_quantity.scale)
-        updated_fills = (*self.processed_fill_ids, fill_id)
 
         updated_account = PositionAccount(
             instrument_id=self.instrument_id,
             cash_balance=new_cash,
             position_quantity=new_pos,
-            processed_fill_ids=updated_fills,
+            processed_fill_ids=(*self.processed_fill_ids, fill_id),
         )
 
         entry = CashLedgerEntry(
             entry_id=f"entry-{fill_id}",
             fill_id=fill_id,
             movement_type=mtype,
-            amount=ScaledInteger(total_cost_units, self.cash_balance.scale),
-            fee=fee,
+            amount=cost,
+            fee=fee_scaled,
             balance_after=new_cash,
             recorded_at_utc=recorded_at_utc,
         )

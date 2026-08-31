@@ -81,10 +81,10 @@ def _close_without_masking(uow: SettlementUnitOfWork) -> None:
 def prepare_before_dispatch(command: PrepareExecutionCommand,
                             uow: SettlementUnitOfWork) -> DispatchEnvelope:
     """Return a dispatch envelope only after its pending outbox commit succeeds."""
-    if type(command) is not PrepareExecutionCommand:
-        raise ExecutionError("INVALID_PREPARE_COMMAND")
-    preparation = prepare_execution(**command.to_domain_arguments())
     try:
+        if type(command) is not PrepareExecutionCommand:
+            raise ExecutionError("INVALID_PREPARE_COMMAND")
+        preparation = prepare_execution(**command.to_domain_arguments())
         existing = uow.get_preparation(preparation.intent.intent_id.key)
         if existing is not None:
             if (type(existing) is not PreparationCommitBundle
@@ -107,10 +107,10 @@ def prepare_before_dispatch(command: PrepareExecutionCommand,
 def settle_lifecycle_event(command: SettleLifecycleCommand,
                            uow: SettlementUnitOfWork) -> SettlementResult:
     """Commit event, fill effects and PENDING outbox as one UoW bundle."""
-    if type(command) is not SettleLifecycleCommand:
-        raise ExecutionError("INVALID_SETTLEMENT_COMMAND")
-    event = command.event
     try:
+        if type(command) is not SettleLifecycleCommand:
+            raise ExecutionError("INVALID_SETTLEMENT_COMMAND")
+        event = command.event
         order_state = uow.get_order_state(event.order_id)
         if order_state is None:
             raise ExecutionError("ORDER_NOT_FOUND")
@@ -127,6 +127,8 @@ def settle_lifecycle_event(command: SettleLifecycleCommand,
         bundle = SettlementCommitBundle(
             order_state.last_sequence,
             account.revision,
+            order_state,
+            account,
             result.order_state,
             result.account,
             event,

@@ -7,10 +7,12 @@ from typing import Protocol
 
 from autotrade_next.domain.execution import (
     AccountState,
+    ExecutionError,
     ExecutionPreparation,
     OrderSettlementState,
     OutboxMessage,
     SettlementEntry,
+    settle_event,
 )
 from autotrade_next.domain.simulator import SimulatorEvent
 
@@ -28,6 +30,8 @@ class PreparationCommitBundle:
 class SettlementCommitBundle:
     expected_sequence: int
     expected_account_revision: int
+    expected_order_state: OrderSettlementState
+    expected_account: AccountState
     order_state: OrderSettlementState
     account: AccountState
     lifecycle_event: SimulatorEvent
@@ -40,6 +44,10 @@ class SettlementCommitBundle:
         if (type(self.expected_account_revision) is not int
                 or self.expected_account_revision < 0):
             raise TypeError("INVALID_EXPECTED_ACCOUNT_REVISION")
+        if type(self.expected_order_state) is not OrderSettlementState:
+            raise TypeError("INVALID_EXPECTED_ORDER_STATE")
+        if type(self.expected_account) is not AccountState:
+            raise TypeError("INVALID_EXPECTED_ACCOUNT_STATE")
         if type(self.order_state) is not OrderSettlementState:
             raise TypeError("INVALID_ORDER_STATE")
         if type(self.account) is not AccountState:
@@ -51,7 +59,9 @@ class SettlementCommitBundle:
             raise TypeError("INVALID_SETTLEMENT_ENTRIES")
         if type(self.outbox) is not OutboxMessage:
             raise TypeError("INVALID_SETTLEMENT_OUTBOX")
-        if self.order_state.last_sequence != self.expected_sequence + 1:
+        if (self.expected_order_state.last_sequence != self.expected_sequence
+                or self.expected_account.revision != self.expected_account_revision
+                or self.order_state.last_sequence != self.expected_sequence + 1):
             raise TypeError("INVALID_SETTLEMENT_SEQUENCE")
         order = self.order_state.order
         if (not self.order_state.receipts
@@ -81,6 +91,20 @@ class SettlementCommitBundle:
                     or entry.side is not order.side
                     for entry in self.entries
                 )):
+            raise TypeError("SETTLEMENT_COMMIT_MISMATCH")
+        try:
+            expected_result = settle_event(
+                self.expected_order_state,
+                self.expected_account,
+                self.lifecycle_event,
+            )
+        except ExecutionError as error:
+            raise TypeError("SETTLEMENT_COMMIT_MISMATCH") from error
+        if (expected_result.is_noop
+                or expected_result.order_state != self.order_state
+                or expected_result.account != self.account
+                or expected_result.entries != self.entries
+                or expected_result.outbox != self.outbox):
             raise TypeError("SETTLEMENT_COMMIT_MISMATCH")
 
 
