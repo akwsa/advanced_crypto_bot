@@ -6,11 +6,13 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum
 
-from .content import ContentRef
+from .content import ContentRecipe, ContentRef
 from .numeric import ScaledInteger
 
 
 MAX_CALIBRATION_SCALE = 18
+CALIBRATION_REPORT_DOMAIN = "calibration.report"
+CALIBRATION_REPORT_KIND = "execution-calibration-report"
 
 
 class CalibrationError(ValueError):
@@ -36,9 +38,9 @@ def _utc(value: object) -> datetime:
     return value
 
 
-def _scaled(value: object, *, positive: bool = False) -> ScaledInteger:
+def _scaled(value: object, *, allow_negative: bool = False) -> ScaledInteger:
     if (type(value) is not ScaledInteger or value.scale > MAX_CALIBRATION_SCALE
-            or (value.units <= 0 if positive else value.units < 0)):
+            or (not allow_negative and value.units < 0)):
         _fail("INVALID_CALIBRATION_SCALE")
     return value
 
@@ -93,6 +95,19 @@ class CalibrationVerdict(str, Enum):
     PASS = "PASS"
     FAIL = "FAIL"
     UNSCORABLE = "UNSCORABLE"
+
+
+_RATE_METRICS = {
+    CalibrationMetric.FILL_PROBABILITY,
+    CalibrationMetric.REJECT_RATE,
+    CalibrationMetric.PARTIAL_RATE,
+    CalibrationMetric.CANCEL_RATE,
+}
+
+_SIGNED_METRICS = {
+    CalibrationMetric.SLIPPAGE,
+    CalibrationMetric.IMPLEMENTATION_SHORTFALL,
+}
 
 
 _LABEL_AUTHORITIES = {
@@ -154,14 +169,11 @@ class CalibrationPoint:
                 or type(self.label) is not EvidenceLabel
                 or type(self.authority) is not EvidenceAuthority):
             _fail("INVALID_CALIBRATION_POINT")
-        _scaled(self.predicted)
-        _scaled(self.observed)
-        if (self.metric in {
-                CalibrationMetric.FILL_PROBABILITY,
-                CalibrationMetric.REJECT_RATE,
-                CalibrationMetric.PARTIAL_RATE,
-                CalibrationMetric.CANCEL_RATE,
-        } and (_greater(self.predicted, ScaledInteger(1, 0))
+        allow_negative = self.metric in _SIGNED_METRICS
+        _scaled(self.predicted, allow_negative=allow_negative)
+        _scaled(self.observed, allow_negative=allow_negative)
+        if (self.metric in _RATE_METRICS
+                and (_greater(self.predicted, ScaledInteger(1, 0))
                or _greater(self.observed, ScaledInteger(1, 0)))):
             _fail("INVALID_CALIBRATION_RATE")
         if self.authority not in _LABEL_AUTHORITIES[self.label]:
@@ -191,6 +203,9 @@ class CalibrationTolerance:
         if type(self.metric) is not CalibrationMetric:
             _fail("INVALID_CALIBRATION_TOLERANCE")
         _scaled(self.maximum_absolute_error)
+        if (self.metric in _RATE_METRICS
+                and _greater(self.maximum_absolute_error, ScaledInteger(1, 0))):
+            _fail("INVALID_CALIBRATION_RATE")
 
     def to_canonical_value(self) -> dict[str, object]:
         return {
@@ -247,13 +262,16 @@ class ExecutionCalibrationReport:
         if self.verdict is not _verdict(self.points, self.tolerances):
             _fail("CALIBRATION_VERDICT_MISMATCH")
         if (type(self.report_ref) is not ContentRef
+                or self.report_ref.recipe is not ContentRecipe.V2
+                or self.report_ref.domain != CALIBRATION_REPORT_DOMAIN
+                or self.report_ref.kind != CALIBRATION_REPORT_KIND
                 or self.report_id != self.report_ref.key
                 or not self.report_ref.verify(self.binding_value())):
             _fail("CALIBRATION_REPORT_REFERENCE_MISMATCH")
 
     @property
     def venue_calibration_qualified(self) -> bool:
-        return self.verdict in (CalibrationVerdict.PASS, CalibrationVerdict.FAIL)
+        return self.verdict is CalibrationVerdict.PASS
 
     def binding_value(self) -> dict[str, object]:
         return {
@@ -286,7 +304,7 @@ class ExecutionCalibrationReport:
             "verdict": verdict.value,
         }
         reference = ContentRef.v2(
-            "calibration.report", "execution-calibration-report", value,
+            CALIBRATION_REPORT_DOMAIN, CALIBRATION_REPORT_KIND, value,
         )
         return cls(
             reference.key, context, points, tolerances, evaluated_at_utc,

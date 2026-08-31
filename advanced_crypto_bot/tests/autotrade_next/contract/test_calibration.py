@@ -8,6 +8,7 @@ from autotrade_next.domain.calibration import (
     CalibrationTolerance, CalibrationVerdict, EvidenceAuthority, EvidenceLabel,
     ExecutionCalibrationReport,
 )
+from autotrade_next.domain.content import ContentRef
 from autotrade_next.domain.numeric import ScaledInteger
 
 AT = datetime(2026, 8, 30, 14, 0, tzinfo=UTC)
@@ -95,6 +96,56 @@ def test_observed_report_fails_when_any_absolute_error_exceeds_frozen_tolerance(
         evaluated_at_utc=AT,
     )
     assert report.verdict is CalibrationVerdict.FAIL
+    assert report.venue_calibration_qualified is False
+
+
+def test_signed_execution_costs_are_preserved_but_unsigned_metrics_reject_negatives():
+    for metric in (
+        CalibrationMetric.SLIPPAGE,
+        CalibrationMetric.IMPLEMENTATION_SHORTFALL,
+    ):
+        point = CalibrationPoint(
+            metric, amount(-10), amount(-5), EvidenceLabel.OBSERVED,
+            EvidenceAuthority.SHADOW, 2, f"evidence:{metric.value}",
+        )
+        assert point.predicted.units == -10
+
+    with pytest.raises(CalibrationError, match="INVALID_CALIBRATION_SCALE"):
+        CalibrationPoint(
+            CalibrationMetric.LATENCY, amount(-1), amount(1),
+            EvidenceLabel.OBSERVED, EvidenceAuthority.SHADOW, 1,
+            "evidence:negative-latency",
+        )
+
+
+def test_rate_tolerance_cannot_exceed_the_rate_domain():
+    with pytest.raises(CalibrationError, match="INVALID_CALIBRATION_RATE"):
+        CalibrationTolerance(
+            CalibrationMetric.FILL_PROBABILITY, ScaledInteger(10001, 4),
+        )
+
+
+def test_report_rejects_compatibility_or_wrong_domain_content_references():
+    report = ExecutionCalibrationReport.create(
+        context=context(), points=points(), tolerances=tolerances(), evaluated_at_utc=AT,
+    )
+    invalid_refs = (
+        ContentRef.v1("execution-calibration-report", report.binding_value()),
+        ContentRef.v2("wrong.domain", "execution-calibration-report", report.binding_value()),
+        ContentRef.v2("calibration.report", "wrong-kind", report.binding_value()),
+    )
+    for invalid_ref in invalid_refs:
+        with pytest.raises(
+            CalibrationError, match="CALIBRATION_REPORT_REFERENCE_MISMATCH",
+        ):
+            replace(report, report_id=invalid_ref.key, report_ref=invalid_ref)
+
+
+def test_report_is_exported_from_domain_package():
+    from autotrade_next import domain
+
+    assert domain.ExecutionCalibrationReport is ExecutionCalibrationReport
+    assert "ExecutionCalibrationReport" in domain.__all__
 
 
 def test_context_window_scale_sample_and_direct_verdict_forgery_fail_closed():

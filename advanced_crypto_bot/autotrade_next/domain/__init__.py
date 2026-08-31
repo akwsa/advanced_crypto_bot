@@ -185,6 +185,7 @@ __all__ = (
     "EvidencePolicy",
     "EvidenceRequirement",
     "EvidenceRequirementSet",
+    "ExecutionCalibrationReport",
     "ExecutionError",
     "ExecutionIntent",
     "ExecutionOrder",
