@@ -22,6 +22,14 @@ from autotrade_next.adapters.sqlite.fenced_journal import (
 NOW = datetime(2026, 8, 30, 8, 0, tzinfo=UTC)
 
 
+class ManualClock:
+    def __init__(self, current: datetime = NOW) -> None:
+        self.current = current
+
+    def __call__(self) -> datetime:
+        return self.current
+
+
 def claim(*, claim_id: str = "claim-1", expected_epoch: int | None = None,
           token: str = "token-1", granted: datetime = NOW) -> AuthorityClaim:
     return AuthorityClaim(
@@ -35,7 +43,7 @@ def claim(*, claim_id: str = "claim-1", expected_epoch: int | None = None,
 
 
 def command(*, command_id: str = "command-1", epoch: int = 1,
-            token: str = "token-1", now: datetime = NOW,
+            token: str = "token-1",
             expected_sequence: int = 0, event_ref: str = "sha256:event-1",
             outbox_ref: str = "sha256:outbox-1") -> AppendCommand:
     return AppendCommand(
@@ -43,7 +51,6 @@ def command(*, command_id: str = "command-1", epoch: int = 1,
         scope_id="global-writer",
         epoch=epoch,
         lease_token=token,
-        current_time_utc=now,
         aggregate_id="order-1",
         expected_sequence=expected_sequence,
         event_ref=event_ref,
@@ -51,9 +58,18 @@ def command(*, command_id: str = "command-1", epoch: int = 1,
     )
 
 
-def store(tmp_path: Path, *, timeout: float = 0.0) -> SQLiteFencedJournal:
-    result = SQLiteFencedJournal(tmp_path / "journal.sqlite3", busy_timeout_seconds=timeout)
-    result.initialize()
+def store(
+    tmp_path: Path,
+    *,
+    clock: ManualClock | None = None,
+    timeout: float = 0.0,
+) -> SQLiteFencedJournal:
+    result = SQLiteFencedJournal(
+        tmp_path / "journal.sqlite3",
+        clock=clock or ManualClock(),
+        busy_timeout_seconds=timeout,
+    )
+    result.initialize_schema_for_test()
     return result
 
 
@@ -65,20 +81,23 @@ def counts(path: Path) -> tuple[int, int, int, int]:
 
 
 def test_claim_is_single_row_monotonic_cas_and_token_never_reused(tmp_path: Path) -> None:
-    journal = store(tmp_path)
+    clock = ManualClock()
+    journal = store(tmp_path, clock=clock)
     first = journal.claim_authority(claim())
     retry = journal.claim_authority(claim())
+    clock.current = NOW + timedelta(minutes=5)
     takeover = journal.claim_authority(claim(
         claim_id="claim-2", expected_epoch=1, token="token-2",
-        granted=NOW + timedelta(seconds=1),
+        granted=clock.current,
     ))
     lost_cas = journal.claim_authority(claim(
         claim_id="claim-3", expected_epoch=1, token="token-3",
-        granted=NOW + timedelta(seconds=2),
+        granted=clock.current,
     ))
+    clock.current = NOW + timedelta(minutes=10)
     reused = journal.claim_authority(claim(
         claim_id="claim-4", expected_epoch=2, token="token-1",
-        granted=NOW + timedelta(seconds=2),
+        granted=clock.current,
     ))
 
     assert first.status is ClaimStatus.CLAIMED and first.epoch == 1
@@ -97,16 +116,37 @@ def test_claim_is_single_row_monotonic_cas_and_token_never_reused(tmp_path: Path
 
 
 def test_claim_identity_reuse_and_backward_clock_fail_closed(tmp_path: Path) -> None:
-    journal = store(tmp_path)
+    clock = ManualClock()
+    journal = store(tmp_path, clock=clock)
     assert journal.claim_authority(claim()).status is ClaimStatus.CLAIMED
     identity_conflict = journal.claim_authority(claim(token="different"))
+    clock.current = NOW - timedelta(microseconds=1)
     backward = journal.claim_authority(claim(
         claim_id="claim-2", expected_epoch=1, token="token-2",
-        granted=NOW - timedelta(microseconds=1),
+        granted=NOW - timedelta(minutes=1),
     ))
     assert identity_conflict.status is ClaimStatus.IDENTITY_CONFLICT
     assert backward.status is ClaimStatus.CLOCK_ANOMALY
     assert journal.read_authority("global-writer").epoch == 1  # type: ignore[union-attr]
+
+
+def test_takeover_before_active_lease_expiry_fails_closed(tmp_path: Path) -> None:
+    clock = ManualClock()
+    journal = store(tmp_path, clock=clock)
+    assert journal.claim_authority(claim()).status is ClaimStatus.CLAIMED
+    clock.current = NOW + timedelta(seconds=1)
+
+    result = journal.claim_authority(claim(
+        claim_id="claim-2",
+        expected_epoch=1,
+        token="token-2",
+        granted=clock.current,
+    ))
+
+    assert result.status is ClaimStatus.LEASE_ACTIVE
+    snapshot = journal.read_authority("global-writer")
+    assert snapshot is not None
+    assert (snapshot.epoch, snapshot.lease_token) == (1, "token-1")
 
 
 def test_append_atomically_commits_journal_event_outbox_and_high_water(tmp_path: Path) -> None:
@@ -121,21 +161,26 @@ def test_append_atomically_commits_journal_event_outbox_and_high_water(tmp_path:
 
 
 @pytest.mark.parametrize(
-    ("change", "status"),
+    ("change", "observed", "status"),
     (
-        ({"epoch": 0}, AppendStatus.STALE_EPOCH),
-        ({"epoch": 2, "token": "forged"}, AppendStatus.UNCLAIMED_EPOCH),
-        ({"token": "forged"}, AppendStatus.FENCE_LOST),
-        ({"now": NOW - timedelta(microseconds=1)}, AppendStatus.CLOCK_ANOMALY),
-        ({"now": NOW + timedelta(minutes=5)}, AppendStatus.LEASE_EXPIRED),
-        ({"expected_sequence": 1}, AppendStatus.SEQUENCE_CONFLICT),
+        ({"epoch": 0}, NOW, AppendStatus.STALE_EPOCH),
+        ({"epoch": 2, "token": "forged"}, NOW, AppendStatus.UNCLAIMED_EPOCH),
+        ({"token": "forged"}, NOW, AppendStatus.FENCE_LOST),
+        ({}, NOW - timedelta(microseconds=1), AppendStatus.CLOCK_ANOMALY),
+        ({}, NOW + timedelta(minutes=5), AppendStatus.LEASE_EXPIRED),
+        ({"expected_sequence": 1}, NOW, AppendStatus.SEQUENCE_CONFLICT),
     ),
 )
 def test_invalid_fence_or_sequence_has_zero_writes(
-    tmp_path: Path, change: dict[str, object], status: AppendStatus,
+    tmp_path: Path,
+    change: dict[str, object],
+    observed: datetime,
+    status: AppendStatus,
 ) -> None:
-    journal = store(tmp_path)
+    clock = ManualClock()
+    journal = store(tmp_path, clock=clock)
     journal.claim_authority(claim())
+    clock.current = observed
     result = journal.append(command(**change))  # type: ignore[arg-type]
     assert result.status is status
     assert counts(journal.path) == (0, 0, 0, 0)
@@ -152,12 +197,14 @@ def test_retry_requires_same_command_identity_and_payload(tmp_path: Path) -> Non
 
 
 def test_committed_retry_is_idempotent_even_after_takeover(tmp_path: Path) -> None:
-    journal = store(tmp_path)
+    clock = ManualClock()
+    journal = store(tmp_path, clock=clock)
     journal.claim_authority(claim())
     assert journal.append(command()).status is AppendStatus.APPENDED
+    clock.current = NOW + timedelta(minutes=5)
     journal.claim_authority(claim(
         claim_id="claim-2", expected_epoch=1, token="token-2",
-        granted=NOW + timedelta(seconds=1),
+        granted=clock.current,
     ))
     assert journal.append(command()).status is AppendStatus.IDEMPOTENT
     assert counts(journal.path) == (1, 1, 1, 1)
@@ -210,10 +257,10 @@ class ClaimCrashBeforeCommitJournal(SQLiteFencedJournal):
 
 def test_crash_before_commit_rolls_back_and_same_identity_can_retry(tmp_path: Path) -> None:
     path = tmp_path / "journal.sqlite3"
-    healthy = SQLiteFencedJournal(path)
-    healthy.initialize()
+    healthy = SQLiteFencedJournal(path, clock=ManualClock())
+    healthy.initialize_schema_for_test()
     healthy.claim_authority(claim())
-    crashing = CrashBeforeCommitJournal(path)
+    crashing = CrashBeforeCommitJournal(path, clock=ManualClock())
 
     with pytest.raises(RuntimeError, match="simulated crash"):
         crashing.append(command())
@@ -224,9 +271,9 @@ def test_crash_before_commit_rolls_back_and_same_identity_can_retry(tmp_path: Pa
 
 def test_claim_crash_before_commit_leaves_no_authority_and_retries(tmp_path: Path) -> None:
     path = tmp_path / "journal.sqlite3"
-    healthy = SQLiteFencedJournal(path)
-    healthy.initialize()
-    crashing = ClaimCrashBeforeCommitJournal(path)
+    healthy = SQLiteFencedJournal(path, clock=ManualClock())
+    healthy.initialize_schema_for_test()
+    crashing = ClaimCrashBeforeCommitJournal(path, clock=ManualClock())
 
     with pytest.raises(RuntimeError, match="simulated claim crash"):
         crashing.claim_authority(claim())
@@ -242,10 +289,10 @@ class CommitThenRaiseJournal(SQLiteFencedJournal):
 
 def test_indeterminate_commit_is_reconciled_by_command_identity(tmp_path: Path) -> None:
     path = tmp_path / "journal.sqlite3"
-    healthy = SQLiteFencedJournal(path)
-    healthy.initialize()
+    healthy = SQLiteFencedJournal(path, clock=ManualClock())
+    healthy.initialize_schema_for_test()
     healthy.claim_authority(claim())
-    uncertain = CommitThenRaiseJournal(path)
+    uncertain = CommitThenRaiseJournal(path, clock=ManualClock())
 
     outcome = uncertain.append(command())
     assert outcome.status is AppendStatus.COMMITTED_AFTER_INDETERMINATE
@@ -255,12 +302,70 @@ def test_indeterminate_commit_is_reconciled_by_command_identity(tmp_path: Path) 
 
 def test_indeterminate_claim_commit_is_reconciled_by_claim_identity(tmp_path: Path) -> None:
     path = tmp_path / "journal.sqlite3"
-    uncertain = CommitThenRaiseJournal(path)
-    uncertain.initialize()
+    uncertain = CommitThenRaiseJournal(path, clock=ManualClock())
+    uncertain.initialize_schema_for_test()
     result = uncertain.claim_authority(claim())
     assert result.status is ClaimStatus.COMMITTED_AFTER_INDETERMINATE
-    healthy = SQLiteFencedJournal(path)
+    healthy = SQLiteFencedJournal(path, clock=ManualClock())
     assert healthy.claim_authority(claim()).status is ClaimStatus.IDEMPOTENT
+
+
+def test_invalid_clock_output_is_typed_and_has_zero_writes(tmp_path: Path) -> None:
+    path = tmp_path / "journal.sqlite3"
+    healthy = SQLiteFencedJournal(path, clock=ManualClock())
+    healthy.initialize_schema_for_test()
+    assert healthy.claim_authority(claim()).status is ClaimStatus.CLAIMED
+    invalid_clock = SQLiteFencedJournal(
+        path,
+        clock=lambda: NOW.replace(tzinfo=None),
+    )
+
+    claim_result = invalid_clock.claim_authority(claim(
+        claim_id="claim-2",
+        expected_epoch=1,
+        token="token-2",
+    ))
+    assert claim_result.status is ClaimStatus.CLOCK_ANOMALY
+    assert invalid_clock.append(command()).status is AppendStatus.CLOCK_ANOMALY
+    assert counts(path) == (0, 0, 0, 0)
+
+
+def test_missing_database_fails_closed_without_creating_file(tmp_path: Path) -> None:
+    path = tmp_path / "missing.sqlite3"
+    journal = SQLiteFencedJournal(path, clock=ManualClock())
+
+    result = journal.claim_authority(claim())
+
+    assert result.status is ClaimStatus.STORAGE_FAILURE
+    assert not path.exists()
+
+
+def test_failed_reconciliation_keeps_commit_outcome_indeterminate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    journal = store(tmp_path)
+
+    def unavailable_connection() -> sqlite3.Connection:
+        raise sqlite3.OperationalError("unable to open database file")
+
+    monkeypatch.setattr(journal, "_connect", unavailable_connection)
+
+    claim_result = journal._reconcile_claim(claim())
+    append_result = journal._reconcile_append(command())
+    assert claim_result.status is ClaimStatus.INDETERMINATE_COMMIT
+    assert append_result.status is AppendStatus.INDETERMINATE_COMMIT
+
+
+def test_rollback_failure_does_not_mask_fail_closed_outcome() -> None:
+    class BrokenRollbackConnection:
+        in_transaction = True
+
+        def execute(self, statement: str) -> None:
+            assert statement == "ROLLBACK"
+            raise sqlite3.OperationalError("disk I/O error")
+
+    SQLiteFencedJournal._rollback(BrokenRollbackConnection())  # type: ignore[arg-type]
 
 
 def test_inputs_require_exact_types_and_utc_times() -> None:

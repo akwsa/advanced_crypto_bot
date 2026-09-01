@@ -469,8 +469,8 @@ def test_adapters_obey_explicit_domain_port_dependency_matrix_without_horizontal
         },
         "sqlite/__init__": set(),
         "sqlite/fenced_journal": {
-            "__future__", "contextlib", "dataclasses", "datetime", "enum",
-            "pathlib", "sqlite3",
+            "__future__", "collections.abc", "contextlib", "dataclasses",
+            "datetime", "enum", "math", "pathlib", "sqlite3",
         },
         "sqlite/recovery_store": {
             "__future__", "contextlib", "dataclasses", "datetime", "enum",

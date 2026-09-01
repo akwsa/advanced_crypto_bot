@@ -7,10 +7,12 @@ the transaction.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from contextlib import closing
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum
+import math
 from pathlib import Path
 import sqlite3
 
@@ -26,8 +28,10 @@ class ClaimStatus(str, Enum):
     AUTHORITY_CONFLICT = "AUTHORITY_CONFLICT"
     IDENTITY_CONFLICT = "IDENTITY_CONFLICT"
     TOKEN_REUSE = "TOKEN_REUSE"
+    LEASE_ACTIVE = "LEASE_ACTIVE"
     CLOCK_ANOMALY = "CLOCK_ANOMALY"
     BUSY = "BUSY"
+    STORAGE_FAILURE = "STORAGE_FAILURE"
     INDETERMINATE_COMMIT = "INDETERMINATE_COMMIT"
 
 
@@ -44,11 +48,16 @@ class AppendStatus(str, Enum):
     SEQUENCE_CONFLICT = "SEQUENCE_CONFLICT"
     IDENTITY_CONFLICT = "IDENTITY_CONFLICT"
     BUSY = "BUSY"
+    STORAGE_FAILURE = "STORAGE_FAILURE"
     INDETERMINATE_COMMIT = "INDETERMINATE_COMMIT"
 
 
 class IndeterminateCommit(RuntimeError):
     """Signals that COMMIT may have succeeded but its return was lost."""
+
+
+class _ClockAnomaly(RuntimeError):
+    """Internal marker used to map an untrusted clock result fail-closed."""
 
 
 def _required_text(value: object, code: str) -> None:
@@ -112,7 +121,6 @@ class AppendCommand:
     scope_id: str
     epoch: int
     lease_token: str
-    current_time_utc: datetime
     aggregate_id: str
     expected_sequence: int
     event_ref: str
@@ -132,7 +140,6 @@ class AppendCommand:
             raise ValueError("INVALID_EPOCH")
         if type(self.expected_sequence) is not int or self.expected_sequence < 0:
             raise ValueError("INVALID_EXPECTED_SEQUENCE")
-        _utc_microseconds(self.current_time_utc, "INVALID_CURRENT_TIME")
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,30 +152,49 @@ class AppendResult:
 class SQLiteFencedJournal:
     """Own a durable writer fence and append facts under one SQLite lock."""
 
-    def __init__(self, path: str | Path, *, busy_timeout_seconds: float = 0.0) -> None:
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        clock: Callable[[], datetime],
+        busy_timeout_seconds: float = 0.0,
+    ) -> None:
         if not isinstance(path, (str, Path)) or not str(path):
             raise ValueError("INVALID_SQLITE_PATH")
         if str(path) == ":memory:":
             raise ValueError("SHARED_DURABLE_PATH_REQUIRED")
         if (type(busy_timeout_seconds) not in (int, float)
+                or not math.isfinite(busy_timeout_seconds)
                 or busy_timeout_seconds < 0):
             raise ValueError("INVALID_BUSY_TIMEOUT")
+        if not callable(clock):
+            raise TypeError("INVALID_CLOCK")
         self.path = Path(path)
+        self._clock = clock
         self._busy_timeout_seconds = float(busy_timeout_seconds)
 
     def _connect(self) -> sqlite3.Connection:
+        database_uri = f"{self.path.resolve().as_uri()}?mode=rw"
         connection = sqlite3.connect(
-            self.path,
+            database_uri,
             timeout=self._busy_timeout_seconds,
             isolation_level=None,
+            uri=True,
         )
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
         return connection
 
-    def initialize(self) -> None:
+    def initialize_schema_for_test(self) -> None:
+        """Create the isolated test schema; production uses offline migrations."""
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with closing(self._connect()) as connection:
+        with closing(sqlite3.connect(
+            self.path,
+            timeout=self._busy_timeout_seconds,
+            isolation_level=None,
+        )) as connection:
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA foreign_keys = ON")
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS writer_authority (
@@ -260,6 +286,12 @@ class SQLiteFencedJournal:
     def _begin(self, connection: sqlite3.Connection) -> None:
         connection.execute("BEGIN IMMEDIATE")
 
+    def _observed_time_microseconds(self) -> int:
+        try:
+            return _utc_microseconds(self._clock(), "INVALID_CLOCK_TIME")
+        except Exception as error:
+            raise _ClockAnomaly("INVALID_CLOCK_TIME") from error
+
     def _before_commit(self, operation: str, identity: str) -> None:
         """Fault-injection seam; production implementation intentionally does nothing."""
 
@@ -268,8 +300,13 @@ class SQLiteFencedJournal:
 
     @staticmethod
     def _rollback(connection: sqlite3.Connection) -> None:
-        if connection.in_transaction:
-            connection.execute("ROLLBACK")
+        try:
+            if connection.in_transaction:
+                connection.execute("ROLLBACK")
+        except sqlite3.DatabaseError:
+            # Preserve the operation's typed failure; close() remains the final
+            # fail-closed boundary for a transaction that cannot be rolled back.
+            pass
 
     @staticmethod
     def _is_busy(error: sqlite3.OperationalError) -> bool:
@@ -297,8 +334,6 @@ class SQLiteFencedJournal:
             row["scope_id"] == request.scope_id
             and row["epoch"] == request.epoch
             and row["lease_token"] == request.lease_token
-            and row["current_time_us"] == _utc_microseconds(
-                request.current_time_utc, "INVALID_CURRENT_TIME")
             and row["aggregate_id"] == request.aggregate_id
             and row["expected_sequence"] == request.expected_sequence
             and row["event_ref"] == request.event_ref
@@ -308,7 +343,13 @@ class SQLiteFencedJournal:
     def claim_authority(self, request: AuthorityClaim) -> ClaimResult:
         if type(request) is not AuthorityClaim:
             raise TypeError("INVALID_AUTHORITY_CLAIM")
-        connection = self._connect()
+        try:
+            connection = self._connect()
+        except sqlite3.DatabaseError as error:
+            status = (ClaimStatus.BUSY
+                      if isinstance(error, sqlite3.OperationalError) and self._is_busy(error)
+                      else ClaimStatus.STORAGE_FAILURE)
+            return ClaimResult(status, request.scope_id)
         committed_maybe = False
         try:
             self._begin(connection)
@@ -329,6 +370,10 @@ class SQLiteFencedJournal:
             ).fetchone()
             granted_us = _utc_microseconds(request.granted_at_utc, "INVALID_GRANTED_AT")
             expires_us = _utc_microseconds(request.expires_at_utc, "INVALID_EXPIRES_AT")
+            observed_us = self._observed_time_microseconds()
+            if observed_us < granted_us or observed_us >= expires_us:
+                self._rollback(connection)
+                return ClaimResult(ClaimStatus.CLOCK_ANOMALY, request.scope_id)
             if active is None:
                 if request.expected_epoch not in (None, 0):
                     self._rollback(connection)
@@ -347,9 +392,13 @@ class SQLiteFencedJournal:
                     self._rollback(connection)
                     return ClaimResult(ClaimStatus.AUTHORITY_CONFLICT, request.scope_id,
                                        active["active_epoch"], active["lease_token"])
-                if granted_us < active["granted_at_us"]:
+                if observed_us < active["granted_at_us"]:
                     self._rollback(connection)
                     return ClaimResult(ClaimStatus.CLOCK_ANOMALY, request.scope_id,
+                                       active["active_epoch"], active["lease_token"])
+                if observed_us < active["expires_at_us"]:
+                    self._rollback(connection)
+                    return ClaimResult(ClaimStatus.LEASE_ACTIVE, request.scope_id,
                                        active["active_epoch"], active["lease_token"])
                 token_seen = connection.execute(
                     "SELECT 1 FROM authority_claims WHERE scope_id = ? AND lease_token = ?",
@@ -386,13 +435,21 @@ class SQLiteFencedJournal:
         except IndeterminateCommit:
             self._rollback(connection)
             return self._reconcile_claim(request)
+        except _ClockAnomaly:
+            self._rollback(connection)
+            return ClaimResult(ClaimStatus.CLOCK_ANOMALY, request.scope_id)
         except sqlite3.OperationalError as error:
             self._rollback(connection)
             if self._is_busy(error):
                 return ClaimResult(ClaimStatus.BUSY, request.scope_id)
             if committed_maybe:
                 return self._reconcile_claim(request)
-            raise
+            return ClaimResult(ClaimStatus.STORAGE_FAILURE, request.scope_id)
+        except sqlite3.DatabaseError:
+            self._rollback(connection)
+            if committed_maybe:
+                return self._reconcile_claim(request)
+            return ClaimResult(ClaimStatus.STORAGE_FAILURE, request.scope_id)
         except Exception:
             self._rollback(connection)
             raise
@@ -400,11 +457,14 @@ class SQLiteFencedJournal:
             connection.close()
 
     def _reconcile_claim(self, request: AuthorityClaim) -> ClaimResult:
-        with closing(self._connect()) as connection:
-            row = connection.execute(
-                "SELECT * FROM authority_claims WHERE claim_id = ?",
-                (request.claim_id,),
-            ).fetchone()
+        try:
+            with closing(self._connect()) as connection:
+                row = connection.execute(
+                    "SELECT * FROM authority_claims WHERE claim_id = ?",
+                    (request.claim_id,),
+                ).fetchone()
+        except sqlite3.DatabaseError:
+            return ClaimResult(ClaimStatus.INDETERMINATE_COMMIT, request.scope_id)
         if row is None:
             return ClaimResult(ClaimStatus.INDETERMINATE_COMMIT, request.scope_id)
         if not self._claim_matches(row, request):
@@ -416,7 +476,13 @@ class SQLiteFencedJournal:
     def append(self, request: AppendCommand) -> AppendResult:
         if type(request) is not AppendCommand:
             raise TypeError("INVALID_APPEND_COMMAND")
-        connection = self._connect()
+        try:
+            connection = self._connect()
+        except sqlite3.DatabaseError as error:
+            status = (AppendStatus.BUSY
+                      if isinstance(error, sqlite3.OperationalError) and self._is_busy(error)
+                      else AppendStatus.STORAGE_FAILURE)
+            return AppendResult(status, request.command_id)
         committed_maybe = False
         try:
             self._begin(connection)
@@ -448,11 +514,11 @@ class SQLiteFencedJournal:
                 self._rollback(connection)
                 return AppendResult(AppendStatus.FENCE_LOST, request.command_id)
 
-            current_us = _utc_microseconds(request.current_time_utc, "INVALID_CURRENT_TIME")
-            if current_us < active["granted_at_us"]:
+            observed_us = self._observed_time_microseconds()
+            if observed_us < active["granted_at_us"]:
                 self._rollback(connection)
                 return AppendResult(AppendStatus.CLOCK_ANOMALY, request.command_id)
-            if current_us >= active["expires_at_us"]:
+            if observed_us >= active["expires_at_us"]:
                 self._rollback(connection)
                 return AppendResult(AppendStatus.LEASE_EXPIRED, request.command_id)
 
@@ -492,7 +558,7 @@ class SQLiteFencedJournal:
                 "aggregate_id, expected_sequence, resulting_sequence, event_ref, outbox_ref) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (request.command_id, request.scope_id, request.epoch,
-                 request.lease_token, current_us, request.aggregate_id,
+                 request.lease_token, observed_us, request.aggregate_id,
                  request.expected_sequence, resulting_sequence,
                  request.event_ref, request.outbox_ref),
             )
@@ -518,13 +584,21 @@ class SQLiteFencedJournal:
         except IndeterminateCommit:
             self._rollback(connection)
             return self._reconcile_append(request)
+        except _ClockAnomaly:
+            self._rollback(connection)
+            return AppendResult(AppendStatus.CLOCK_ANOMALY, request.command_id)
         except sqlite3.OperationalError as error:
             self._rollback(connection)
             if self._is_busy(error):
                 return AppendResult(AppendStatus.BUSY, request.command_id)
             if committed_maybe:
                 return self._reconcile_append(request)
-            raise
+            return AppendResult(AppendStatus.STORAGE_FAILURE, request.command_id)
+        except sqlite3.DatabaseError:
+            self._rollback(connection)
+            if committed_maybe:
+                return self._reconcile_append(request)
+            return AppendResult(AppendStatus.STORAGE_FAILURE, request.command_id)
         except Exception:
             self._rollback(connection)
             raise
@@ -532,11 +606,14 @@ class SQLiteFencedJournal:
             connection.close()
 
     def _reconcile_append(self, request: AppendCommand) -> AppendResult:
-        with closing(self._connect()) as connection:
-            row = connection.execute(
-                "SELECT * FROM command_journal WHERE command_id = ?",
-                (request.command_id,),
-            ).fetchone()
+        try:
+            with closing(self._connect()) as connection:
+                row = connection.execute(
+                    "SELECT * FROM command_journal WHERE command_id = ?",
+                    (request.command_id,),
+                ).fetchone()
+        except sqlite3.DatabaseError:
+            return AppendResult(AppendStatus.INDETERMINATE_COMMIT, request.command_id)
         if row is None:
             return AppendResult(AppendStatus.INDETERMINATE_COMMIT, request.command_id)
         if not self._command_matches(row, request):

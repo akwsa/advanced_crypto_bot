@@ -183,8 +183,8 @@ def rebuild(state: RecoveryCheckpoint, **changes) -> RecoveryCheckpoint:
 
 def stores(tmp_path: Path) -> tuple[SQLiteFencedJournal, SQLiteRecoveryStore]:
     path = tmp_path / "canonical.sqlite3"
-    journal = SQLiteFencedJournal(path)
-    journal.initialize()
+    journal = SQLiteFencedJournal(path, clock=lambda: AT)
+    journal.initialize_schema_for_test()
     recovery = SQLiteRecoveryStore(path)
     recovery.initialize()
     claim = AuthorityClaim(

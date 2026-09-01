@@ -38,7 +38,7 @@ development_status:
   epic-2-retrospective: optional
 
   epic-3: in-progress
-  3-1-menegakkan-fenced-command-authority: review
+  3-1-menegakkan-fenced-command-authority: done
   3-2-mengalokasikan-exposure-dan-reservation-secara-atomik: review
   3-3-menerapkan-portfolio-risk-governor: review
   3-4-menggabungkan-safety-cause-tanpa-premature-clear: in-progress
