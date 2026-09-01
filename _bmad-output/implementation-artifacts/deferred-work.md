@@ -57,3 +57,4 @@
 - source_spec: `spec-fix-legacy-regression-gate-2.md`
   summary: Diagnosis dan pulihkan penyelesaian test dashboard safety status yang menggantung.
   evidence: Full regression melewati seluruh tiga failure target, lalu konsisten berhenti di `tests/test_dashboard_api_phase1.py::test_safety_status_reports_dry_run_locked`; test terisolasi juga timeout setelah 60 detik dan tidak berubah dari baseline `1d57a82`.
+  resolved_by: Verifikasi di luar sandbox lulus 1/1 dalam 0,68 detik; hang berasal dari callback worker-thread sandbox dan tidak membutuhkan perubahan produk/test.
