@@ -75,6 +75,7 @@ class TestPairDeleteCleanup(unittest.IsolatedAsyncioTestCase):
             auto_trade_interval_minutes=0,
             _format_signal_message_html=fake_formatter,
             app=SimpleNamespace(bot=SimpleNamespace(send_message=fake_send_message)),
+            db=SimpleNamespace(get_open_trades=lambda user_id: []),
             risk_manager=SimpleNamespace(check_daily_loss_limit=lambda user_id: (False, "test stop")),
         )
 
