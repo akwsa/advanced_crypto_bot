@@ -8,7 +8,9 @@
 
 import logging
 import os
+from collections import OrderedDict
 from datetime import datetime
+from threading import RLock
 
 from analysis.technical_analysis import TechnicalAnalysis
 from signals.signal_rules import (
@@ -28,8 +30,43 @@ ACTIONABLE_SIGNALS = {"BUY", "STRONG_BUY", "SELL", "STRONG_SELL"}
 BUY_SIGNALS = {"BUY", "STRONG_BUY"}
 SELL_SIGNALS = {"SELL", "STRONG_SELL"}
 
-# FIX #4: In-memory cache per pair untuk GARCH/VaR/ARIMA (TTL 5 menit)
-_quant_cache: dict = {}
+# FIX #4: In-memory LRU cache per pair untuk GARCH/VaR/ARIMA (TTL 5 menit)
+QUANT_CACHE_MAX_PAIRS = 100
+_quant_cache: OrderedDict = OrderedDict()
+_quant_cache_lock = RLock()
+
+
+def _quant_cache_get(pair):
+    """Return a cached value and promote the pair to most-recently used."""
+    with _quant_cache_lock:
+        try:
+            value = _quant_cache[pair]
+        except KeyError:
+            return None
+        _quant_cache.move_to_end(pair)
+        return value
+
+
+def _quant_cache_set(pair, value):
+    """Store a value and evict least-recently used pairs above the cap."""
+    try:
+        max_pairs = max(1, int(QUANT_CACHE_MAX_PAIRS))
+    except (TypeError, ValueError, OverflowError):
+        max_pairs = 1
+
+    with _quant_cache_lock:
+        _quant_cache.pop(pair, None)
+        _quant_cache[pair] = value
+        while len(_quant_cache) > max_pairs:
+            _quant_cache.popitem(last=False)
+
+
+def _quant_cache_clear():
+    """Clear all cached quant results and return the removed entry count."""
+    with _quant_cache_lock:
+        removed = len(_quant_cache)
+        _quant_cache.clear()
+        return removed
 
 
 def _pct_distance(reference_price, level):
@@ -773,7 +810,7 @@ async def generate_signal_for_pair(bot, pair):
         from datetime import timedelta
 
         _now = datetime.now()
-        _cache = _quant_cache.get(pair, {})
+        _cache = _quant_cache_get(pair) or {}
         _cache_age = (_now - _cache.get("ts", _now - timedelta(minutes=10))).total_seconds()
         _cache_valid = _cache_age < 300  # TTL 5 menit
 
@@ -821,7 +858,7 @@ async def generate_signal_for_pair(bot, pair):
                         "arima_forecast_1": round(_ar.forecast[0], 2) if _ar.forecast else None,
                     })
 
-            _quant_cache[pair] = _new_cache
+            _quant_cache_set(pair, _new_cache)
             signal.update({k: v for k, v in _new_cache.items() if k != "ts"})
             logger.debug(f"[QUANT CACHE] {pair}: computed & cached")
 

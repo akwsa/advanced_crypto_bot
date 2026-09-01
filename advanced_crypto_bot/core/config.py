@@ -86,6 +86,8 @@ def is_production_user_id(user_id) -> bool:
 
 
 def _filter_admin_ids(ids_list):
+    if ids_list is None:
+        return None
     if not ids_list:
         return []
     return [uid for uid in ids_list if is_production_user_id(uid)]

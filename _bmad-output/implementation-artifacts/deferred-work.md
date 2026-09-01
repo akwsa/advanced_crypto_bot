@@ -43,3 +43,11 @@
 - source_spec: `spec-2-7-labeled-execution-calibration.md`
   summary: Ingest dan resolve actual shadow/venue TCA corpus ke frozen calibration window lalu persist/report ke promotion consumer.
   evidence: Pure report menolak label-authority mismatch dan non-observed venue scoring, tetapi reference resolver, scheduled corpus ingestion, persistence, dan promotion wiring belum tersedia.
+
+- source_spec: `spec-fix-legacy-regression-gate.md`
+  summary: Perbaiki fixture trade-review idempotency agar membuat parent user sebelum trade ber-foreign-key.
+  evidence: `TestTradeReviewIdempotency.test_create_trade_review_skips_when_exists` gagal saat setup `trades.user_id=256024600`, sebelum kontrak idempotency dijalankan; bukan akibat perubahan admin-ID atau quant cache.
+
+- source_spec: `spec-fix-legacy-regression-gate.md`
+  summary: Pulihkan enforcement VaR/CVaR pada `TradingEngine.should_execute_trade` untuk BUY berisiko ekstrem.
+  evidence: Dua test quant mengharapkan VaR -4% dan CVaR -6% ditolak, tetapi engine mengizinkan trade; perlu perubahan di luar dua blocker yang disetujui dan tidak ada test yang dikecualikan.
