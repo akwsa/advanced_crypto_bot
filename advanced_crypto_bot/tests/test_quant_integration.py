@@ -375,8 +375,8 @@ class TestVaRCVaRGate(unittest.TestCase):
 
     def test_var_gate_in_should_execute_trade(self):
         """should_execute_trade harus menolak BUY jika VaR terlalu negatif."""
-        from unittest.mock import MagicMock
-        from autotrade.trading_engine import TradingEngine
+        from unittest.mock import MagicMock, patch
+        from autotrade.trading_engine import Config, TradingEngine
 
         mock_db = MagicMock()
         mock_db.get_balance.return_value = 10_000_000
@@ -391,7 +391,8 @@ class TestVaRCVaRGate(unittest.TestCase):
             "cvar_historical": -6.0,
         }
         # Mock trading hours agar tidak blokir test (test bisa jalan kapan saja)
-        with unittest.mock.patch.object(engine, 'check_trading_hours', return_value=(True, "ok")), \
+        with patch.object(Config, 'AUTO_TRADE_DRY_RUN', False), \
+             unittest.mock.patch.object(engine, 'check_trading_hours', return_value=(True, "ok")), \
              unittest.mock.patch.object(engine, 'check_correlation_cooldown', return_value=(True, "ok")):
             allowed, reason = engine.should_execute_trade(user_id=1, signal=signal, current_price=1_500_000)
         self.assertFalse(allowed)
@@ -400,7 +401,7 @@ class TestVaRCVaRGate(unittest.TestCase):
     def test_var_gate_passes_normal_var(self):
         """should_execute_trade tidak diblokir VaR jika nilai normal."""
         from unittest.mock import MagicMock, patch
-        from autotrade.trading_engine import TradingEngine
+        from autotrade.trading_engine import Config, TradingEngine
 
         mock_db = MagicMock()
         mock_db.get_balance.return_value = 10_000_000
@@ -415,7 +416,8 @@ class TestVaRCVaRGate(unittest.TestCase):
             "cvar_historical": -3.5,  # aman
         }
         # Patch check_trading_hours dan check_correlation_cooldown agar tidak blokir
-        with unittest.mock.patch.object(engine, 'check_trading_hours', return_value=(True, "ok")), \
+        with patch.object(Config, 'AUTO_TRADE_DRY_RUN', False), \
+             unittest.mock.patch.object(engine, 'check_trading_hours', return_value=(True, "ok")), \
              unittest.mock.patch.object(engine, 'check_correlation_cooldown', return_value=(True, "ok")):
             allowed, reason = engine.should_execute_trade(user_id=1, signal=signal, current_price=1_500_000)
         # VaR tidak memblokir — mungkin ada gate lain yang blokir, tapi bukan VaR
@@ -508,8 +510,8 @@ class TestVaRThresholdRealistic(unittest.TestCase):
         VaR 95% untuk data normal biasanya sekitar -1.5% s/d -2.5%.
         Threshold baru -3.0% tidak boleh memblokir kondisi normal.
         """
-        from unittest.mock import MagicMock
-        from autotrade.trading_engine import TradingEngine
+        from unittest.mock import MagicMock, patch
+        from autotrade.trading_engine import Config, TradingEngine
 
         mock_db = MagicMock()
         mock_db.get_balance.return_value = 10_000_000
@@ -524,7 +526,8 @@ class TestVaRThresholdRealistic(unittest.TestCase):
             "var_historical": -2.0,
             "cvar_historical": -3.0,
         }
-        with unittest.mock.patch.object(engine, 'check_trading_hours', return_value=(True, "ok")), \
+        with patch.object(Config, 'AUTO_TRADE_DRY_RUN', False), \
+             unittest.mock.patch.object(engine, 'check_trading_hours', return_value=(True, "ok")), \
              unittest.mock.patch.object(engine, 'check_correlation_cooldown', return_value=(True, "ok")):
             allowed, reason = engine.should_execute_trade(user_id=1, signal=signal, current_price=1_500_000)
         if not allowed:
@@ -532,8 +535,8 @@ class TestVaRThresholdRealistic(unittest.TestCase):
 
     def test_extreme_candle_var_triggers_gate(self):
         """VaR -4.0% (crash/pump ekstrem) harus memicu gate."""
-        from unittest.mock import MagicMock
-        from autotrade.trading_engine import TradingEngine
+        from unittest.mock import MagicMock, patch
+        from autotrade.trading_engine import Config, TradingEngine
 
         mock_db = MagicMock()
         mock_db.get_balance.return_value = 10_000_000
@@ -547,7 +550,8 @@ class TestVaRThresholdRealistic(unittest.TestCase):
             "var_historical": -4.0,
             "cvar_historical": -6.0,
         }
-        with unittest.mock.patch.object(engine, 'check_trading_hours', return_value=(True, "ok")), \
+        with patch.object(Config, 'AUTO_TRADE_DRY_RUN', False), \
+             unittest.mock.patch.object(engine, 'check_trading_hours', return_value=(True, "ok")), \
              unittest.mock.patch.object(engine, 'check_correlation_cooldown', return_value=(True, "ok")):
             allowed, reason = engine.should_execute_trade(user_id=1, signal=signal, current_price=1_500_000)
         self.assertFalse(allowed)

@@ -47,7 +47,13 @@
 - source_spec: `spec-fix-legacy-regression-gate.md`
   summary: Perbaiki fixture trade-review idempotency agar membuat parent user sebelum trade ber-foreign-key.
   evidence: `TestTradeReviewIdempotency.test_create_trade_review_skips_when_exists` gagal saat setup `trades.user_id=256024600`, sebelum kontrak idempotency dijalankan; bukan akibat perubahan admin-ID atau quant cache.
+  resolved_by: `spec-fix-legacy-regression-gate-2.md` — fixture sekarang membuat parent user dan full file lulus 15/15.
 
 - source_spec: `spec-fix-legacy-regression-gate.md`
   summary: Pulihkan enforcement VaR/CVaR pada `TradingEngine.should_execute_trade` untuk BUY berisiko ekstrem.
   evidence: Dua test quant mengharapkan VaR -4% dan CVaR -6% ditolak, tetapi engine mengizinkan trade; perlu perubahan di luar dua blocker yang disetujui dan tidak ada test yang dikecualikan.
+  resolved_by: `spec-fix-legacy-regression-gate-2.md` — test production-threshold sekarang eksplisit dan full file lulus 42/42.
+
+- source_spec: `spec-fix-legacy-regression-gate-2.md`
+  summary: Diagnosis dan pulihkan penyelesaian test dashboard safety status yang menggantung.
+  evidence: Full regression melewati seluruh tiga failure target, lalu konsisten berhenti di `tests/test_dashboard_api_phase1.py::test_safety_status_reports_dry_run_locked`; test terisolasi juga timeout setelah 60 detik dan tidak berubah dari baseline `1d57a82`.

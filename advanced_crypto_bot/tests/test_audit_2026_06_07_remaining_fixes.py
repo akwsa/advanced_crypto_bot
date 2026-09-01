@@ -159,6 +159,10 @@ class TestTradeReviewIdempotency:
         db = self._make_db(tmp_path)
         with db.get_connection() as conn:
             cursor = conn.cursor()
+            cursor.execute(
+                "INSERT INTO users (user_id, username) VALUES (?, ?)",
+                (256024600, "test_admin"),
+            )
             # Insert a fake trade row
             cursor.execute(
                 """INSERT INTO trades (id, user_id, pair, type, price, amount, total,
