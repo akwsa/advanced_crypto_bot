@@ -78,7 +78,9 @@ class TestPerformanceBackfill(unittest.TestCase):
         self.assertAlmostEqual(perf[0]["win_rate"], 0.0)
 
     def test_backfill_rebuilds_profit_feedback_from_fifo_matched_sell_rows(self):
-        self.db.add_trade(
+        buy_timestamp = "2026-04-25 10:00:00"
+        sell_timestamp = "2026-04-26 10:00:00"
+        self.db.add_indodax_trade(
             user_id=1,
             pair="btcidr",
             trade_type="BUY",
@@ -86,8 +88,9 @@ class TestPerformanceBackfill(unittest.TestCase):
             amount=2.0,
             total=200_000.0,
             fee=0.0,
-            signal_source="INDODAX",
-            ml_confidence=0.75,
+            indodax_order_id="BUY-1",
+            timestamp=buy_timestamp,
+            notes=None,
         )
         sell_id = self.db.add_indodax_trade(
             user_id=1,
@@ -98,13 +101,14 @@ class TestPerformanceBackfill(unittest.TestCase):
             total=180_000.0,
             fee=0.0,
             indodax_order_id="SELL-1",
-            timestamp="2026-04-26 10:00:00",
+            timestamp=sell_timestamp,
             notes=None,
         )
 
         result = run_backfill(self.db_path)
 
         self.assertEqual(result["legacy_sell_rows_rebuilt"], 1)
+        self.assertEqual(result["daily_rows_rebuilt"], 1)
         self.assertEqual(result["skipped_invalid"], 0)
 
         trade = self.db.get_trade(sell_id)
@@ -113,10 +117,23 @@ class TestPerformanceBackfill(unittest.TestCase):
         self.assertAlmostEqual(trade["profit_loss_pct"], 20.0)
         self.assertIsNotNone(trade["closed_at"])
 
-        perf = self.db.get_performance(1, days=30)
+        with self.db.get_connection() as conn:
+            perf = conn.execute(
+                """
+                SELECT date, total_trades, winning_trades, losing_trades,
+                       total_profit_loss, win_rate
+                FROM performance
+                WHERE user_id = ? AND date = ?
+                """,
+                (1, sell_timestamp[:10]),
+            ).fetchall()
         self.assertEqual(len(perf), 1)
+        self.assertEqual(perf[0]["date"], sell_timestamp[:10])
         self.assertEqual(perf[0]["total_trades"], 1)
         self.assertEqual(perf[0]["winning_trades"], 1)
+        self.assertEqual(perf[0]["losing_trades"], 0)
+        self.assertAlmostEqual(perf[0]["total_profit_loss"], 30_000.0)
+        self.assertAlmostEqual(perf[0]["win_rate"], 100.0)
 
         pair_perf = self.db.get_pair_performance("btcidr")
         self.assertIsNotNone(pair_perf)
