@@ -118,6 +118,8 @@ def test_planned_loss_cannot_understate_exact_mark_to_stop_loss() -> None:
         request(planned_loss=2_499)
     with pytest.raises(DecisionError, match="RISK_POLICY_LIMIT_CAN_ONLY_TIGHTEN"):
         replace(policy(), max_position_bps=1_001)
+    with pytest.raises(DecisionError, match="MARK_AGE_LIMIT_CAN_ONLY_TIGHTEN"):
+        replace(policy(), max_mark_age_microseconds=5_000_001)
 
 
 def test_position_and_exposure_caps_use_exact_mixed_scale_and_only_reduce() -> None:
@@ -144,6 +146,33 @@ def test_position_and_exposure_caps_use_exact_mixed_scale_and_only_reduce() -> N
     assert exposure_limited.final_quantity == amount(1_000, 4)
     assert RiskCheckReason.EXPOSURE_QUANTITY_REDUCED in exposure_limited.reasons
 
+    fractional_position_limit = RiskGovernor.evaluate_entry(
+        policy=policy(),
+        equity=CanonicalEquitySnapshot(
+            equity=amount(101, 2),
+            daily_start_equity=amount(101, 2),
+            peak_equity=amount(101, 2),
+            observed_at_utc=NOW,
+            journal_high_water=20,
+            evidence_ref=ref("EquityEvidence", "fractional-position-limit"),
+        ),
+        state=state(exposure=0),
+        request=replace(
+            request(),
+            requested_quantity=amount(200, 3),
+            minimum_quantity=amount(1, 3),
+            mark_price=amount(100, 2),
+            stop_price=amount(99, 2),
+            available_depth_quantity=amount(200, 3),
+            exit_capacity_quantity=amount(200, 3),
+            requested_planned_loss=amount(2, 3),
+        ),
+    )
+    assert fractional_position_limit.final_quantity == amount(101, 3)
+    assert RiskCheckReason.POSITION_QUANTITY_REDUCED in (
+        fractional_position_limit.reasons
+    )
+
 
 def test_daily_loss_and_hard_drawdown_are_derived_not_caller_attested() -> None:
     daily = RiskGovernor.evaluate_entry(
@@ -158,6 +187,35 @@ def test_daily_loss_and_hard_drawdown_are_derived_not_caller_attested() -> None:
         policy=policy(), equity=equity(current=900_000), state=state(), request=request(),
     )
     assert exact_trigger.reasons == (RiskCheckReason.HARD_DRAWDOWN_LIMIT,)
+
+
+def test_fractional_risk_thresholds_are_compared_without_truncation() -> None:
+    tiny_equity = CanonicalEquitySnapshot(
+        equity=amount(1),
+        daily_start_equity=amount(1),
+        peak_equity=amount(1),
+        observed_at_utc=NOW,
+        journal_high_water=20,
+        evidence_ref=ref("EquityEvidence", "tiny"),
+    )
+    tiny_result = RiskGovernor.evaluate_entry(
+        policy=policy(), equity=tiny_equity, state=state(exposure=0), request=request(),
+    )
+    assert tiny_result.reasons != (RiskCheckReason.HARD_DRAWDOWN_LIMIT,)
+
+    fractional_equity = CanonicalEquitySnapshot(
+        equity=amount(9_899, 4),
+        daily_start_equity=amount(101, 2),
+        peak_equity=amount(101, 2),
+        observed_at_utc=NOW,
+        journal_high_water=20,
+        evidence_ref=ref("EquityEvidence", "fractional-threshold"),
+    )
+    fractional_result = RiskGovernor.evaluate_entry(
+        policy=policy(), equity=fractional_equity,
+        state=state(exposure=0), request=request(),
+    )
+    assert fractional_result.reasons != (RiskCheckReason.DAILY_LOSS_LIMIT,)
 
 
 def test_stale_equity_is_rejected_even_when_mark_is_current() -> None:
@@ -214,6 +272,8 @@ def test_adjustments_have_fixed_order_and_can_only_reduce_quantity() -> None:
     assert reduced.final_quantity.units >= 0
     with pytest.raises(DecisionError, match="INVALID_ADJUSTMENT_BPS"):
         QuantityAdjustment(AdjustmentKind.LIQUIDITY, 10_001, ref("Adjustment", "bad"))
+    with pytest.raises(DecisionError, match="INVALID_ADJUSTMENT_SET"):
+        replace(request(), adjustments=(object(),))
 
 
 def test_risk_reducing_exit_is_turnover_exempt_and_position_bounded() -> None:
@@ -224,3 +284,41 @@ def test_risk_reducing_exit_is_turnover_exempt_and_position_bounded() -> None:
     assert result.allowed
     assert result.final_quantity == amount(10_000, 4)
     assert result.reasons == (RiskCheckReason.EXIT_POSITION_CLAMP,)
+
+    mixed_scale = RiskGovernor.evaluate_risk_reducing_exit(
+        policy=policy(), requested_quantity=amount(1, 0),
+        position_quantity=amount(1, 1),
+    )
+    assert mixed_scale.allowed
+    assert mixed_scale.final_quantity == amount(1, 1)
+    assert mixed_scale.reasons == (RiskCheckReason.EXIT_POSITION_CLAMP,)
+
+
+def test_canonical_risk_context_rejects_inconsistent_values_and_foreign_refs() -> None:
+    with pytest.raises(DecisionError, match="PEAK_EQUITY_BELOW_CURRENT"):
+        equity(current=1_000_001, peak=1_000_000)
+    with pytest.raises(DecisionError, match="POSITION_EXCEEDS_PORTFOLIO_EXPOSURE"):
+        state(position=100_001, exposure=100_000)
+
+    foreign = ContentRef.v2("foreign", "Anything", {"value": "foreign"})
+    with pytest.raises(DecisionError, match="INVALID_EQUITY_EVIDENCE"):
+        replace(equity(), evidence_ref=foreign)
+    with pytest.raises(DecisionError, match="INVALID_RISK_STATE_REFERENCE"):
+        replace(state(), state_ref=foreign)
+    with pytest.raises(DecisionError, match="INVALID_MARKET_EVIDENCE"):
+        replace(request(), market_evidence_ref=foreign)
+    with pytest.raises(DecisionError, match="INVALID_ADJUSTMENT_EVIDENCE"):
+        replace(adjustments()[0], evidence_ref=foreign)
+
+
+def test_result_reasons_must_be_a_deterministic_reduction_sequence() -> None:
+    result = evaluate()
+    with pytest.raises(DecisionError, match="INVALID_RISK_REASONS"):
+        replace(
+            result,
+            final_quantity=amount(4_000, 4),
+            reasons=(
+                RiskCheckReason.POSITION_QUANTITY_REDUCED,
+                RiskCheckReason.POSITION_QUANTITY_REDUCED,
+            ),
+        )

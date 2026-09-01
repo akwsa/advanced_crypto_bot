@@ -12,6 +12,7 @@ from .numeric import ScaledInteger
 
 
 MAX_RISK_SCALE = 18
+MAX_MARK_AGE_MICROSECONDS = 5_000_000
 
 
 def _text(value: object, code: str) -> None:
@@ -25,6 +26,14 @@ def _amount(value: object, code: str, *, positive: bool = False) -> ScaledIntege
     if value.scale > MAX_RISK_SCALE:
         raise DecisionError("RISK_SCALE_EXCEEDED")
     if value.units < 0 or (positive and value.units == 0):
+        raise DecisionError(code)
+    return value
+
+
+def _content_ref(value: object, kind: str, code: str) -> ContentRef:
+    if (type(value) is not ContentRef
+            or value.domain != "autotrade-next"
+            or value.kind != kind):
         raise DecisionError(code)
     return value
 
@@ -58,7 +67,17 @@ def _positive_difference(left: ScaledInteger, right: ScaledInteger) -> ScaledInt
 
 
 def _bps(value: ScaledInteger, basis_points: int) -> ScaledInteger:
-    return ScaledInteger((value.units * basis_points) // 10_000, value.scale)
+    exact = ScaledInteger(value.units * basis_points, value.scale + 4)
+    return _rescale_floor(exact, min(exact.scale, MAX_RISK_SCALE))
+
+
+def _compare_ratio(value: ScaledInteger, reference: ScaledInteger,
+                   basis_points: int) -> int:
+    """Compare value/reference with basis points without truncating either side."""
+    _, value_units, reference_units = _aligned(value, reference)
+    left = value_units * 10_000
+    right = reference_units * basis_points
+    return (left > right) - (left < right)
 
 
 def _rescale_floor(value: ScaledInteger, target_scale: int) -> ScaledInteger:
@@ -156,10 +175,15 @@ class RiskPolicy:
         if (type(self.max_mark_age_microseconds) is not int
                 or self.max_mark_age_microseconds <= 0):
             raise DecisionError("INVALID_MARK_AGE_LIMIT")
+        if self.max_mark_age_microseconds > MAX_MARK_AGE_MICROSECONDS:
+            raise DecisionError("MARK_AGE_LIMIT_CAN_ONLY_TIGHTEN")
 
     @classmethod
     def canonical(cls, version: str) -> RiskPolicy:
-        return cls(version, 1_000, 4_000, 200, 50, 1_000, 4_000, 5_000_000)
+        return cls(
+            version, 1_000, 4_000, 200, 50, 1_000, 4_000,
+            MAX_MARK_AGE_MICROSECONDS,
+        )
 
     def to_canonical_value(self) -> dict[str, object]:
         return {
@@ -194,8 +218,9 @@ class CanonicalEquitySnapshot:
         _utc(self.observed_at_utc, "INVALID_EQUITY_TIMESTAMP")
         if type(self.journal_high_water) is not int or self.journal_high_water < 0:
             raise DecisionError("INVALID_EQUITY_HIGH_WATER")
-        if type(self.evidence_ref) is not ContentRef:
-            raise DecisionError("INVALID_EQUITY_EVIDENCE")
+        _content_ref(self.evidence_ref, "EquityEvidence", "INVALID_EQUITY_EVIDENCE")
+        if _compare(self.peak_equity, self.equity) < 0:
+            raise DecisionError("PEAK_EQUITY_BELOW_CURRENT")
 
     def to_canonical_value(self) -> dict[str, object]:
         return {
@@ -225,8 +250,10 @@ class RiskPortfolioState:
             _amount(value, "INVALID_RISK_PORTFOLIO_STATE")
         if type(self.journal_high_water) is not int or self.journal_high_water < 0:
             raise DecisionError("INVALID_RISK_HIGH_WATER")
-        if type(self.state_ref) is not ContentRef:
-            raise DecisionError("INVALID_RISK_STATE_REFERENCE")
+        _content_ref(self.state_ref, "RiskState", "INVALID_RISK_STATE_REFERENCE")
+        if _compare(self.current_position_notional,
+                    self.current_portfolio_exposure) > 0:
+            raise DecisionError("POSITION_EXCEEDS_PORTFOLIO_EXPOSURE")
 
     def to_canonical_value(self) -> dict[str, object]:
         return {
@@ -251,8 +278,9 @@ class QuantityAdjustment:
         if (type(self.basis_points) is not int
                 or not 0 <= self.basis_points <= 10_000):
             raise DecisionError("INVALID_ADJUSTMENT_BPS")
-        if type(self.evidence_ref) is not ContentRef:
-            raise DecisionError("INVALID_ADJUSTMENT_EVIDENCE")
+        _content_ref(
+            self.evidence_ref, "RiskAdjustment", "INVALID_ADJUSTMENT_EVIDENCE",
+        )
 
     def to_canonical_value(self) -> dict[str, object]:
         return {"kind": self.kind.value, "basis_points": self.basis_points,
@@ -303,11 +331,12 @@ class EntryRiskRequest:
                 or self.expected_journal_high_water < 0):
             raise DecisionError("INVALID_EXPECTED_HIGH_WATER")
         if (type(self.adjustments) is not tuple
-                or tuple(item.kind for item in self.adjustments) != tuple(AdjustmentKind)
-                or any(type(item) is not QuantityAdjustment for item in self.adjustments)):
+                or any(type(item) is not QuantityAdjustment for item in self.adjustments)
+                or tuple(item.kind for item in self.adjustments) != tuple(AdjustmentKind)):
             raise DecisionError("INVALID_ADJUSTMENT_SET")
-        if type(self.market_evidence_ref) is not ContentRef:
-            raise DecisionError("INVALID_MARKET_EVIDENCE")
+        _content_ref(
+            self.market_evidence_ref, "MarketEvidence", "INVALID_MARKET_EVIDENCE",
+        )
         if _compare(self.minimum_quantity, self.requested_quantity) > 0:
             raise DecisionError("MINIMUM_EXCEEDS_REQUESTED_QUANTITY")
 
@@ -378,13 +407,35 @@ class RiskEvaluationResult:
             RiskCheckReason.QUANTITY_BELOW_MINIMUM,
             RiskCheckReason.NO_POSITION,
         }
+        entry_reductions = (
+            RiskCheckReason.POSITION_QUANTITY_REDUCED,
+            RiskCheckReason.EXPOSURE_QUANTITY_REDUCED,
+            RiskCheckReason.PLANNED_LOSS_QUANTITY_REDUCED,
+            RiskCheckReason.TURNOVER_QUANTITY_REDUCED,
+            RiskCheckReason.DEPTH_QUANTITY_REDUCED,
+            RiskCheckReason.EXIT_CAPACITY_QUANTITY_REDUCED,
+            RiskCheckReason.ADJUSTMENT_QUANTITY_REDUCED,
+        )
         if self.allowed:
             if any(reason in rejection_reasons for reason in self.reasons):
                 raise DecisionError("ALLOWED_RISK_RESULT_HAS_REJECTION")
             if RiskCheckReason.APPROVED in self.reasons:
                 if (self.reasons != (RiskCheckReason.APPROVED,)
-                        or self.final_quantity != self.requested_quantity):
+                        or _compare(self.final_quantity,
+                                    self.requested_quantity) != 0):
                     raise DecisionError("INVALID_APPROVED_RISK_RESULT")
+            elif self.context_ref.kind == "EntryRiskContext":
+                expected_reasons = tuple(
+                    reason for reason in entry_reductions if reason in self.reasons
+                )
+                if (self.reasons != expected_reasons
+                        or _compare(self.final_quantity,
+                                    self.requested_quantity) >= 0):
+                    raise DecisionError("INVALID_RISK_REASONS")
+            elif (self.reasons != (RiskCheckReason.EXIT_POSITION_CLAMP,)
+                  or _compare(self.final_quantity,
+                              self.requested_quantity) >= 0):
+                raise DecisionError("INVALID_RISK_REASONS")
         elif (len(self.reasons) != 1 or self.reasons[0] not in rejection_reasons):
             raise DecisionError("DENIED_RISK_RESULT_MISSING_REJECTION")
         expected = ContentRef.v2(
@@ -480,20 +531,29 @@ class RiskGovernor:
             return rejected(RiskCheckReason.INSUFFICIENT_EXIT_CAPACITY)
 
         drawdown = _positive_difference(equity.peak_equity, equity.equity)
-        if _compare(drawdown, _bps(equity.peak_equity,
-                                   policy.hard_drawdown_bps)) >= 0:
+        if _compare_ratio(drawdown, equity.peak_equity,
+                          policy.hard_drawdown_bps) >= 0:
             return rejected(RiskCheckReason.HARD_DRAWDOWN_LIMIT)
         daily_loss = _positive_difference(equity.daily_start_equity, equity.equity)
-        if _compare(daily_loss, _bps(equity.daily_start_equity,
-                                     policy.max_daily_loss_bps)) > 0:
+        if _compare_ratio(daily_loss, equity.daily_start_equity,
+                          policy.max_daily_loss_bps) > 0:
             return rejected(RiskCheckReason.DAILY_LOSS_LIMIT)
 
-        quantity = request.requested_quantity
+        quantity_scale = max(
+            request.requested_quantity.scale,
+            request.minimum_quantity.scale,
+            request.available_depth_quantity.scale,
+            request.exit_capacity_quantity.scale,
+        )
+        requested_quantity = _rescale_floor(
+            request.requested_quantity, quantity_scale,
+        )
+        quantity = requested_quantity
         reductions: list[RiskCheckReason] = []
 
         def apply_cap(cap: ScaledInteger, reason: RiskCheckReason) -> None:
             nonlocal quantity
-            capped = _min_quantity(quantity, cap, request.requested_quantity.scale)
+            capped = _min_quantity(quantity, cap, quantity_scale)
             if _compare(capped, quantity) < 0:
                 if reason not in reductions:
                     reductions.append(reason)
@@ -523,9 +583,9 @@ class RiskGovernor:
             _, remaining_units, requested_loss_units = _aligned(
                 planned_capacity, request.requested_planned_loss)
             planned_cap = ScaledInteger(
-                (request.requested_quantity.units * remaining_units)
+                (requested_quantity.units * remaining_units)
                 // requested_loss_units,
-                request.requested_quantity.scale,
+                quantity_scale,
             )
             apply_cap(planned_cap, RiskCheckReason.PLANNED_LOSS_QUANTITY_REDUCED)
 
@@ -554,7 +614,8 @@ class RiskGovernor:
         if _compare(quantity, request.minimum_quantity) < 0:
             return rejected(RiskCheckReason.QUANTITY_BELOW_MINIMUM)
         reasons = tuple(reductions) if reductions else (RiskCheckReason.APPROVED,)
-        return _result(requested=request.requested_quantity, final=quantity,
+        final_quantity = quantity if reductions else request.requested_quantity
+        return _result(requested=request.requested_quantity, final=final_quantity,
                        reasons=reasons, policy_ref=policy_ref,
                        context_ref=context_ref)
 
@@ -582,9 +643,12 @@ class RiskGovernor:
                 reasons=(RiskCheckReason.NO_POSITION,), policy_ref=policy_ref,
                 context_ref=context_ref,
             )
-        final = _min_quantity(requested_quantity, position_quantity,
-                              requested_quantity.scale)
-        reason = (RiskCheckReason.APPROVED if final == requested_quantity
+        final = _min_quantity(
+            requested_quantity, position_quantity,
+            max(requested_quantity.scale, position_quantity.scale),
+        )
+        reason = (RiskCheckReason.APPROVED
+                  if _compare(final, requested_quantity) == 0
                   else RiskCheckReason.EXIT_POSITION_CLAMP)
         return _result(requested=requested_quantity, final=final,
                        reasons=(reason,), policy_ref=policy_ref,
@@ -595,6 +659,7 @@ __all__ = (
     "AdjustmentKind",
     "CanonicalEquitySnapshot",
     "EntryRiskRequest",
+    "MAX_MARK_AGE_MICROSECONDS",
     "MAX_RISK_SCALE",
     "QuantityAdjustment",
     "RiskCheckReason",
