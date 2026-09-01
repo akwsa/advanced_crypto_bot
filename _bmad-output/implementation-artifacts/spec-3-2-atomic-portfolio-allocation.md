@@ -14,7 +14,7 @@ Mengganti reservation notional-only yang scale-unsafe dengan frozen portfolio co
 
 ## Scope
 
-- Pure-domain `portfolio_allocation.py`, public exports, contracts, dan architecture allowlist.
+- Pure-domain `portfolio_allocation.py`, application/port boundary, fenced SQLite persistence, public exports, contracts, dan architecture allowlist.
 - Common-scale exact arithmetic lokal; tidak mengedit atau bergantung pada dirty `numeric.py`/`accounting.py`.
 - Multiple/partial Fill, UNKNOWN, terminal cancel/reject/expiry/fill, rounding residual, dan duplicate Fill identity.
 - All-or-none rejection untuk stale constituent, duplicate ownership/decision, atau equity cap.
@@ -22,7 +22,6 @@ Mengganti reservation notional-only yang scale-unsafe dengan frozen portfolio co
 
 ## Out of Scope
 
-- Runtime handler dan persistence wiring ke `SQLiteFencedJournal`.
 - Production schema migration, VM, atau perubahan file user/Gemini.
 
 ## Invariants
@@ -37,7 +36,7 @@ Mengganti reservation notional-only yang scale-unsafe dengan frozen portfolio co
 
 ## Completion Policy
 
-Kernel dapat memperkuat Story 3.2 tetapi verdict tetap PARTIAL sampai event/outbox, reservations, RiskState, dan decisions dipersist atomically melalui fenced expected-sequence CAS.
+Story selesai ketika event/outbox, reservations, RiskState, dan Decisions dipersist atomically melalui fenced expected-sequence CAS serta crash/retry/stale-fence contracts lulus. Policy ini terpenuhi pada senior review 2026-09-01.
 
 ## Execution Record
 
@@ -45,4 +44,5 @@ Kernel dapat memperkuat Story 3.2 tetapi verdict tetap PARTIAL sampai event/outb
 - GREEN awal: 7/7 focused PASS; fixture mixed-scale yang semula salah dikoreksi sebelum dijadikan evidence.
 - Review fixes: terminal remainder anti-forgery, content-ref regeneration, duplicate observed checkpoint rejection, observed cut binding, dan constructor-level stale/equity enforcement.
 - Final: focused 8/8; allocation+identity 31/31; all contracts 404/404; Strategy2/dry-run 61/61; compile/diff gates PASS.
-- Disposition: implementation scope selesai; Story tetap `review/PARTIAL` menurut Completion Policy.
+- Disposition 2026-08-30: pure-domain scope selesai tetapi Story masih `review/PARTIAL`; status historis ini diselesaikan oleh senior review berikutnya.
+- Senior review 2026-09-01: typed application/port boundary dan atomic SQLite allocation persistence ditambahkan; 67 focused, 475 contracts, dan 63 regression tests PASS. Disposition final: `done`.

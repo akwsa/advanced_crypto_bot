@@ -4,10 +4,6 @@
   summary: Resolve authenticated RiskPolicy/equity/market/adjustment evidence dan atomically persist RiskState, reservation, decision, event, serta outbox through fenced expected-sequence CAS.
   evidence: Pure RiskGovernor menegakkan seluruh canonical ceilings dan quantity monotonicity, tetapi ContentRef existence/authority dan runtime state mutation belum diverifikasi; Story 3.3 maksimal PARTIAL.
 
-- source_spec: `spec-3-2-atomic-portfolio-allocation.md`
-  summary: Commit accepted PortfolioAllocation decisions, five-dimensional reservations, next RiskState, canonical event, dan PENDING outbox melalui satu `SQLiteFencedJournal` expected-sequence CAS.
-  evidence: Pure kernel membuktikan consistency cut, conservation, uniqueness, stale rejection, dan content binding, tetapi belum menjadi runtime persistence boundary sehingga Story 3.2 tetap PARTIAL.
-
 - source_spec: `spec-3-1-durable-fenced-journal.md`
   summary: Wire `SQLiteFencedJournal.append` sebagai satu-satunya commit boundary untuk settlement, protective EXIT, recovery correction, safety/risk policy, inbox, outbox, dan projection high-water.
   evidence: Persistent adapter dan crash/fence contracts lulus, tetapi handler saat ini masih memakai port/reference memory UoW sehingga Story 3.1 belum membuktikan bahwa setiap canonical mutation melewati fence.

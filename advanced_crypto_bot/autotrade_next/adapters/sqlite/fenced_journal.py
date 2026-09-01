@@ -16,6 +16,12 @@ import math
 from pathlib import Path
 import sqlite3
 
+from autotrade_next.ports.portfolio_allocation import (
+    AllocationCommitBundle,
+    AllocationCommitResult,
+    AllocationCommitStatus,
+)
+
 
 _UNIX_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 
@@ -254,6 +260,57 @@ class SQLiteFencedJournal:
                     outbox_ref TEXT NOT NULL,
                     status TEXT NOT NULL CHECK (status = 'PENDING')
                 );
+
+                CREATE TABLE IF NOT EXISTS portfolio_allocation_batches (
+                    command_id TEXT PRIMARY KEY,
+                    scope_id TEXT NOT NULL,
+                    aggregate_id TEXT NOT NULL,
+                    sequence INTEGER NOT NULL CHECK (sequence >= 1),
+                    batch_ref TEXT NOT NULL UNIQUE,
+                    batch_payload BLOB NOT NULL,
+                    event_payload BLOB NOT NULL,
+                    outbox_payload BLOB NOT NULL,
+                    FOREIGN KEY (command_id) REFERENCES command_journal(command_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS portfolio_allocation_decisions (
+                    batch_ref TEXT NOT NULL,
+                    ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+                    decision_ref TEXT NOT NULL,
+                    payload BLOB NOT NULL,
+                    PRIMARY KEY (batch_ref, ordinal),
+                    UNIQUE (batch_ref, decision_ref),
+                    FOREIGN KEY (batch_ref)
+                        REFERENCES portfolio_allocation_batches(batch_ref)
+                );
+
+                CREATE TABLE IF NOT EXISTS portfolio_risk_reservations (
+                    batch_ref TEXT NOT NULL,
+                    reservation_id TEXT NOT NULL,
+                    pair_id TEXT NOT NULL,
+                    horizon TEXT NOT NULL,
+                    payload BLOB NOT NULL,
+                    PRIMARY KEY (batch_ref, reservation_id),
+                    FOREIGN KEY (batch_ref)
+                        REFERENCES portfolio_allocation_batches(batch_ref)
+                );
+
+                CREATE TABLE IF NOT EXISTS portfolio_pair_ownership (
+                    batch_ref TEXT NOT NULL,
+                    pair_id TEXT NOT NULL,
+                    horizon TEXT NOT NULL,
+                    PRIMARY KEY (batch_ref, pair_id),
+                    FOREIGN KEY (batch_ref)
+                        REFERENCES portfolio_allocation_batches(batch_ref)
+                );
+
+                CREATE TABLE IF NOT EXISTS portfolio_risk_states (
+                    batch_ref TEXT PRIMARY KEY,
+                    risk_state_ref TEXT NOT NULL,
+                    payload BLOB NOT NULL,
+                    FOREIGN KEY (batch_ref)
+                        REFERENCES portfolio_allocation_batches(batch_ref)
+                );
                 """
             )
 
@@ -476,6 +533,42 @@ class SQLiteFencedJournal:
     def append(self, request: AppendCommand) -> AppendResult:
         if type(request) is not AppendCommand:
             raise TypeError("INVALID_APPEND_COMMAND")
+        return self._append(request)
+
+    def append_allocation(
+        self, bundle: AllocationCommitBundle,
+    ) -> AllocationCommitResult:
+        if type(bundle) is not AllocationCommitBundle:
+            raise TypeError("INVALID_ALLOCATION_COMMIT_BUNDLE")
+        allocation = bundle.allocation
+        if allocation.event_ref is None or allocation.outbox_ref is None:
+            raise TypeError("INCOMPLETE_EXECUTABLE_ALLOCATION")
+        result = self._append(
+            AppendCommand(
+                command_id=bundle.command_id,
+                scope_id=bundle.authority_scope_id,
+                epoch=bundle.writer_epoch,
+                lease_token=bundle.lease_token,
+                aggregate_id=bundle.aggregate_id,
+                expected_sequence=bundle.expected_sequence,
+                event_ref=allocation.event_ref.key,
+                outbox_ref=allocation.outbox_ref.key,
+            ),
+            allocation_bundle=bundle,
+        )
+        status = (
+            AllocationCommitStatus.COMMITTED
+            if result.status is AppendStatus.APPENDED
+            else AllocationCommitStatus(result.status.value)
+        )
+        return AllocationCommitResult(status, result.command_id, result.sequence)
+
+    def _append(
+        self,
+        request: AppendCommand,
+        *,
+        allocation_bundle: AllocationCommitBundle | None = None,
+    ) -> AppendResult:
         try:
             connection = self._connect()
         except sqlite3.DatabaseError as error:
@@ -491,8 +584,16 @@ class SQLiteFencedJournal:
                 (request.command_id,),
             ).fetchone()
             if prior is not None:
-                status = (AppendStatus.IDEMPOTENT if self._command_matches(prior, request)
-                          else AppendStatus.IDENTITY_CONFLICT)
+                has_allocation = connection.execute(
+                    "SELECT 1 FROM portfolio_allocation_batches WHERE command_id = ?",
+                    (request.command_id,),
+                ).fetchone() is not None
+                same_operation = has_allocation == (allocation_bundle is not None)
+                status = (
+                    AppendStatus.IDEMPOTENT
+                    if same_operation and self._command_matches(prior, request)
+                    else AppendStatus.IDENTITY_CONFLICT
+                )
                 self._rollback(connection)
                 return AppendResult(status, request.command_id,
                                     prior["resulting_sequence"])
@@ -576,6 +677,10 @@ class SQLiteFencedJournal:
                 (request.command_id, request.scope_id, request.aggregate_id,
                  resulting_sequence, request.outbox_ref),
             )
+            if allocation_bundle is not None:
+                self._insert_allocation_effects(
+                    connection, allocation_bundle, resulting_sequence,
+                )
             self._before_commit("append", request.command_id)
             committed_maybe = True
             self._commit(connection)
@@ -583,7 +688,9 @@ class SQLiteFencedJournal:
                                 resulting_sequence)
         except IndeterminateCommit:
             self._rollback(connection)
-            return self._reconcile_append(request)
+            return self._reconcile_append(
+                request, expects_allocation=allocation_bundle is not None,
+            )
         except _ClockAnomaly:
             self._rollback(connection)
             return AppendResult(AppendStatus.CLOCK_ANOMALY, request.command_id)
@@ -592,12 +699,16 @@ class SQLiteFencedJournal:
             if self._is_busy(error):
                 return AppendResult(AppendStatus.BUSY, request.command_id)
             if committed_maybe:
-                return self._reconcile_append(request)
+                return self._reconcile_append(
+                    request, expects_allocation=allocation_bundle is not None,
+                )
             return AppendResult(AppendStatus.STORAGE_FAILURE, request.command_id)
         except sqlite3.DatabaseError:
             self._rollback(connection)
             if committed_maybe:
-                return self._reconcile_append(request)
+                return self._reconcile_append(
+                    request, expects_allocation=allocation_bundle is not None,
+                )
             return AppendResult(AppendStatus.STORAGE_FAILURE, request.command_id)
         except Exception:
             self._rollback(connection)
@@ -605,18 +716,73 @@ class SQLiteFencedJournal:
         finally:
             connection.close()
 
-    def _reconcile_append(self, request: AppendCommand) -> AppendResult:
+    @staticmethod
+    def _insert_allocation_effects(
+        connection: sqlite3.Connection,
+        bundle: AllocationCommitBundle,
+        resulting_sequence: int,
+    ) -> None:
+        allocation = bundle.allocation
+        batch_ref = allocation.batch_ref.key
+        connection.execute(
+            "INSERT INTO portfolio_allocation_batches "
+            "(command_id, scope_id, aggregate_id, sequence, batch_ref, "
+            "batch_payload, event_payload, outbox_payload) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                bundle.command_id, bundle.authority_scope_id, bundle.aggregate_id,
+                resulting_sequence, batch_ref, bundle.batch_payload,
+                bundle.event_payload, bundle.outbox_payload,
+            ),
+        )
+        for ordinal, record in enumerate(bundle.decisions):
+            connection.execute(
+                "INSERT INTO portfolio_allocation_decisions "
+                "(batch_ref, ordinal, decision_ref, payload) VALUES (?, ?, ?, ?)",
+                (batch_ref, ordinal, record.reference.key, record.payload),
+            )
+        for reservation_id, pair_id, horizon, payload in bundle.reservation_rows:
+            connection.execute(
+                "INSERT INTO portfolio_risk_reservations "
+                "(batch_ref, reservation_id, pair_id, horizon, payload) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (batch_ref, reservation_id, pair_id, horizon, payload),
+            )
+        for pair_id, horizon in allocation.pair_horizon_ownership:
+            connection.execute(
+                "INSERT INTO portfolio_pair_ownership "
+                "(batch_ref, pair_id, horizon) VALUES (?, ?, ?)",
+                (batch_ref, pair_id, horizon),
+            )
+        connection.execute(
+            "INSERT INTO portfolio_risk_states "
+            "(batch_ref, risk_state_ref, payload) VALUES (?, ?, ?)",
+            (batch_ref, bundle.next_risk_state.reference.key,
+             bundle.next_risk_state.payload),
+        )
+
+    def _reconcile_append(
+        self,
+        request: AppendCommand,
+        *,
+        expects_allocation: bool = False,
+    ) -> AppendResult:
         try:
             with closing(self._connect()) as connection:
                 row = connection.execute(
                     "SELECT * FROM command_journal WHERE command_id = ?",
                     (request.command_id,),
                 ).fetchone()
+                has_allocation = connection.execute(
+                    "SELECT 1 FROM portfolio_allocation_batches WHERE command_id = ?",
+                    (request.command_id,),
+                ).fetchone() is not None
         except sqlite3.DatabaseError:
             return AppendResult(AppendStatus.INDETERMINATE_COMMIT, request.command_id)
         if row is None:
             return AppendResult(AppendStatus.INDETERMINATE_COMMIT, request.command_id)
-        if not self._command_matches(row, request):
+        if (has_allocation != expects_allocation
+                or not self._command_matches(row, request)):
             return AppendResult(AppendStatus.IDENTITY_CONFLICT, request.command_id,
                                 row["resulting_sequence"])
         return AppendResult(AppendStatus.COMMITTED_AFTER_INDETERMINATE,

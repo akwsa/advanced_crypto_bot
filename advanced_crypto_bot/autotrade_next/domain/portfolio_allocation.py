@@ -54,6 +54,11 @@ def _amount_value(value: ScaledInteger) -> dict[str, int]:
     return {"units": value.units, "scale": value.scale}
 
 
+def _pair_identity(value: str) -> str:
+    """Compare venue pair identities without allowing case-only aliases."""
+    return value.casefold()
+
+
 @dataclass(frozen=True, slots=True)
 class ReservationBucket:
     initial: ScaledInteger
@@ -106,6 +111,8 @@ class ReservationConsumption:
     def __post_init__(self) -> None:
         for value in self.values:
             _amount(value, "INVALID_RESERVATION_CONSUMPTION")
+        if self.notional.units == 0 or self.turnover.units == 0:
+            raise DecisionError("EMPTY_FILL_CONSUMPTION")
 
     @property
     def values(self) -> tuple[ScaledInteger, ...]:
@@ -272,6 +279,9 @@ class RiskReservation:
             raise DecisionError("RESERVATION_ALREADY_TERMINAL")
         if type(evidence_ref) is not ContentRef:
             raise DecisionError("INVALID_RESERVATION_EVIDENCE")
+        if (lifecycle is ReservationLifecycle.FILLED
+                and not self.applied_fills):
+            raise DecisionError("FILLED_RESERVATION_WITHOUT_FILL")
         return replace(self, balances=self.balances.release_active(),
                        lifecycle=lifecycle, state_evidence_ref=evidence_ref)
 
@@ -350,6 +360,12 @@ class PortfolioConsistencyCut:
         if len(mapping) != len(self.constituents):
             raise DecisionError("DUPLICATE_CONSTITUENT_CHECKPOINT")
         required = {
+            ("opportunity-set", "portfolio"): self.opportunity_set_ref,
+            ("market-cutoff", "portfolio"): self.market_cutoff_ref,
+            ("journal-high-water", "portfolio"): ContentRef.v2(
+                "autotrade-next", "JournalHighWater",
+                {"sequence": self.journal_high_water},
+            ),
             ("positions", "portfolio"): self.positions_ref,
             ("working-orders", "portfolio"): self.working_orders_ref,
             ("risk-state", "portfolio"): self.risk_state_ref,
@@ -397,6 +413,10 @@ class AllocationProposal:
                 or self.reservation.instrument_id != self.instrument_id
                 or self.reservation.horizon != self.horizon):
             raise DecisionError("PROPOSAL_RESERVATION_MISMATCH")
+        if (not self.risk_increasing
+                and any(bucket.initial.units != 0
+                        for bucket in self.reservation.balances.values)):
+            raise DecisionError("RISK_REDUCING_PROPOSAL_HAS_RESERVATION")
 
     def to_canonical_value(self) -> dict[str, object]:
         return {
@@ -430,15 +450,15 @@ class AllocationRejection:
             raise DecisionError("INVALID_ALLOCATION_REJECTION")
 
 
-def _accepted_references(
+def _allocation_batch_value(
     cut: PortfolioConsistencyCut,
     observed: tuple[ConstituentCheckpoint, ...],
     expected_sequence: int,
     proposals: tuple[AllocationProposal, ...],
     ownership: tuple[tuple[str, str], ...],
     next_risk_state_ref: ContentRef,
-) -> tuple[ContentRef, ContentRef, ContentRef]:
-    batch_value = {
+) -> dict[str, object]:
+    return {
         "cut": cut.to_canonical_value(),
         "observed_constituents": tuple(
             item.to_canonical_value() for item in observed),
@@ -448,6 +468,20 @@ def _accepted_references(
         "pair_horizon_ownership": ownership,
         "next_risk_state_ref": next_risk_state_ref.to_canonical_value(),
     }
+
+
+def _accepted_references(
+    cut: PortfolioConsistencyCut,
+    observed: tuple[ConstituentCheckpoint, ...],
+    expected_sequence: int,
+    proposals: tuple[AllocationProposal, ...],
+    ownership: tuple[tuple[str, str], ...],
+    next_risk_state_ref: ContentRef,
+) -> tuple[ContentRef, ContentRef, ContentRef]:
+    batch_value = _allocation_batch_value(
+        cut, observed, expected_sequence, proposals, ownership,
+        next_risk_state_ref,
+    )
     batch_ref = ContentRef.v2("autotrade-next", "PortfolioAllocationBatch", batch_value)
     event_ref = ContentRef.v2(
         "autotrade-next", "PortfolioAllocationCommitted",
@@ -526,7 +560,7 @@ class PortfolioAllocation:
                 raise DecisionError("NON_CANONICAL_PROPOSAL_ORDER")
             decisions = tuple(item.decision_ref.key for item in self.proposals)
             reservations = tuple(item.reservation.reservation_id for item in self.proposals)
-            pairs = tuple(item.pair_id for item in self.proposals)
+            pairs = tuple(_pair_identity(item.pair_id) for item in self.proposals)
             if (len(decisions) != len(set(decisions))
                     or len(reservations) != len(set(reservations))
                     or len(pairs) != len(set(pairs))):
@@ -566,6 +600,49 @@ class PortfolioAllocation:
     @property
     def executable(self) -> bool:
         return self.rejection is None
+
+    def batch_content_value(self) -> dict[str, object]:
+        if not self.executable or self.next_risk_state_ref is None:
+            raise DecisionError("ALLOCATION_BATCH_NOT_EXECUTABLE")
+        return _allocation_batch_value(
+            self.consistency_cut,
+            self.observed_constituents,
+            self.expected_sequence,
+            self.proposals,
+            self.pair_horizon_ownership,
+            self.next_risk_state_ref,
+        )
+
+    def to_canonical_value(self) -> dict[str, object]:
+        return {
+            "consistency_cut": self.consistency_cut.to_canonical_value(),
+            "observed_constituents": tuple(
+                item.to_canonical_value() for item in self.observed_constituents
+            ),
+            "expected_sequence": self.expected_sequence,
+            "proposals": tuple(item.to_canonical_value() for item in self.proposals),
+            "pair_horizon_ownership": self.pair_horizon_ownership,
+            "next_risk_state_ref": (
+                None if self.next_risk_state_ref is None
+                else self.next_risk_state_ref.to_canonical_value()
+            ),
+            "batch_ref": self.batch_ref.to_canonical_value(),
+            "event_ref": (
+                None if self.event_ref is None
+                else self.event_ref.to_canonical_value()
+            ),
+            "outbox_ref": (
+                None if self.outbox_ref is None
+                else self.outbox_ref.to_canonical_value()
+            ),
+            "rejection": (
+                None if self.rejection is None
+                else {
+                    "code": self.rejection.code.value,
+                    "details": self.rejection.details,
+                }
+            ),
+        }
 
 
 def _checkpoint_mismatches(
@@ -639,15 +716,17 @@ def build_portfolio_allocation(
         return _rejected(consistency_cut, canonical_observed, expected_sequence,
                          AllocationRejectCode.DUPLICATE_RESERVATION, ())
 
-    ownership: dict[str, str] = {}
+    ownership: dict[str, tuple[str, str]] = {}
     for item in ordered:
-        if item.pair_id in ownership:
+        pair_key = _pair_identity(item.pair_id)
+        if pair_key in ownership:
+            prior_pair, prior_horizon = ownership[pair_key]
             return _rejected(
                 consistency_cut, canonical_observed, expected_sequence,
                 AllocationRejectCode.DUPLICATE_PAIR_OWNERSHIP,
-                (item.pair_id, ownership[item.pair_id], item.horizon),
+                (item.pair_id, prior_pair, prior_horizon, item.horizon),
             )
-        ownership[item.pair_id] = item.horizon
+        ownership[pair_key] = (item.pair_id, item.horizon)
 
     notionals = tuple(item.reservation.balances.notional.initial
                       for item in ordered if item.risk_increasing)
@@ -658,7 +737,7 @@ def build_portfolio_allocation(
             return _rejected(consistency_cut, canonical_observed, expected_sequence,
                              AllocationRejectCode.EQUITY_CAP_EXCEEDED, ())
 
-    ownership_tuple = tuple(sorted(ownership.items()))
+    ownership_tuple = tuple(sorted(ownership.values()))
     batch_ref, event_ref, outbox_ref = _accepted_references(
         consistency_cut, canonical_observed, expected_sequence, ordered, ownership_tuple,
         next_risk_state_ref,

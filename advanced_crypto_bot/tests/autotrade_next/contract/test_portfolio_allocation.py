@@ -65,6 +65,16 @@ def reservation(pair: str = "BTC-IDR", horizon: str = "H1",
 
 def checkpoints(sequence: int = 7) -> tuple[ConstituentCheckpoint, ...]:
     return (
+        ConstituentCheckpoint(
+            "opportunity-set", "portfolio", 1, ref("OpportunitySet", "frozen"),
+        ),
+        ConstituentCheckpoint(
+            "market-cutoff", "portfolio", 1, ref("MarketCutoff", "t0"),
+        ),
+        ConstituentCheckpoint(
+            "journal-high-water", "portfolio", 91,
+            ContentRef.v2("autotrade-next", "JournalHighWater", {"sequence": 91}),
+        ),
         ConstituentCheckpoint("positions", "portfolio", sequence, ref("Positions", str(sequence))),
         ConstituentCheckpoint("working-orders", "portfolio", 3, ref("Orders", "3")),
         ConstituentCheckpoint("risk-state", "portfolio", 11, ref("RiskState", "11")),
@@ -139,6 +149,17 @@ def test_partial_multiple_fill_preserves_remainder_and_duplicate_is_content_boun
         )
 
 
+def test_zero_notional_or_turnover_cannot_forge_a_partial_fill() -> None:
+    with pytest.raises(DecisionError, match="EMPTY_FILL_CONSUMPTION"):
+        ReservationConsumption(
+            amount(0), amount(0), amount(0), amount(0), amount(0),
+        )
+    with pytest.raises(DecisionError, match="EMPTY_FILL_CONSUMPTION"):
+        ReservationConsumption(
+            amount(1), amount(0), amount(0), amount(0), amount(0),
+        )
+
+
 def test_unknown_and_partial_never_release_rounding_residual_until_terminal() -> None:
     partial = reservation().apply_fill(
         fill_id="fill-1",
@@ -161,6 +182,11 @@ def test_unknown_and_partial_never_release_rounding_residual_until_terminal() ->
         RiskReservation(
             "forged", "BTC-IDR", "BTC-IDR", "H1", vector(),
             ReservationLifecycle.FILLED, (), ref("VenueEvidence", "forged"),
+        )
+
+    with pytest.raises(DecisionError, match="FILLED_RESERVATION_WITHOUT_FILL"):
+        reservation().terminalize(
+            ReservationLifecycle.FILLED, ref("VenueEvidence", "filled"),
         )
 
 
@@ -188,7 +214,7 @@ def test_accepted_batch_is_scan_order_independent_and_content_bound() -> None:
 
 def test_stale_constituent_rejects_entire_risk_increasing_batch() -> None:
     stale = list(checkpoints())
-    stale[0] = ConstituentCheckpoint(
+    stale[3] = ConstituentCheckpoint(
         "positions", "portfolio", 8, ref("Positions", "8"),
     )
     result = build_portfolio_allocation(
@@ -200,6 +226,27 @@ def test_stale_constituent_rejects_entire_risk_increasing_batch() -> None:
     assert result.rejection is not None
     assert result.rejection.code is AllocationRejectCode.STALE_CONSTITUENT
     assert result.proposals == () and result.event_ref is None and result.outbox_ref is None
+
+
+@pytest.mark.parametrize("checkpoint_index", (0, 1, 2))
+def test_frozen_opportunity_market_and_journal_cut_are_observed(
+    checkpoint_index: int,
+) -> None:
+    stale = list(checkpoints())
+    original = stale[checkpoint_index]
+    stale[checkpoint_index] = ConstituentCheckpoint(
+        original.kind,
+        original.constituent_id,
+        original.sequence + 1,
+        ref("StaleCheckpoint", original.kind),
+    )
+    result = build_portfolio_allocation(
+        consistency_cut=cut(), proposals=(proposal(),),
+        observed_constituents=tuple(stale), expected_sequence=4,
+        next_risk_state_ref=ref("RiskState", "12"),
+    )
+    assert result.rejection is not None
+    assert result.rejection.code is AllocationRejectCode.STALE_CONSTITUENT
 
 
 def test_duplicate_observed_checkpoint_is_not_silently_collapsed() -> None:
@@ -222,6 +269,23 @@ def test_duplicate_pair_horizon_ownership_rejects_without_partial_batch() -> Non
     assert result.rejection is not None
     assert result.rejection.code is AllocationRejectCode.DUPLICATE_PAIR_OWNERSHIP
     assert result.proposals == ()
+
+
+def test_case_alias_cannot_bypass_unique_pair_ownership() -> None:
+    result = build_portfolio_allocation(
+        consistency_cut=cut(),
+        proposals=(proposal(), proposal("btc-idr", "H4", "res-btc-case")),
+        observed_constituents=checkpoints(), expected_sequence=4,
+        next_risk_state_ref=ref("RiskState", "12"),
+    )
+    assert result.rejection is not None
+    assert result.rejection.code is AllocationRejectCode.DUPLICATE_PAIR_OWNERSHIP
+
+
+def test_risk_reducing_proposal_cannot_smuggle_a_new_reservation() -> None:
+    base = proposal()
+    with pytest.raises(DecisionError, match="RISK_REDUCING_PROPOSAL_HAS_RESERVATION"):
+        replace(base, risk_increasing=False)
 
 
 def test_equity_cap_is_common_scale_and_fail_closed() -> None:

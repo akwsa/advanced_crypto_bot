@@ -355,14 +355,17 @@ def test_domain_package_only_imports_stdlib_or_relative_domain_modules():
 def test_application_ports_and_projections_obey_explicit_layer_matrix():
     root = Path(__file__).parents[3] / "autotrade_next"
     allowed_relative_by_module = {
-        ("application", "__init__"): {"exit", "settlement"},
+        ("application", "__init__"): {"exit", "portfolio_allocation", "settlement"},
         ("application", "exit"): set(),
+        ("application", "portfolio_allocation"): set(),
         ("application", "settlement"): set(),
         ("ports", "__init__"): {
-            "exit", "market", "query", "recovery", "settlement", "venue",
+            "exit", "market", "portfolio_allocation", "query", "recovery",
+            "settlement", "venue",
         },
         ("ports", "exit"): set(),
         ("ports", "market"): set(),
+        ("ports", "portfolio_allocation"): set(),
         ("ports", "query"): set(),
         ("ports", "recovery"): set(),
         ("ports", "settlement"): set(),
@@ -384,9 +387,19 @@ def test_application_ports_and_projections_obey_explicit_layer_matrix():
                 "autotrade_next.domain.exit_protection", "autotrade_next.domain.numeric",
             "autotrade_next.ports.exit",
         },
+        ("application", "portfolio_allocation"): {
+            "__future__", "dataclasses", "autotrade_next.domain.errors",
+            "autotrade_next.domain.portfolio_allocation",
+            "autotrade_next.ports.portfolio_allocation",
+        },
         ("ports", "__init__"): set(),
         ("ports", "market"): {
             "__future__", "typing", "autotrade_next.domain.market",
+        },
+        ("ports", "portfolio_allocation"): {
+            "__future__", "dataclasses", "enum", "typing",
+            "autotrade_next.domain.content", "autotrade_next.domain.encoding",
+            "autotrade_next.domain.portfolio_allocation",
         },
         ("ports", "query"): {"typing"},
         ("ports", "recovery"): {
@@ -471,6 +484,7 @@ def test_adapters_obey_explicit_domain_port_dependency_matrix_without_horizontal
         "sqlite/fenced_journal": {
             "__future__", "collections.abc", "contextlib", "dataclasses",
             "datetime", "enum", "math", "pathlib", "sqlite3",
+            "autotrade_next.ports.portfolio_allocation",
         },
         "sqlite/recovery_store": {
             "__future__", "contextlib", "dataclasses", "datetime", "enum",
