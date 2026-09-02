@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import datetime
 from types import SimpleNamespace
 
 import pytest
@@ -39,25 +39,36 @@ def test_canonical_equity_uses_normalized_positions_not_legacy(tmp_path):
     assert bot._calculate_equity(1) == pytest.approx(49_200_000)
 
 
-@pytest.mark.parametrize('price_data,reason', [
-    ({'btcidr': {'last': 3_200_000, 'timestamp': datetime.now()}}, 'missing_bid'),
-    ({'btcidr': {'bid': 3_100_000, 'timestamp': datetime.now() - timedelta(hours=1)}}, 'stale_mark'),
-    ({'btcidr': {'bid': 3_100_000, 'timestamp': datetime.now() + timedelta(minutes=1)}}, 'future_mark'),
-])
-def test_canonical_equity_fails_closed_without_fresh_bid(tmp_path, price_data, reason):
+@pytest.mark.parametrize('price_fields,mark_offset_seconds,reason', [
+    ({'last': 3_200_000}, 0, 'missing_bid'),
+    ({'bid': 3_100_000}, -301, 'stale_mark'),
+    ({'bid': 3_100_000}, 6, 'future_mark'),
+], ids=['missing-bid', 'stale-mark', 'future-mark'])
+def test_canonical_equity_fails_closed_without_fresh_bid(
+    tmp_path, monkeypatch, price_fields, mark_offset_seconds, reason,
+):
+    reference_time = 1_800_000_000.0
+    monkeypatch.setattr('bot.time.time', lambda: reference_time)
+    monkeypatch.setattr(Config, 'AUTOTRADE_EQUITY_MARK_MAX_AGE_SECONDS', 300)
     db = Database(str(tmp_path / 'trading.db'))
     db.add_user(1, 'tester', 'Test')
     with db.get_connection() as conn:
         conn.execute('''INSERT INTO autotrade_positions
             (pair,user_id,quantity,avg_price,cost_basis,fees,status)
             VALUES ('btcidr',1,1,100,100,0,'OPEN')''')
+    price_data = {
+        'btcidr': {
+            **price_fields,
+            'timestamp': reference_time + mark_offset_seconds,
+        },
+    }
     bot = _bot_with(db, price_data)
     original_peak = db.get_equity_peak(1)
 
     allowed, message = bot._check_max_drawdown(1)
 
     assert allowed is False
-    assert reason in message
+    assert f'btcidr:{reason}' in message
     assert db.get_equity_peak(1) == original_peak
     assert bot.is_trading is True
     assert bot.entry_circuit_breaker_active is True
