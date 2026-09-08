@@ -49,7 +49,9 @@ def test_classify_buy_signal_allows_beli_bertahap_for_rebound_candidate():
                 "ma_trend": "NEUTRAL",
                 "volume": "NORMAL",
             },
-            distance_to_resistance_pct=1.9,
+            # Rebound masih terlalu dekat dengan resistance untuk dipromosikan
+            # menjadi BUY; classifier harus fail-closed ke BELI_BERTAHAP.
+            distance_to_resistance_pct=1.5,
         )
     )
     assert result.label == BELI_BERTAHAP

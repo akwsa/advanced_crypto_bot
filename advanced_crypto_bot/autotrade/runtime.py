@@ -2118,9 +2118,13 @@ async def _check_trading_opportunity_locked(bot, pair, pair_key, signal):
             else:
                 logger.info(f"⏸️ SELL signal for {pair} - no open position to sell")
                 _remember_autotrade_block_reason(bot, pair, "NO_OPEN_POSITION: SELL has no position to close")
+                if not normalized_position:
+                    bot.risk_manager.check_daily_loss_limit(user_id)
         else:
             logger.info(f"⏸️ SELL signal for {pair} - no open position to sell")
             _remember_autotrade_block_reason(bot, pair, "NO_OPEN_POSITION: SELL has no position to close")
+            if hasattr(bot, "risk_manager") and hasattr(bot.risk_manager, "check_daily_loss_limit"):
+                bot.risk_manager.check_daily_loss_limit(user_id)
 
     if Config.PORTFOLIO_RISK_ADJUSTED:
         open_trades = bot.db.get_open_trades(user_id)

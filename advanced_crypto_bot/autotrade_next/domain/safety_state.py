@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum, IntEnum
 
-from .content import ContentRef
+from .content import ContentRecipe, ContentRef
 from .errors import DecisionError
 
 
@@ -30,6 +30,17 @@ def _refs(values: object, code: str) -> tuple[ContentRef, ...]:
     if len(keys) != len(set(keys)) or keys != tuple(sorted(keys)):
         raise DecisionError(code)
     return values
+
+
+def _clear_authority_ref(value: object) -> ContentRef:
+    if (
+        type(value) is not ContentRef
+        or value.domain != "autotrade-next"
+        or value.kind != "ClearAuthority"
+        or value.recipe is not ContentRecipe.V2
+    ):
+        raise DecisionError("INVALID_CLEAR_AUTHORITY")
+    return value
 
 
 class SafetyScopeLevel(IntEnum):
@@ -227,8 +238,7 @@ class SafetyClearProof:
         if type(self.expected_sequence) is not int or self.expected_sequence < 0:
             raise DecisionError("INVALID_CLEAR_SEQUENCE")
         _utc(self.observed_at_utc, "INVALID_CLEAR_TIMESTAMP")
-        if type(self.authority_ref) is not ContentRef:
-            raise DecisionError("INVALID_CLEAR_AUTHORITY")
+        _clear_authority_ref(self.authority_ref)
 
     @property
     def reference(self) -> ContentRef:
@@ -252,6 +262,18 @@ class SafetyClearRecord:
     proof_ref: ContentRef
     cleared_sequence: int
 
+    def __post_init__(self) -> None:
+        _text(self.cause_id, "INVALID_CLEAR_CAUSE_ID")
+        if (
+            type(self.proof_ref) is not ContentRef
+            or self.proof_ref.domain != "autotrade-next"
+            or self.proof_ref.kind != "SafetyClearProof"
+            or self.proof_ref.recipe is not ContentRecipe.V2
+        ):
+            raise DecisionError("INVALID_CLEAR_RECORD_PROOF")
+        if type(self.cleared_sequence) is not int or self.cleared_sequence < 1:
+            raise DecisionError("INVALID_CLEAR_RECORD_SEQUENCE")
+
 
 @dataclass(frozen=True, slots=True)
 class SafetyStateLattice:
@@ -270,6 +292,19 @@ class SafetyStateLattice:
             raise DecisionError("INVALID_ACTIVE_CAUSE_ORDER")
         if (type(self.clear_history) is not tuple
                 or any(type(item) is not SafetyClearRecord for item in self.clear_history)):
+            raise DecisionError("INVALID_CLEAR_HISTORY")
+        active_sequences = tuple(item.expected_sequence for item in self.active_causes)
+        if any(item >= self.sequence for item in active_sequences):
+            raise DecisionError("INVALID_ACTIVE_CAUSE_SEQUENCE")
+        cleared_sequences = tuple(item.cleared_sequence for item in self.clear_history)
+        proof_keys = tuple(item.proof_ref.key for item in self.clear_history)
+        cleared_ids = tuple(item.cause_id for item in self.clear_history)
+        if (
+            any(item > self.sequence for item in cleared_sequences)
+            or cleared_sequences != tuple(sorted(cleared_sequences))
+            or len(proof_keys) != len(set(proof_keys))
+            or len(cleared_ids) != len(set(cleared_ids))
+        ):
             raise DecisionError("INVALID_CLEAR_HISTORY")
 
     @classmethod
@@ -309,7 +344,7 @@ class SafetyStateLattice:
             raise DecisionError("SAFETY_SEQUENCE_CONFLICT")
         if proof.predicate is not cause.clear_predicate:
             raise DecisionError("SAFETY_CLEAR_PREDICATE_MISMATCH")
-        if proof.observed_at_utc < cause.recorded_at_utc:
+        if proof.observed_at_utc <= cause.recorded_at_utc:
             raise DecisionError("CLEAR_EVIDENCE_PRECEDES_CAUSE")
         old_keys = {item.key for item in cause.evidence_refs}
         if not any(item.key not in old_keys for item in proof.evidence_refs):

@@ -70,7 +70,11 @@ from .risk_governor import (
     QuantityAdjustment, RiskCheckReason, RiskEvaluationResult, RiskGovernor,
     RiskPolicy, RiskPortfolioState,
 )
-from .safety_state import SafetyCause, SafetyCauseKind, SafetyScopeLevel, SafetyStateLattice
+from .safety_state import (
+    ClearPredicate, ProtectiveAction, SafetyCause, SafetyCauseKind,
+    SafetyClearProof, SafetyClearRecord, SafetyScope, SafetyScopeLevel,
+    SafetySeverity, SafetyStateLattice,
+)
 from .kill_switch import KillState, KillSwitchStateMachine
 from .degradation import DegradationGovernor, DegradationLevel
 from .experiment import EvidenceSpecification

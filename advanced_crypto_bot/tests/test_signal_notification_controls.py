@@ -446,6 +446,9 @@ class TestSignalNotificationControls(unittest.IsolatedAsyncioTestCase):
             _format_signal_message_html=Mock(return_value="signal text"),
             app=SimpleNamespace(bot=SimpleNamespace(send_message=fake_send_message)),
             risk_manager=risk_manager,
+            # The SELL execution path inspects open positions after notifying.
+            # This notification-focused fixture has no position to close.
+            db=SimpleNamespace(get_open_trades=Mock(return_value=[])),
         )
         with patch("autotrade.runtime.Config.ADMIN_IDS", [123]):
             await check_trading_opportunity(

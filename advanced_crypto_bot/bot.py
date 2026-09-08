@@ -3195,6 +3195,8 @@ class AdvancedCryptoBot:
         """
         edit_error = None
         reply_error = None
+        if kwargs.get('parse_mode') == 'HTML':
+            text = sanitize_telegram_html(text)
 
         async def _try_escaped_fallback(target_message, safe_kwargs, safe_text):
             """Multi-layer fallback: try with safe_kwargs, then bare, then fire-and-forget."""

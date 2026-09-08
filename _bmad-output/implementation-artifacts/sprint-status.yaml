@@ -1,5 +1,5 @@
 # generated: 2026-08-26T00:46:50+07:00
-# last_updated: 2026-09-01T09:29:57+07:00
+# last_updated: 2026-09-08T10:45:52+07:00
 # project: advanced_crypto_bot
 # project_key: NOKEY
 # tracking_system: file-system
@@ -11,7 +11,7 @@
 # Retrospective: optional <-> done
 
 generated: 2026-08-26T00:46:50+07:00
-last_updated: 2026-09-01T09:29:57+07:00
+last_updated: 2026-09-08T10:45:52+07:00
 project: advanced_crypto_bot
 project_key: NOKEY
 tracking_system: file-system
@@ -41,7 +41,7 @@ development_status:
   3-1-menegakkan-fenced-command-authority: done
   3-2-mengalokasikan-exposure-dan-reservation-secara-atomik: done
   3-3-menerapkan-portfolio-risk-governor: done
-  3-4-menggabungkan-safety-cause-tanpa-premature-clear: in-progress
+  3-4-menggabungkan-safety-cause-tanpa-premature-clear: done
   3-5-menjalankan-kill-dan-hard-drawdown-zeroing: done
   3-6-menjalankan-degradation-dan-delivery-secara-terisolasi: done
   3-7-menyajikan-integrity-cockpit-dan-audited-recovery: done

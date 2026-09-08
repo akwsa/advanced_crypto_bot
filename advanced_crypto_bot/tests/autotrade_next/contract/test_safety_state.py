@@ -13,6 +13,7 @@ from autotrade_next.domain.safety_state import (
     SafetyCause,
     SafetyCauseKind,
     SafetyClearProof,
+    SafetyClearRecord,
     SafetyScope,
     SafetyScopeLevel,
     SafetySeverity,
@@ -68,6 +69,24 @@ def test_cause_identity_is_deterministic_and_caller_cannot_forge_it() -> None:
         replace(first, cause_id="caller-id")
 
 
+def test_domain_package_exports_complete_safety_contract() -> None:
+    from autotrade_next.domain import (  # pylint: disable=import-outside-toplevel
+        ClearPredicate as exported_predicate,
+        ProtectiveAction as exported_action,
+        SafetyClearProof as exported_proof,
+        SafetyClearRecord as exported_record,
+        SafetyScope as exported_scope,
+        SafetySeverity as exported_severity,
+    )
+
+    assert exported_predicate is ClearPredicate
+    assert exported_action is ProtectiveAction
+    assert exported_proof is SafetyClearProof
+    assert exported_record is SafetyClearRecord
+    assert exported_scope is SafetyScope
+    assert exported_severity is SafetySeverity
+
+
 def test_scope_severity_join_and_protective_intersection_are_canonical() -> None:
     lattice = SafetyStateLattice.empty().add_cause(stale(), expected_sequence=0)
     lattice = lattice.add_cause(fence(), expected_sequence=1)
@@ -112,6 +131,55 @@ def test_clear_requires_exact_sequence_predicate_new_evidence_and_causal_time(ba
     with pytest.raises(DecisionError):
         lattice.clear_cause(bad_proof(cause))
     assert lattice.is_entry_frozen and lattice.clear_history == ()
+
+
+def test_clear_rejects_evidence_at_the_same_instant_as_the_cause() -> None:
+    cause = stale()
+    lattice = SafetyStateLattice.empty().add_cause(cause, expected_sequence=0)
+    same_instant_proof = replace(proof(cause, sequence=1), observed_at_utc=NOW)
+
+    with pytest.raises(DecisionError, match="CLEAR_EVIDENCE_PRECEDES_CAUSE"):
+        lattice.clear_cause(same_instant_proof)
+
+
+@pytest.mark.parametrize(
+    "authority_ref",
+    (
+        ref("WrongAuthorityKind", "operator-approval"),
+        ContentRef.v1("ClearAuthority", {"value": "operator-approval"}),
+        ContentRef.v2("foreign-domain", "ClearAuthority", {"value": "operator-approval"}),
+    ),
+)
+def test_clear_proof_requires_a_typed_canonical_authority_reference(authority_ref) -> None:
+    cause = stale()
+
+    with pytest.raises(DecisionError, match="INVALID_CLEAR_AUTHORITY"):
+        replace(proof(cause, sequence=1), authority_ref=authority_ref)
+
+
+def test_lattice_rejects_forged_or_inconsistent_additive_history() -> None:
+    cause = stale()
+    lattice = SafetyStateLattice.empty().add_cause(cause, expected_sequence=0)
+    record = SafetyClearRecord(
+        cause_id=cause.cause_id,
+        proof_ref=proof(cause, sequence=1).reference,
+        cleared_sequence=2,
+    )
+    future_cause = SafetyCause.create(
+        kind=SafetyCauseKind.STALE_DATA,
+        scope=SafetyScope(SafetyScopeLevel.INSTRUMENT, "BTC-IDR"),
+        severity=SafetySeverity.ENTRY_FREEZE,
+        evidence_refs=(ref("SafetyEvidence", "future-book"),),
+        expected_sequence=1,
+        recorded_at_utc=NOW,
+    )
+
+    with pytest.raises(DecisionError, match="INVALID_ACTIVE_CAUSE_SEQUENCE"):
+        SafetyStateLattice(1, (future_cause,), ())
+    with pytest.raises(DecisionError, match="INVALID_CLEAR_HISTORY"):
+        SafetyStateLattice(1, lattice.active_causes, (record,))
+    with pytest.raises(DecisionError, match="INVALID_CLEAR_RECORD_PROOF"):
+        SafetyClearRecord(cause.cause_id, ref("OtherProof", "forged"), 1)
 
 
 def test_kind_matrix_rejects_under_scoped_or_under_severity_cause() -> None:
