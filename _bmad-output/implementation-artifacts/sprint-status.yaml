@@ -1,5 +1,5 @@
 # generated: 2026-08-26T00:46:50+07:00
-# last_updated: 2026-09-08T10:45:52+07:00
+# last_updated: 2026-09-08T16:14:50+07:00
 # project: advanced_crypto_bot
 # project_key: NOKEY
 # tracking_system: file-system
@@ -11,7 +11,7 @@
 # Retrospective: optional <-> done
 
 generated: 2026-08-26T00:46:50+07:00
-last_updated: 2026-09-08T10:45:52+07:00
+last_updated: 2026-09-08T16:14:50+07:00
 project: advanced_crypto_bot
 project_key: NOKEY
 tracking_system: file-system
@@ -27,7 +27,7 @@ development_status:
   1-6-menyajikan-provenance-decision-read-only: done
   epic-1-retrospective: optional
 
-  epic-2: in-progress
+  epic-2: done
   2-1-mengkualifikasi-market-evidence-per-produk-indodax: done
   2-2-membentuk-executable-market-snapshot-dan-instrument-eligibility: done
   2-3-menjalankan-satu-deterministic-simulator-lifecycle: done
@@ -35,9 +35,9 @@ development_status:
   2-5-mempertahankan-position-protection-melalui-unified-exit: done
   2-6-memulihkan-lifecycle-tanpa-decision-baru: done
   2-7-menghasilkan-execution-calibration-evidence: done
-  epic-2-retrospective: optional
+  epic-2-retrospective: done
 
-  epic-3: in-progress
+  epic-3: done
   3-1-menegakkan-fenced-command-authority: done
   3-2-mengalokasikan-exposure-dan-reservation-secara-atomik: done
   3-3-menerapkan-portfolio-risk-governor: done
@@ -45,7 +45,7 @@ development_status:
   3-5-menjalankan-kill-dan-hard-drawdown-zeroing: done
   3-6-menjalankan-degradation-dan-delivery-secara-terisolasi: done
   3-7-menyajikan-integrity-cockpit-dan-audited-recovery: done
-  epic-3-retrospective: optional
+  epic-3-retrospective: done
 
   epic-4: done
   4-1-membekukan-experiment-dan-opportunity-universe: done

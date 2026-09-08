@@ -19,3 +19,16 @@
 - Run focused contracts after every review auto-fix before commit.
 - Store full-regression output outside the execution sandbox as a durable artifact.
 - Keep live execution authority out of DRY RUN artifacts and require a separate live-readiness review.
+
+## Legacy Sprint Reconciliation: Epic 2–3 — 2026-09-08
+
+### Patterns Observed
+
+- Epic 2 established the executable lifecycle and evidence contracts; Epic 3 established the fail-closed authority and risk controls that consume them.
+- The strongest recurring pattern was separating semantic contract proof from durable deployment/readiness proof.
+
+### Recommendations
+
+- Reconcile epic-level status immediately when the final story and retrospective are complete.
+- Keep UNKNOWN, safety clear, and writer-fence transitions covered by deterministic contract tests.
+- Require separate operator approval before moving from DRY RUN/platform-ready to live-readiness work.
