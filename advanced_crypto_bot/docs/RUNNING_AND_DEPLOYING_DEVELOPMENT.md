@@ -46,13 +46,13 @@ Run this before any pull into production:
 
 ```bash
 SVC=crypto-bot.service
-WD=$(sudo -S -p '' systemctl cat "$SVC" | sed -n 's/^WorkingDirectory=//p' | tail -1)
-USER=$(sudo -S -p '' systemctl cat "$SVC" | sed -n 's/^User=//p' | tail -1)
+WD=$(sudo systemctl cat "$SVC" | sed -n 's/^WorkingDirectory=//p' | tail -1)
+USER=$(sudo systemctl cat "$SVC" | sed -n 's/^User=//p' | tail -1)
 echo "service_user=$USER"
 echo "service_workdir=$WD"
-sudo -S -p '' -u "$USER" test -f "$WD/bot.py"
-sudo -S -p '' -u "$USER" git -C "$WD" rev-parse --show-toplevel
-sudo -S -p '' -u "$USER" git -C "$WD" rev-parse --short HEAD
+sudo -u "$USER" test -f "$WD/bot.py"
+sudo -u "$USER" git -C "$WD" rev-parse --show-toplevel
+sudo -u "$USER" git -C "$WD" rev-parse --short HEAD
 ```
 
 Abort if `bot.py` is missing or the workdir is not the service app root.
@@ -64,36 +64,36 @@ Use this shape for production pulls:
 ```bash
 SVC=crypto-bot.service
 BR=kiro/dryrun-activation-dashboard
-WD=$(sudo -S -p '' systemctl cat "$SVC" | sed -n 's/^WorkingDirectory=//p' | tail -1)
-USER=$(sudo -S -p '' systemctl cat "$SVC" | sed -n 's/^User=//p' | tail -1)
+WD=$(sudo systemctl cat "$SVC" | sed -n 's/^WorkingDirectory=//p' | tail -1)
+USER=$(sudo systemctl cat "$SVC" | sed -n 's/^User=//p' | tail -1)
 
 echo "=== SERVICE TARGET ==="
 echo "user=$USER wd=$WD"
-sudo -S -p '' -u "$USER" test -f "$WD/bot.py"
+sudo -u "$USER" test -f "$WD/bot.py"
 
 echo "=== BACKUP DB ==="
-sudo -S -p '' -u "$USER" bash -lc "cd '$WD' && cp data/trading.db /tmp/trading_backup_$(date +%Y%m%d_%H%M).db"
+sudo -u "$USER" bash -lc "cd '$WD' && cp data/trading.db /tmp/trading_backup_$(date +%Y%m%d_%H%M).db"
 
 echo "=== FETCH AND INSPECT DIFF ==="
-sudo -S -p '' -u "$USER" git -C "$WD" fetch origin "$BR"
-sudo -S -p '' -u "$USER" git -C "$WD" diff --name-status HEAD..origin/"$BR" | sed -n '1,120p'
+sudo -u "$USER" git -C "$WD" fetch origin "$BR"
+sudo -u "$USER" git -C "$WD" diff --name-status HEAD..origin/"$BR" | sed -n '1,120p'
 
 echo "=== SAFETY CHECK ==="
-sudo -S -p '' -u "$USER" bash -lc "cd '$WD' && git diff --name-status HEAD..origin/$BR | grep -E '^[AMD][[:space:]]+(bot.py|advanced_crypto_bot/bot.py)' && exit 44 || exit 0"
+sudo -u "$USER" bash -lc "cd '$WD' && git diff --name-status HEAD..origin/$BR | grep -E '^[AMD][[:space:]]+(bot.py|advanced_crypto_bot/bot.py)' && exit 44 || exit 0"
 
 echo "=== PULL ==="
-sudo -S -p '' -u "$USER" git -C "$WD" pull --ff-only origin "$BR"
-sudo -S -p '' -u "$USER" git -C "$WD" rev-parse --short HEAD
+sudo -u "$USER" git -C "$WD" pull --ff-only origin "$BR"
+sudo -u "$USER" git -C "$WD" rev-parse --short HEAD
 
 echo "=== COMPILE ==="
-sudo -S -p '' -u "$USER" bash -lc "cd '$WD' && venv/bin/python -m py_compile bot.py autotrade/runtime.py"
+sudo -u "$USER" bash -lc "cd '$WD' && venv/bin/python -m py_compile bot.py autotrade/runtime.py"
 
 echo "=== RESTART ==="
-sudo -S -p '' rm -f /tmp/advanced_crypto_bot-autotrade-worker.lock*
-sudo -S -p '' systemctl restart "$SVC"
+sudo rm -f /tmp/advanced_crypto_bot-autotrade-worker.lock*
+sudo systemctl restart "$SVC"
 sleep 20
 systemctl --no-pager --full status "$SVC"
-sudo -S -p '' tail -120 "$WD/logs/bot.log"
+sudo tail -120 "$WD/logs/bot.log"
 ```
 
 If the safety check exits `44`, stop and inspect the branch layout. Do not pull.
@@ -104,18 +104,18 @@ Do not start production manually with `nohup` while the service exists.
 If a manual admin bot is running, stop the service first, then remove only the duplicate manual process and stale lock:
 
 ```bash
-sudo -S -p '' systemctl stop crypto-bot.service
+sudo systemctl stop crypto-bot.service
 ps -eo pid,user,lstart,cmd | grep "[b]ot.py" || true
-sudo -S -p '' pkill -9 -f "python3 bot.py" || true
-sudo -S -p '' rm -f /tmp/advanced_crypto_bot-autotrade-worker.lock*
-sudo -S -p '' systemctl restart crypto-bot.service
+sudo pkill -9 -f "python3 bot.py" || true
+sudo rm -f /tmp/advanced_crypto_bot-autotrade-worker.lock*
+sudo systemctl restart crypto-bot.service
 ```
 
 Verify the service is active and Telegram notifications are being sent:
 
 ```bash
 systemctl --no-pager --full status crypto-bot.service
-sudo -S -p '' tail -120 /home/wkagung/advanced_crypto_bot/advanced_crypto_bot/logs/bot.log | grep -E "Signal notification sent|SQ-WORKER|DRY RUN|Traceback|ERROR" || true
+sudo tail -120 /home/wkagung/advanced_crypto_bot/advanced_crypto_bot/logs/bot.log | grep -E "Signal notification sent|SQ-WORKER|DRY RUN|Traceback|ERROR" || true
 ```
 
 ## Current safe state after the incident
