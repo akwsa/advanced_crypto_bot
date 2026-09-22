@@ -1,0 +1,104 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$SCRIPT_DIR"
+WORKSPACE_ROOT="$(cd "$ROOT_DIR/.." && pwd)"
+
+if [[ -x "$ROOT_DIR/venv/bin/python" ]]; then
+  PYTHON_BIN="$ROOT_DIR/venv/bin/python"
+elif [[ -x "$WORKSPACE_ROOT/venv/bin/python" ]]; then
+  PYTHON_BIN="$WORKSPACE_ROOT/venv/bin/python"
+else
+  PYTHON_BIN="python3"
+fi
+
+BOT_CMD=("$PYTHON_BIN" "bot.py")
+BACKFILL_CMD=("$PYTHON_BIN" "analysis/backfill_performance_metrics.py" "--db" "data/trading.db")
+
+print_help() {
+  cat <<'EOF'
+Crypto Bot Helper
+
+Usage:
+  ./cryptobot run
+  ./cryptobot backfill
+  ./cryptobot restart-backfill
+  ./cryptobot observer [hours]
+  ./cryptobot help
+
+Commands:
+  run               Start bot.py from the app root
+  backfill          Rebuild daily performance rows from closed trades
+  restart-backfill  Stop any running local bot.py process, start bot.py in background, then run backfill
+  observer [hours]  Run post-batch signal observer (default 24h)
+  help              Show this help
+
+Notes:
+  - `restart-backfill` is for local/manual process usage, not systemd-managed VPS services.
+  - Backfill is safe to run repeatedly; if there are no closed trades, rebuilt rows stay 0.
+EOF
+}
+
+run_bot() {
+  cd "$ROOT_DIR"
+  exec "${BOT_CMD[@]}"
+}
+
+run_backfill() {
+  cd "$ROOT_DIR"
+  "${BACKFILL_CMD[@]}"
+}
+
+restart_backfill() {
+  cd "$ROOT_DIR"
+
+  local existing_pids
+  existing_pids="$(pgrep -f "$ROOT_DIR/bot.py" || true)"
+  if [[ -n "$existing_pids" ]]; then
+    echo "Stopping existing local bot.py process..."
+    while IFS= read -r pid; do
+      [[ -n "$pid" ]] || continue
+      kill "$pid"
+    done <<< "$existing_pids"
+    sleep 2
+  fi
+
+  echo "Starting bot.py in background..."
+  nohup "${BOT_CMD[@]}" > logs/manual-bot.out 2>&1 &
+  local new_pid=$!
+  echo "bot.py started with PID $new_pid"
+
+  echo "Running performance backfill..."
+  run_backfill
+}
+
+run_observer() {
+  local hours="${1:-24}"
+  cd "$ROOT_DIR"
+  "$PYTHON_BIN" analysis/post_batch3_observer.py --hours "$hours" --compare-prev
+}
+
+case "${1:-help}" in
+  run)
+    run_bot
+    ;;
+  backfill)
+    run_backfill
+    ;;
+  restart-backfill)
+    restart_backfill
+    ;;
+  observer)
+    run_observer "${2:-24}"
+    ;;
+  help|-h|--help)
+    print_help
+    ;;
+  *)
+    echo "Unknown command: ${1:-}"
+    echo
+    print_help
+    exit 1
+    ;;
+esac

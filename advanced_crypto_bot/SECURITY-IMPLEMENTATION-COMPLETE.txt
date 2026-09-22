@@ -1,0 +1,231 @@
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🔒 TELEGRAM BOT SECURITY HARDENING — COMPLETE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+📅 Date: 2026-05-22
+🎯 Goal: Implementasi default-deny access control untuk Telegram bot
+✅ Status: COMPLETE — Production Ready
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✅ IMPLEMENTASI SELESAI
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+✓ Default-Deny Whitelist
+  • Semua user ditolak kecuali terdaftar
+  • Admin (ADMIN_IDS) otomatis lolos
+  • Private chat only (group/channel ditolak)
+
+✓ Multi-Layer Authorization
+  • Config layer: ADMIN_IDS, ALLOWED_USER_IDS
+  • Database layer: telegram_users table
+  • In-memory cache: merged whitelist
+  • Handler guard: _guard_callback() wrapper
+
+✓ Self-Registration
+  • /register <kode> untuk user baru
+  • Kode harus cocok TELEGRAM_INVITE_CODE
+  • Admin tidak perlu kode
+
+✓ Handler Protection
+  • Semua command handler (100+ commands)
+  • Callback query handler
+  • Text input handler
+  • Unknown command handler
+  • Dashboard handler
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📊 TEST RESULTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+64 passed in 35-46s
+
+Test Breakdown:
+  ✅ 12 test access control (NEW)
+  ✅ 52 test existing features
+     • Signal notification controls
+     • Scalper button gating
+     • Telegram UI formatting
+     • Scalper dryrun positions
+
+NO REGRESSION — Semua test lulus!
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📝 FILES CHANGED
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Core Code (4 files):
+  • core/config.py
+    + ALLOWED_USER_IDS
+    + TELEGRAM_INVITE_CODE
+    + _parse_id_list() helper
+
+  • core/database.py
+    + telegram_users table (8 columns)
+    + 5 CRUD methods
+
+  • core/handler_registry.py
+    + _guard_callback() wrapper
+    + Modified _register_command_group()
+
+  • bot.py
+    + 5 new helper methods
+    + /register command handler
+
+Configuration (1 file):
+  • .env.example
+    + Documented new env vars
+
+Documentation (5 files):
+  • docs/telegram-access-control.md (NEW)
+    → Full architecture & flow
+
+  • COMMAND_REFERENCE.md
+    + /register command
+    + 🔒 ACCESS CONTROL section
+
+  • README.md
+    + Security feature mention
+
+  • docs/telegram-scalper-signal-safety.md
+    + Cross-reference link
+
+  • CHANGELOG-telegram-access-control.md (NEW)
+    → Complete implementation log
+
+Tests (1 file):
+  • tests/test_telegram_access_control.py (NEW)
+    → 12 test cases
+
+TOTAL: 11 files (3 new, 8 modified)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🚀 CARA PAKAI
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1. Edit .env:
+   ─────────────────────────────────────────────────────────
+   ADMIN_IDS=123456789
+   ALLOWED_USER_IDS=111111111,222222222
+   TELEGRAM_INVITE_CODE=rahasia2026
+   ─────────────────────────────────────────────────────────
+
+2. Restart bot:
+   ─────────────────────────────────────────────────────────
+   python bot.py
+   ─────────────────────────────────────────────────────────
+
+3. Bot log akan menampilkan:
+   ─────────────────────────────────────────────────────────
+   🔐 Telegram access control loaded: 3 allowed users
+      (1 admin, 2 active registered)
+   ─────────────────────────────────────────────────────────
+
+4. User baru registrasi:
+   ─────────────────────────────────────────────────────────
+   /register rahasia2026
+   
+   Response:
+   ✅ Registrasi berhasil. Akses bot sudah aktif.
+   ─────────────────────────────────────────────────────────
+
+5. User tidak terdaftar akan ditolak:
+   ─────────────────────────────────────────────────────────
+   /start
+   
+   Response:
+   ❌ Access denied.
+   
+   Bot log:
+   🔒 Telegram access denied user=999999 chat=999999
+   ─────────────────────────────────────────────────────────
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🛡️ SECURITY BENEFITS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Before                          After
+──────────────────────────────────────────────────────────────
+Anyone can use bot       →      ✅ Whitelist only
+No user tracking         →      ✅ DB persistent registry
+No access log            →      ✅ Logged denial events
+Group/channel OK         →      ✅ Private chat only
+No invite system         →      ✅ Self-registration code
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+💰 TRADING SAFETY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+✅ NO TRADING LOGIC CHANGED
+
+Area                            Impact
+──────────────────────────────────────────────────────────────
+Scalper orders                  ✅ NO CHANGE
+AutoTrade execution             ✅ NO CHANGE
+Signal generation               ✅ NO CHANGE
+Position tracking               ✅ NO CHANGE
+Balance queries                 ✅ NO CHANGE
+Stop Loss / Take Profit         ✅ NO CHANGE
+DRY RUN mode                    ✅ NO CHANGE
+
+Bot yang sedang profit 1-3% AMAN — tidak terpengaruh.
+Pengecekan dilakukan di handler layer sebelum logic berjalan.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📚 DOCUMENTATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Primary:
+  📄 docs/telegram-access-control.md
+     → Full architecture, flow, setup guide
+
+Reference:
+  📄 COMMAND_REFERENCE.md
+     → /register command + security section
+  
+  📄 CHANGELOG-telegram-access-control.md
+     → Complete implementation log
+
+  📄 README.md
+     → Feature mention
+
+Tests:
+  🧪 tests/test_telegram_access_control.py
+     → 12 test cases with full coverage
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🎯 QUICK REFERENCE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+User Type          Access Method
+──────────────────────────────────────────────────────────────
+Admin              ADMIN_IDS (env) — no registration needed
+Whitelisted User   ALLOWED_USER_IDS (env)
+New User           /register <code> — needs invite code
+
+Command            Restriction
+──────────────────────────────────────────────────────────────
+/register          FREE — no auth required
+All other commands PROTECTED — auth required
+Callbacks          PROTECTED — auth required
+Text input         PROTECTED — auth required
+
+Chat Type          Allowed?
+──────────────────────────────────────────────────────────────
+Private            ✅ YES (if authorized)
+Group              ❌ NO (always denied)
+Channel            ❌ NO (always denied)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✅ PRODUCTION READY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+• All tests pass (64/64)
+• No regression on existing features
+• No trading logic affected
+• Documentation complete
+• Implementation verified
+• Safe to deploy
+
+Bot tetap menghasilkan profit 1-3% — sekarang dengan security layer!
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

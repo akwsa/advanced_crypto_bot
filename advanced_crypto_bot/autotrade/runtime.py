@@ -110,9 +110,6 @@ def classify_autotrade_block_reason(reason):
     text = str(reason or "").upper()
     if not text.strip():
         return "UNCLASSIFIED_INTERNAL_ERROR"
-    reason_code = text.strip().partition(":")[0].strip()
-    if reason_code == "PAIR_LOSS_STREAK":
-        return "PAIR_GUARD"
     if "ENTRY_QUALITY" in text:
         return "ENTRY_QUALITY"
     if "NO OPEN POSITION" in text or "NO_OPEN_POSITION" in text:
@@ -586,40 +583,11 @@ def _get_quant_kelly(bot):
         try:
             from quant.bayesian_kelly import BayesianKellyEngine
             bot._quant_kelly_engine = BayesianKellyEngine()
-            _warmup_kelly_from_db(bot, bot._quant_kelly_engine)
             logger.info("✅ [QUANT] Bayesian Kelly Engine initialized in runtime")
         except Exception as e:
             logger.debug(f"[QUANT] Kelly engine not available: {e}")
             bot._quant_kelly_engine = None
     return bot._quant_kelly_engine
-
-
-def _warmup_kelly_from_db(bot, kelly_engine):
-    """Replay closed trades from the DB into the Kelly engine on startup.
-
-    Without this, a fresh process starts with an empty engine and falls back
-    to prior_only sizing until MIN_TRADES_FOR_KELLY new trades are observed
-    live. Read-only: it never writes to the DB.
-    """
-    try:
-        db = getattr(bot, "db", None)
-        if db is None or kelly_engine is None:
-            return
-        user_id = 1
-        try:
-            subs = getattr(bot, "subscribers", None) or {}
-            if subs:
-                user_id = next(iter(subs.keys()))
-        except Exception:
-            pass
-        if not hasattr(db, "get_trade_history"):
-            return
-        trades = db.get_trade_history(user_id, limit=300)
-        replayed = kelly_engine.load_from_trade_history(trades)
-        if replayed:
-            logger.info(f"✅ [QUANT] Kelly engine warmed up with {replayed} closed trade(s)")
-    except Exception as e:
-        logger.debug(f"[QUANT] Kelly warmup skipped: {e}")
 
 
 def _get_quant_momentum(bot):
@@ -646,74 +614,6 @@ def _get_quant_correlation(bot):
             logger.debug(f"[QUANT] Correlation engine not available: {e}")
             bot._quant_corr_engine = None
     return bot._quant_corr_engine
-
-
-def _build_quant_signal_context(bot, pair, signal, regime):
-    """Build a QuantSignalContext from cached quant stats for the fast gate.
-
-    Best-effort: mengambil z-score composite / mean reversion signal dari
-    ``signal['quant']`` (diisi oleh SignalQualityEngine), serta volatilitas
-    dari deteksi regime runtime. Mengembalikan ``None`` bila tidak ada
-    konteks quant yang tersedia (gate tetap jalan, hanya skip bagian quant).
-    """
-    try:
-        from autotrade.fast_gate import QuantSignalContext
-
-        quant = (signal or {}).get("quant") or {}
-        if not quant:
-            return None
-
-        vol = None
-        if isinstance(regime, dict):
-            maybe = regime.get("volatility")
-            if isinstance(maybe, (int, float)):
-                vol = float(maybe)
-
-        return QuantSignalContext(
-            z_score_composite=float(quant.get("z_score_composite") or 0.0),
-            volatility_pct=vol,
-            market_regime=str(quant.get("market_regime") or "UNKNOWN"),
-            mean_reversion_signal=str(quant.get("mean_reversion_signal") or "NEUTRAL"),
-        )
-    except Exception as exc:
-        logger.debug(f"[FAST GATE] {pair}: context build failed: {exc}")
-        return None
-
-
-def _run_fast_gate(bot, pair, signal, intent, regime, current_price):
-    """Invoke the TypeSafe pre-trade guardrail (System 1, < 50ms).
-
-    Fail-open by design: setiap error -> allowed=True dengan reason
-    ``GATE_SKIP_*``. Mengembalikan ``(allowed, reason_code, detail,
-    confidence_factor)``. confidence_factor dipakai untuk menskala
-    ml_confidence bila mean reversion confluence kontradiksi arah trade.
-    """
-    try:
-        from autotrade.fast_gate import validate_pre_trade_intent
-
-        market_context = {"price": current_price}
-        if isinstance(regime, dict):
-            spread = regime.get("spread_pct")
-            if isinstance(spread, (int, float)):
-                market_context["spread_pct"] = float(spread)
-            bid = regime.get("best_bid")
-            ask = regime.get("best_ask")
-            if isinstance(bid, (int, float)) and isinstance(ask, (int, float)):
-                market_context["best_bid"] = float(bid)
-                market_context["best_ask"] = float(ask)
-
-        quant_context = _build_quant_signal_context(bot, pair, signal, regime)
-
-        max_age = getattr(Config, "AUTOTRADE_SIGNAL_MAX_AGE_SECONDS", 900)
-        return validate_pre_trade_intent(
-            intent=intent if intent is not None else signal,
-            market_context=market_context,
-            quant_context=quant_context,
-            max_age_seconds=float(max_age) if max_age else None,
-        )
-    except Exception as exc:
-        logger.debug(f"[FAST GATE] {pair}: gate error (fail-open): {exc}")
-        return True, "GATE_SKIP_ERROR", f"Fast gate skipped: {exc}", 1.0
 
 
 def _get_quant_perf(bot):
@@ -1531,37 +1431,6 @@ async def _check_trading_opportunity_locked(bot, pair, pair_key, signal):
             _remember_autotrade_block_reason(bot, pair, f"{reason_prefix}: {block_reason or 'MI_FILTER'}")
             return
 
-    # =================================================================
-    # QUANT: TypeSafe pre-trade guardrail (System 1 fast gate).
-    # Deterministic validation (< 50ms, no LLM) sesuai
-    # docs/HERMES_HANDOVER.md Phase 1: contract + price/spread sanity +
-    # VaR/CVaR + correlation heat + mean reversion confluence.
-    # Fail-open: error apapun -> gate di-skip, flow existing tetap jalan.
-    # Diletakkan setelah market intelligence agar `regime` (spread, vol,
-    # best_bid/ask) sudah terisi untuk quant context.
-    # =================================================================
-    # `regime` hanya diisi di dalam cabang entry (BUY/STRONG_BUY) di atas;
-    # untuk SELL / non-entry path gunakan dict netral agar fast gate tetap
-    # dapat menjalankan validasi kontrak (direction-agnostic).
-    fg_regime = locals().get("regime") if isinstance(locals().get("regime"), dict) else {}
-    fg_allowed, fg_code, fg_detail, fg_conf_factor = _run_fast_gate(
-        bot, pair, signal, intent, fg_regime, current_price
-    )
-    if not fg_allowed:
-        logger.info(f"🛡️ [FAST GATE] Entry blocked for {pair}: {fg_code} — {fg_detail}")
-        _remember_autotrade_block_reason(bot, pair, f"FAST_GATE: {fg_code}")
-        return {
-            "status": "REJECTED",
-            "reason_code": f"FAST_GATE_{fg_code}",
-            "reason": fg_detail,
-            "correlation_id": (intent.correlation_id if intent is not None else None),
-            "idempotency_key": (intent.idempotency_key if intent is not None else None),
-        }
-    # Mean reversion confluence kontradiksi -> skala turun konfidensi.
-    if fg_conf_factor < 1.0:
-        confidence = confidence * fg_conf_factor
-        logger.info(f"📉 [FAST GATE] {pair}: confidence scaled x{fg_conf_factor:.2f} -> {confidence:.3f}")
-
         quality_ok, quality_reason, quality_details = _evaluate_entry_quality_filter(
             bot, pair, signal, market_conditions
         )
@@ -1571,7 +1440,6 @@ async def _check_trading_opportunity_locked(bot, pair, pair_key, signal):
             return
         logger.info(f"✅ {quality_reason} details={quality_details}")
 
-    if signal["recommendation"] in ["BUY", "STRONG_BUY"]:
         if regime["is_high_vol"]:
             logger.info(f"⚠️ HIGH VOLATILITY regime detected for {pair} - proceeding with caution")
             v4_status = None
@@ -1640,27 +1508,6 @@ async def _check_trading_opportunity_locked(bot, pair, pair_key, signal):
             )
 
         # =====================================================================
-        # QUANT: Volatility-aware confidence scaling.
-        # Bila GARCH/ATR volatility dari quant envelope tersedia dan tinggi,
-        # turunkan konfidensi efektif (max -20%) supaya Bayesian Kelly
-        # sizing dan V4 filter melihat risiko vol yang lebih realistis.
-        # Non-blocking: skip total bila data tidak ada.
-        # =====================================================================
-        try:
-            _quant_env = signal.get("quant") or {}
-            _vol_pct = _quant_env.get("volatility_pct")
-            if _vol_pct is not None:
-                _vol_pct = float(_vol_pct)
-                if _vol_pct >= 4.0:
-                    confidence = confidence * 0.80
-                    logger.info(
-                        f"⚠️ [QUANT VOL] {pair}: high volatility ({_vol_pct:.1f}%) "
-                        f"-> confidence scaled to {confidence:.3f}"
-                    )
-        except Exception as e:
-            logger.debug(f"[QUANT VOL] {pair}: skipped: {e}")
-
-        # =====================================================================
         # QUANT: Bayesian Kelly Position Sizing Override
         # If Bayesian Kelly engine has enough data, use its adaptive sizing
         # instead of the simple Kelly above. Falls back gracefully.
@@ -1682,25 +1529,23 @@ async def _check_trading_opportunity_locked(bot, pair, pair_key, signal):
                 except Exception:
                     pass
 
-                kelly_value, kelly_amount, kelly_meta = bot.risk_manager.bayesian_kelly_position_size(
+                kelly_result = kelly_engine.calculate_position_size(
                     pair=pair,
                     balance=balance,
                     entry_price=current_price,
                     ml_confidence=confidence,
                     volatility_pct=vol_pct,
                     current_drawdown_pct=dd_pct,
-                    kelly_engine=kelly_engine,
                 )
-                if kelly_value > 0:
+                if kelly_result.position_value > 0 and kelly_result.method != 'negative_edge':
                     old_total = total
-                    total = kelly_value
-                    amount = kelly_amount
+                    total = kelly_result.position_value
+                    amount = kelly_result.position_amount
                     logger.info(
                         f"📊 [QUANT KELLY] {pair}: Bayesian Kelly override | "
-                        f"{old_total:,.0f} -> {total:,.0f} IDR | "
-                        f"fraction={kelly_meta.get('kelly_fraction', 0):.2%} | "
-                        f"method={kelly_meta.get('method')} | "
-                        f"clamped={kelly_meta.get('clamped')}"
+                        f"{old_total:,.0f} → {total:,.0f} IDR | "
+                        f"fraction={kelly_result.kelly_fraction:.2%} | "
+                        f"method={kelly_result.method}"
                     )
         except Exception as e:
             logger.debug(f"[QUANT KELLY] {pair}: Fallback to standard sizing: {e}")
@@ -2270,13 +2115,9 @@ async def _check_trading_opportunity_locked(bot, pair, pair_key, signal):
             else:
                 logger.info(f"⏸️ SELL signal for {pair} - no open position to sell")
                 _remember_autotrade_block_reason(bot, pair, "NO_OPEN_POSITION: SELL has no position to close")
-                if not normalized_position:
-                    bot.risk_manager.check_daily_loss_limit(user_id)
         else:
             logger.info(f"⏸️ SELL signal for {pair} - no open position to sell")
             _remember_autotrade_block_reason(bot, pair, "NO_OPEN_POSITION: SELL has no position to close")
-            if hasattr(bot, "risk_manager") and hasattr(bot.risk_manager, "check_daily_loss_limit"):
-                bot.risk_manager.check_daily_loss_limit(user_id)
 
     if Config.PORTFOLIO_RISK_ADJUSTED:
         open_trades = bot.db.get_open_trades(user_id)

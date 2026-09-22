@@ -1,0 +1,268 @@
+openapi: 3.0.3
+info:
+  title: BotPy Dashboard API
+  version: 1.2.0-phase1-readonly-draft
+  description: >
+    Approved Phase 1 read-only API draft for the Advanced Crypto Bot dashboard.
+    Scope is limited to health, active pairs/chart, latest signals, trades/open
+    positions, and SSE stream. Write/trading endpoints are deliberately excluded
+    until separate Phase 1.5+ approval.
+servers:
+  - url: http://localhost:8000
+    description: Local dev
+paths:
+  /api/v1/health:
+    get:
+      summary: Health check
+      description: Returns dashboard API liveness and basic timestamp metadata.
+      responses:
+        '200':
+          description: Service health
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+  /api/v1/system/data-sources:
+    get:
+      summary: Show configured DB/Redis data source status
+      description: Read-only status for Redis, trading DB, signal DB, and bot heartbeat freshness.
+      responses:
+        '200':
+          description: Data source status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DataSourcesResponse'
+  /api/v1/pairs/active:
+    get:
+      summary: List active watched pairs
+      description: Reads active pairs from data/trading.db.watchlist and optionally includes latest price metadata.
+      parameters:
+        - in: query
+          name: include_price
+          schema:
+            type: boolean
+            default: true
+        - in: query
+          name: search
+          schema:
+            type: string
+          description: Optional client-friendly pair search/filter term.
+      responses:
+        '200':
+          description: Active pairs response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ActivePairsResponse'
+  /api/v1/pairs/{pair}/chart:
+    get:
+      summary: OHLCV chart data for selected active pair
+      description: >
+        Reads read-only candle data from data/trading.db.price_history only for
+        the selected active watchlist pair. Query semantics mirror bot.py's
+        chart history fallback: latest N DB candles for the normalized pair,
+        sorted oldest to newest for rendering.
+      parameters:
+        - in: path
+          name: pair
+          required: true
+          schema:
+            type: string
+          example: btcidr
+        - in: query
+          name: timeframe
+          schema:
+            type: string
+            enum: [1m, 5m, 15m, 1h, 4h, 1d]
+            default: 1h
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            default: 200
+            minimum: 1
+            maximum: 1000
+      responses:
+        '200':
+          description: Chart response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChartResponse'
+        '503':
+          description: SQLite locked and no cache available
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/v1/signals/latest:
+    get:
+      summary: Latest signals
+      description: Reads latest signal rows from data/signals.db.signals for the approved read-only signal feed.
+      parameters:
+        - in: query
+          name: pair
+          schema:
+            type: string
+          example: btcidr
+        - in: query
+          name: recommendation
+          schema:
+            type: string
+            enum: [BUY, SELL, HOLD, WAIT]
+        - in: query
+          name: min_confidence
+          schema:
+            type: number
+            format: float
+            minimum: 0
+            maximum: 1
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            default: 50
+            minimum: 1
+            maximum: 500
+      responses:
+        '200':
+          description: Latest signals response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SignalsResponse'
+  /api/v1/trades/history:
+    get:
+      summary: Trade history
+      description: Reads trade history from data/trading.db.trades without modifying trading state.
+      parameters:
+        - in: query
+          name: status
+          schema:
+            type: string
+            enum: [open, closed, all]
+            default: all
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            default: 100
+            minimum: 1
+            maximum: 1000
+      responses:
+        '200':
+          description: Trade history response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TradesResponse'
+  /api/v1/positions/open:
+    get:
+      summary: Open positions read-only
+      description: Reads Redis state:position:* when available, otherwise falls back to SQLite open trades.
+      responses:
+        '200':
+          description: Open positions response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PositionsResponse'
+  /api/v1/events/stream:
+    get:
+      summary: Phase 1 SSE event stream
+      description: >
+        Read-only Server-Sent Events stream for heartbeat, price_update,
+        signal_update, and trade_update events. Uses native EventSource on the
+        frontend; Socket.IO is out of Phase 1 scope.
+      responses:
+        '200':
+          description: SSE stream
+          content:
+            text/event-stream:
+              schema:
+                type: string
+components:
+  schemas:
+    ApiResponse:
+      type: object
+      required: [success, data, meta]
+      properties:
+        success:
+          type: boolean
+        data:
+          nullable: true
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+    ResponseMeta:
+      type: object
+      properties:
+        timestamp:
+          type: string
+          format: date-time
+        source:
+          type: string
+          example: sqlite
+        freshness:
+          type: string
+          enum: [fresh, stale, offline, unknown, empty, error]
+        last_updated:
+          type: string
+          format: date-time
+          nullable: true
+        stale_after_seconds:
+          type: integer
+          nullable: true
+    HealthResponse:
+      allOf:
+        - $ref: '#/components/schemas/ApiResponse'
+    DataSourcesResponse:
+      allOf:
+        - $ref: '#/components/schemas/ApiResponse'
+    ActivePairsResponse:
+      allOf:
+        - $ref: '#/components/schemas/ApiResponse'
+    ChartResponse:
+      allOf:
+        - $ref: '#/components/schemas/ApiResponse'
+    SignalsResponse:
+      allOf:
+        - $ref: '#/components/schemas/ApiResponse'
+    TradesResponse:
+      allOf:
+        - $ref: '#/components/schemas/ApiResponse'
+    PositionsResponse:
+      allOf:
+        - $ref: '#/components/schemas/ApiResponse'
+    ErrorBody:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          example: SQLITE_LOCKED
+        message:
+          type: string
+        retry_after_seconds:
+          type: integer
+          nullable: true
+    ErrorResponse:
+      type: object
+      required: [success, error, meta]
+      properties:
+        success:
+          type: boolean
+          enum: [false]
+        error:
+          $ref: '#/components/schemas/ErrorBody'
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+
+# Future endpoints deliberately excluded from approved Phase 1:
+# - /api/v1/pairs/top-volume
+# - /api/v1/hunters/status
+# - /api/v1/telegram/status
+# - /api/v1/sl-tp/*
+# - /api/v1/trade-intents/*
+# - /api/v1/autotrade/toggle
+# - /api/v1/emergency-stop
