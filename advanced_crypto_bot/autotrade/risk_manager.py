@@ -4,6 +4,7 @@
 # Main Functions: class RiskManager.
 # Side Effects: DB read/write risk/trade stats.
 from datetime import datetime, timedelta
+from typing import Dict, Optional, Tuple
 from core.config import Config
 import logging
 import numpy as np
@@ -273,3 +274,184 @@ class RiskManager:
             'suggestions': suggestions,
             'total_value': total_portfolio
         }
+
+
+    # =================================================================
+    # QUANT: Bayesian Kelly dynamic position sizing (Phase 3,
+    # docs/HERMES_HANDOVER.md). Replaces static 3%/5% sizing with
+    # per-pair adaptive sizing; falls back to the legacy fixed size
+    # whenever the quant engine is unavailable or has no edge.
+    # =================================================================
+
+    # Indodax minimum order (IDR). Safety clamp bawah dari blueprint Phase 3.
+    KELLY_MIN_ORDER_IDR = 50000.0
+    # Hard cap atas: tidak pernah alokasi lebih dari 25% balance.
+    KELLY_MAX_BALANCE_FRACTION = 0.25
+
+    def bayesian_kelly_position_size(
+        self,
+        pair: str,
+        balance: float,
+        entry_price: float,
+        ml_confidence: float = 0.65,
+        volatility_pct: float = 2.0,
+        current_drawdown_pct: float = 0.0,
+        kelly_engine: Optional["BayesianKellyEngine"] = None,
+    ) -> Tuple[float, float, Dict]:
+        """Dynamic position sizing via quant Bayesian Kelly + safety clamps.
+
+        Args:
+            pair: Trading pair (e.g. 'btcidr').
+            balance: Available balance (IDR).
+            entry_price: Entry price per unit.
+            ml_confidence: ML model confidence (0..1).
+            volatility_pct: Current ATR/GARCH volatility as % of price.
+            current_drawdown_pct: Current drawdown from peak (0-100).
+            kelly_engine: Optional injected ``BayesianKellyEngine`` instance
+                (tests). ``None`` = best-effort lazy init from quant module.
+
+        Returns:
+            ``(position_value_idr, position_amount, meta)``.
+            ``(0.0, 0.0, meta)`` bila sizing tidak layak (negative edge,
+            input invalid). ``meta`` selalu berisi keys:
+            ``method``, ``kelly_fraction``, ``position_value``, ``position_amount``,
+            ``clamped`` (bool), ``reason``.
+        """
+        meta: Dict = {
+            "method": "disabled", "kelly_fraction": 0.0,
+            "position_value": 0.0, "position_amount": 0.0,
+            "clamped": False, "reason": "",
+        }
+
+        # --- 0. Fail-safe: invalid input -> zero allocation
+        try:
+            balance = float(balance or 0)
+            entry_price = float(entry_price or 0)
+        except (TypeError, ValueError):
+            meta["reason"] = "invalid_input"
+            return 0.0, 0.0, meta
+        if balance <= 0 or entry_price <= 0:
+            meta["reason"] = "invalid_input"
+            return 0.0, 0.0, meta
+
+        # --- 1. Resolve engine
+        engine = kelly_engine
+        if engine is None:
+            try:
+                from quant.bayesian_kelly import BayesianKellyEngine
+                engine = BayesianKellyEngine()
+            except Exception as exc:
+                meta["method"] = "unavailable"
+                meta["reason"] = f"quant engine unavailable: {exc}"
+                logger.debug(f"[KELLY SIZE] {pair}: engine unavailable: {exc}")
+                return 0.0, 0.0, meta
+
+        # --- 2. Bayesian Kelly sizing (quant module)
+        try:
+            result = engine.calculate_position_size(
+                pair=pair,
+                balance=balance,
+                entry_price=entry_price,
+                ml_confidence=float(ml_confidence),
+                volatility_pct=float(volatility_pct),
+                current_drawdown_pct=float(current_drawdown_pct),
+                max_position_pct=self.KELLY_MAX_BALANCE_FRACTION,
+            )
+        except Exception as exc:
+            meta["method"] = "engine_error"
+            meta["reason"] = f"engine error: {exc}"
+            logger.debug(f"[KELLY SIZE] {pair}: engine error: {exc}")
+            return 0.0, 0.0, meta
+
+        method = getattr(result, "method", "unknown")
+        position_value = float(getattr(result, "position_value", 0.0) or 0.0)
+        kelly_fraction = float(getattr(result, "kelly_fraction", 0.0) or 0.0)
+
+        # --- 3. Negative edge / empty allocation -> let caller fall back
+        if position_value <= 0 or method in ("negative_edge", "invalid_input"):
+            meta.update({
+                "method": method, "kelly_fraction": kelly_fraction,
+                "position_value": 0.0, "position_amount": 0.0,
+                "reason": method,
+            })
+            return 0.0, 0.0, meta
+
+        clamped = False
+
+        # --- 4. Safety clamp: minimum Indodax order (Rp 50.000)
+        if 0 < position_value < self.KELLY_MIN_ORDER_IDR:
+            # Jika balance sendiri di bawah minimum, jangan dipaksakan.
+            if balance >= self.KELLY_MIN_ORDER_IDR:
+                position_value = self.KELLY_MIN_ORDER_IDR
+                clamped = True
+            else:
+                meta.update({
+                    "method": method, "kelly_fraction": kelly_fraction,
+                    "position_value": 0.0, "position_amount": 0.0,
+                    "reason": "balance_below_min_order",
+                })
+                return 0.0, 0.0, meta
+
+        # --- 5. Safety clamp: maksimum 25% balance
+        max_value = balance * self.KELLY_MAX_BALANCE_FRACTION
+        if position_value > max_value:
+            position_value = max_value
+            clamped = True
+
+        position_amount = position_value / entry_price
+
+        meta.update({
+            "method": method,
+            "kelly_fraction": kelly_fraction,
+            "position_value": position_value,
+            "position_amount": position_amount,
+            "clamped": clamped,
+            "reason": "ok" if not clamped else "safety_clamp_applied",
+        })
+
+        logger.info(
+            f"📊 [KELLY SIZE] {pair}: value={position_value:,.0f} IDR "
+            f"amount={position_amount:.8f} fraction={kelly_fraction:.2%} "
+            f"method={method} clamped={clamped}"
+        )
+        return position_value, position_amount, meta
+
+    def clamp_position_size(
+        self,
+        position_value: float,
+        balance: float,
+        min_order_idr: Optional[float] = None,
+        max_fraction: Optional[float] = None,
+    ) -> Tuple[float, bool, str]:
+        """Standalone safety clamp (pure, reusable).
+
+        Menerapkan dua guardrail blueprint Phase 3 pada nilai posisi apapun:
+        minimum order exchange dan maksimum fraksi balance.
+
+        Returns:
+            ``(clamped_value, was_clamped, reason)``
+        """
+        try:
+            position_value = float(position_value or 0)
+            balance = float(balance or 0)
+        except (TypeError, ValueError):
+            return 0.0, False, "invalid_input"
+
+        if position_value <= 0 or balance <= 0:
+            return position_value, False, "non_positive_input"
+
+        floor = float(min_order_idr) if min_order_idr is not None else self.KELLY_MIN_ORDER_IDR
+        cap_fraction = float(max_fraction) if max_fraction is not None else self.KELLY_MAX_BALANCE_FRACTION
+        cap = balance * cap_fraction
+
+        if balance < floor:
+            # Balance tidak cukup untuk order minimum - jangan naikkan.
+            return position_value, False, "balance_below_min_order"
+
+        if position_value < floor:
+            return floor, True, "raised_to_min_order"
+
+        if position_value > cap:
+            return cap, True, "capped_at_max_fraction"
+
+        return position_value, False, "within_bounds"
