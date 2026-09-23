@@ -427,6 +427,62 @@ class BayesianKellyEngine:
             method=method,
         )
 
+    def load_from_trade_history(self, trades, max_per_pair: int = None):
+        """Warm up the engine from closed trades (DB or any iterable).
+
+        Replays each closed trade through update_trade_outcome so the engine
+        starts a fresh process with realistic win rate and W:L history
+        instead of an empty slate, which would force prior_only fallback
+        until MIN_TRADES_FOR_KELLY new trades are observed live.
+
+        Args:
+            trades: iterable of rows with pair, profit_loss_pct and
+                closed_at keys (sqlite3.Row or dict).
+            max_per_pair: cap how many rows are replayed per pair
+                (newest first).
+
+        Returns:
+            number of trades actually replayed.
+        """
+        if max_per_pair is None:
+            max_per_pair = MAX_TRADE_HISTORY
+        try:
+            rows = list(trades)
+        except TypeError:
+            return 0
+
+        def _get(row, key):
+            if hasattr(row, "get"):
+                return row.get(key)
+            try:
+                return row[key]
+            except Exception:
+                return None
+
+        by_pair = {}
+        for row in rows:
+            pair = _get(row, "pair")
+            pnl = _get(row, "profit_loss_pct")
+            if pair is None or pnl is None:
+                continue
+            try:
+                pnl = float(pnl)
+            except (TypeError, ValueError):
+                continue
+            by_pair.setdefault(str(pair), []).append(pnl)
+
+        replayed = 0
+        for pair, pnls in by_pair.items():
+            for pnl in pnls[:max_per_pair]:
+                self.update_trade_outcome(pair, won=pnl > 0, pnl_pct=pnl)
+                replayed += 1
+        if replayed:
+            logger.info(
+                f"[KELLY] Warmed up from {replayed} closed trade(s) across "
+                f"{len(by_pair)} pair(s)"
+            )
+        return replayed
+
     def get_pair_stats(self, pair: str) -> Dict:
         """Get Kelly stats for a specific pair."""
         trades = self._trade_history.get(pair, [])

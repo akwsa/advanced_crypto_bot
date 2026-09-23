@@ -8,8 +8,8 @@ SELL_SIGNALS = {"SELL", "STRONG_SELL"}
 # Keep BUY relatively permissive, but make SELL stricter to reduce bear bias.
 # 2026-06-12: Raised BUY 0.50→0.65 and STRONG_BUY 0.64→0.70 after trade-outcome
 # analysis showed <60% confidence trades lose 80% of the time (5 trades: 4 BAD).
-BUY_MIN_CONFIDENCE = 0.65
-STRONG_BUY_MIN_CONFIDENCE = 0.70
+BUY_MIN_CONFIDENCE = 0.40  # 2026-06-29: 0.65→0.40 (aligned with ML ~0.48 output)
+STRONG_BUY_MIN_CONFIDENCE = 0.50  # 2026-06-29: 0.70→0.50
 SELL_MIN_CONFIDENCE = 0.65
 STRONG_SELL_MIN_CONFIDENCE = 0.70
 

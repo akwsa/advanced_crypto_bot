@@ -111,6 +111,13 @@ async def generate_signal_for_pair(bot, pair):
         return None
 
     df = bot.historical_data[pair].copy()
+    # 2026-06-29: Add volume_tier for inference (pair-specific ML feature).
+    # Thresholds are rough IDR-based tiers — computed dynamically from recent volume.
+    if 'volume' in df.columns and len(df) >= 20:
+        avg_vol = df['volume'].tail(100).mean()
+        if avg_vol > 1_000_000_000:      df['volume_tier'] = 3  # HIGH (>1B IDR vol)
+        elif avg_vol > 100_000_000:      df['volume_tier'] = 2  # MEDIUM
+        else:                            df['volume_tier'] = 1  # LOW
     if len(df) < 60:
         logger.warning(f"⚠️ Not enough data for {pair}: {len(df)} candles (need 60+)")
         return None
@@ -426,6 +433,23 @@ async def generate_signal_for_pair(bot, pair):
     # Regime filter (above) intentionally NOT bypassed — it represents
     # genuine "market unsafe to trade" verdict, not a filter heuristic.
     signal["pre_sr_recommendation"] = signal.get("recommendation", "HOLD")
+
+    # 2026-06-29 (Opsi E): V4 as primary signal gate.
+    # V4 is trained on actual trade outcomes (win/loss), not future returns.
+    # When V4 agrees with V2 direction, boost V2 confidence proportionally.
+    if v4_prediction and v4_confidence and signal["recommendation"] in ACTIONABLE_SIGNALS:
+        v4_dir = "BUY" if "BUY" in str(v4_prediction).upper() else ("SELL" if "SELL" in str(v4_prediction).upper() else None)
+        sig_dir = "BUY" if signal["recommendation"] in BUY_SIGNALS else "SELL"
+        if v4_dir == sig_dir and v4_confidence >= 0.55:
+            boost = min(0.20, v4_confidence * 0.25)
+            old_conf = ml_confidence
+            ml_confidence = min(0.95, ml_confidence + boost)
+            signal["ml_confidence"] = ml_confidence
+            signal["ml_confidence_raw"] = old_conf
+            signal["v4_boost"] = boost
+            logger.info(
+                f"🚀 [V4 BOOST] {pair}: V4 {v4_prediction}({v4_confidence:.0%}) agrees → boosted {old_conf:.2f}→{ml_confidence:.2f}"
+            )
 
     quality_signal = bot.signal_quality_engine.generate_signal(
         pair=pair,

@@ -372,5 +372,24 @@ class TestPortfolioBugFixes(unittest.TestCase):
         self.assertEqual(summary['positions'][0]['unrealized_pnl_pct'], 0)
 
 
+class TestDryRunEquityAccounting(unittest.TestCase):
+    def test_equity_is_cash_plus_marked_position_without_double_counting(self):
+        from bot import AdvancedCryptoBot
+
+        class FakeDB:
+            def get_balance(self, user_id):
+                return 47_994_000
+
+            def get_open_autotrade_positions(self, user_id):
+                return [{'pair': 'btcidr', 'quantity': 2, 'avg_price': 1_000_000}]
+
+        bot = AdvancedCryptoBot.__new__(AdvancedCryptoBot)
+        bot.db = FakeDB()
+        bot.price_data = {
+            'btcidr': {'bid': 1_000_000, 'last': 1_000_000, 'timestamp': datetime.now()}
+        }
+        self.assertEqual(bot._calculate_equity(1), 49_994_000)
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

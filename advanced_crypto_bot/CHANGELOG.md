@@ -9,6 +9,90 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added - 2026-08-06 (Runtime meta-label/calibration + retrain promotion gate)
+
+**Changes:**
+- `autotrade/runtime.py`: tambah runtime meta-label gate `prob_good_trade` berbasis
+  closed AutoTrade outcomes. Gate hanya memblokir setelah sample group cukup; jika
+  data VM masih kosong/kecil, gate pass dengan alasan eksplisit.
+- `autotrade/runtime.py`: tambah runtime probability calibration gate berbasis confidence
+  bucket. Gate memblokir bucket yang terbukti overconfident setelah sample cukup dan
+  menyimpan `ml_confidence_calibrated` pada signal.
+- `scripts/retrain_ml_v2_v4_once.py`: retrain V2/V4 sekarang terhubung ke promotion gate.
+  Model hasil retrain di-backup dulu; jika walk-forward/promotion report gagal, model
+  otomatis direstore dari backup dan script keluar dengan code `2`.
+- `autotrade/price_monitor.py`: trailing stop sekarang adaptive terhadap volatilitas
+  historis jika data tersedia, dengan fallback ke trailing stop lama.
+- `analysis/transformer_explorer.py` dan `scripts/explore_transformer_features.py`:
+  tambah eksplorasi transformer/orderbook-sequence offline disabled-by-runtime.
+
+**Safety:** Tidak ada transformer/deep model yang langsung memutuskan trade. Meta-label
+dan calibration gate tidak memblokir ketika sample belum cukup, mencegah regresi 0-entry
+setelah history dry-run dibersihkan.
+
+### Added - 2026-08-06 (AutoTrade entry quality + cost-aware gate)
+
+**Konteks:** Roadmap quant-hardening dimulai dari filter sederhana yang tidak mengganti
+logic sinyal utama: trend 5m/15m/1h/4h searah, volume spike, orderbook imbalance,
+dan spread abnormal sebagai entry filter.
+
+**Changes:**
+- `autotrade/runtime.py`: tambah entry-quality gate untuk BUY/STRONG_BUY. Gate ini
+  mengevaluasi multi-timeframe trend alignment, volume spike, orderbook pressure,
+  dan abnormal spread/liquidity dari market intelligence.
+- `autotrade/runtime.py`: tambah cost-aware execution gate yang membandingkan expected
+  TP1 edge dengan estimasi biaya round-trip (fee + slippage + spread) dan memblokir
+  setup dengan R/R after fees rendah.
+- `core/config.py`: tambah env toggle/threshold:
+  `AUTOTRADE_ENTRY_QUALITY_FILTER_ENABLED`, `AUTOTRADE_ENTRY_QUALITY_MIN_SCORE`,
+  `AUTOTRADE_MTF_REQUIRED_ALIGNED`, `AUTOTRADE_MTF_MIN_AVAILABLE`,
+  `AUTOTRADE_MTF_MIN_CHANGE_PCT`, `AUTOTRADE_COST_AWARE_GATE_ENABLED`,
+  `AUTOTRADE_COST_EDGE_MULTIPLIER`, dan `AUTOTRADE_DRYRUN_BLOCK_LOW_RR_AFTER_FEES`.
+- `scripts/evaluate_autotrade_quant_gates.py`: tambah evaluator offline untuk
+  walk-forward replay, model promotion gate, meta-labeling `prob_good_trade`, dan
+  probability calibration report berbasis `trade_outcomes`.
+- `_bmad-output/implementation-artifacts/quant-autotrade-roadmap-2026-08-06.md`:
+  backlog implementasi lanjutan untuk walk-forward replay, model promotion gate,
+  meta-labeling, probability calibration, regime-aware sizing/adaptive exit, dan
+  eksplorasi multi-timeframe/orderbook/transformer.
+
+**Safety:** Filter baru fail-open hanya jika granular data benar-benar tidak tersedia,
+agar tidak mengulang bug 0-entry; begitu data MTF/MI tersedia, filter bersifat
+fail-closed untuk spread/liquidity abnormal, trend BUY yang berlawanan, dan edge
+yang tidak cukup untuk mengalahkan biaya.
+
+**Tests:**
+- `./scripts/test.sh tests/test_runtime_price_guard.py tests/test_autotrade_dryrun_signal_cycle.py tests/test_open_position_sweep.py tests/test_evaluate_autotrade_quant_gates.py -q`
+
+### Fixed - 2026-08-05 (AutoTrade DRY RUN safety/risk hardening)
+
+**Konteks:** Audit VM 2026-08-05 menemukan 26 closed DRY RUN autotrade dengan win rate
+34.62% dan P&L simulasi sekitar -1.28 juta IDR. Kerugian ekstrem terutama terkait
+posisi lama yang tidak terus termonitor dan entry dry-run yang masih terlalu
+eksploratif untuk dijadikan bukti profitabilitas.
+
+**Fix:**
+- `autotrade/runtime.py`: BUY/STRONG_BUY sekarang fail-closed bila fresh Indodax
+  ticker tidak tersedia, gagal sanity guard, atau deviasi dari signal price melebihi
+  `AUTOTRADE_FRESH_PRICE_MAX_DEVIATION_PCT` (default 50%). Ini mencegah entry dari
+  signal/tick stale.
+- `autotrade/runtime.py`: V4 `BAD_*` prediction sekarang memblokir DRY RUN entry,
+  bukan hanya mengurangi size 50%. Ini menyelaraskan runtime dengan ekspektasi test
+  V4 lama bahwa BAD_BUY/BAD_SELL harus block.
+- `bot.py`: open-position sweeper sekarang menolak ticker major-pair yang gagal
+  `_is_price_sane_for_pair()` sebelum menjalankan SL/TP/TIME_EXIT check.
+- `core/config.py`: tambah env guard `AUTOTRADE_REQUIRE_FRESH_ENTRY_PRICE` dan
+  `AUTOTRADE_FRESH_PRICE_MAX_DEVIATION_PCT`.
+
+**Tests:**
+- `./scripts/test.sh tests/test_autotrade_dryrun_signal_cycle.py tests/test_open_position_sweep.py tests/test_runtime_price_guard.py -q`
+  → 28 passed.
+- `venv/bin/python -m py_compile autotrade/runtime.py bot.py core/config.py autotrade/price_monitor.py tests/test_autotrade_dryrun_signal_cycle.py tests/test_open_position_sweep.py`
+
+**Safety:** Tidak mengaktifkan real trading, tidak reset circuit breaker/drawdown state,
+dan belum deploy ke VM. Patch ini memperkecil peluang dry-run berikutnya membuka posisi
+dari data stale atau prediksi outcome buruk.
+
 ### Fixed - 2026-06-13 (Sinkronisasi: `_is_price_sane_for_pair` — Critical #1 Price Guard)
 
 **Konteks:** Audit 2026-06-07 menemukan BTC diperdagangkan di harga 100 IDR (data palsu dari test fixture).

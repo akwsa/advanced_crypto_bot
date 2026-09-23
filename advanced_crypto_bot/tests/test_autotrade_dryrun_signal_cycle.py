@@ -2,16 +2,23 @@
 # Caller: unittest focused autotrade runtime behavior.
 
 import unittest
+import tempfile
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
+from autotrade.contracts import TradeIntent
 from autotrade.runtime import check_trading_opportunity
+from autotrade.strategy2.shadow_runtime import observe_intent, prepare_runtime_signal
+from autotrade.strategy2.taxonomy import DecisionStatus, ReasonCode
+from core.database import Database
 
 
 class _FakeDryRunDB:
     def __init__(self):
         self.trades = []
         self.closed_trade_ids = []
+        self.normalized_position = None
+        self.normalized_sell_calls = []
 
     def get_pair_performance(self, pair):
         return None
@@ -21,6 +28,15 @@ class _FakeDryRunDB:
 
     def get_open_trades(self, user_id):
         return [trade for trade in self.trades if trade["user_id"] == user_id and trade["status"] == "OPEN"]
+
+    def get_autotrade_position(self, pair, user_id):
+        return self.normalized_position
+
+    def record_dryrun_sell(self, **kwargs):
+        self.normalized_sell_calls.append(kwargs)
+        self.normalized_position['quantity'] = 0.0
+        self.normalized_position['status'] = 'CLOSED'
+        return True
 
     def add_trade(self, user_id, pair, trade_type, price, amount, total, fee, signal_source, ml_confidence, notes=None):
         trade_id = len(self.trades) + 1
@@ -57,7 +73,7 @@ class _FakeDryRunDB:
 
 
 class TestAutoTradeDryRunSignalCycle(unittest.IsolatedAsyncioTestCase):
-    def _make_dryrun_bot(self, pair="btcidr"):
+    def _make_dryrun_bot(self, pair="testidr"):
         db = _FakeDryRunDB()
         bot = SimpleNamespace(
             is_trading=True,
@@ -132,13 +148,13 @@ class TestAutoTradeDryRunSignalCycle(unittest.IsolatedAsyncioTestCase):
             await check_trading_opportunity(bot, pair, signal=signal)
 
     async def test_duplicate_filtered_signal_does_not_open_dryrun_trade(self):
-        bot, db, optimization = self._make_dryrun_bot("btcidr")
+        bot, db, optimization = self._make_dryrun_bot("testidr")
 
         await self._run_dryrun_signal(
             bot,
-            "btcidr",
+            "testidr",
             {
-                "pair": "btcidr",
+                "pair": "testidr",
                 "recommendation": "HOLD",
                 "pre_sr_recommendation": "STRONG_BUY",
                 "display_recommendation": "HOLD",
@@ -154,14 +170,46 @@ class TestAutoTradeDryRunSignalCycle(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(db.get_open_trades(123), [])
         bot.trading_engine.should_execute_trade.assert_not_called()
 
-    async def test_execution_allowed_false_signal_does_not_open_dryrun_trade(self):
-        bot, db, optimization = self._make_dryrun_bot("btcidr")
+    async def test_normalized_only_position_can_exit_while_entry_risk_gates_fail(self):
+        bot, db, optimization = self._make_dryrun_bot("testidr")
+        db.normalized_position = {
+            'id': 7,
+            'pair': 'testidr',
+            'quantity': 2.0,
+            'avg_price': 100.0,
+            'cost_basis': 200.0,
+            'fees': 0.2,
+            'status': 'OPEN',
+        }
+        bot.risk_manager.check_daily_loss_limit = Mock(return_value=(False, 'daily loss'))
+        bot._check_max_drawdown = Mock(return_value=(False, 'drawdown'))
 
         await self._run_dryrun_signal(
             bot,
-            "btcidr",
+            'testidr',
             {
-                "pair": "btcidr",
+                'pair': 'testidr',
+                'recommendation': 'SELL',
+                'ml_confidence': 0.8,
+                'price': 110.0,
+                'indicators': {},
+            },
+            optimization,
+        )
+
+        self.assertEqual(db.normalized_position['status'], 'CLOSED')
+        self.assertEqual(len(db.normalized_sell_calls), 1)
+        bot.risk_manager.check_daily_loss_limit.assert_not_called()
+        bot._check_max_drawdown.assert_not_called()
+
+    async def test_execution_allowed_false_signal_does_not_open_dryrun_trade(self):
+        bot, db, optimization = self._make_dryrun_bot("testidr")
+
+        await self._run_dryrun_signal(
+            bot,
+            "testidr",
+            {
+                "pair": "testidr",
                 "recommendation": "BUY",
                 "pre_sr_recommendation": "BUY",
                 "display_recommendation": "BUY",
@@ -188,13 +236,13 @@ class TestAutoTradeDryRunSignalCycle(unittest.IsolatedAsyncioTestCase):
         filter) silently bypassed every gate after the weak-signal
         check, resulting in 0 entries despite valid pre-SR BUY signals.
         """
-        bot, db, optimization = self._make_dryrun_bot("btcidr")
+        bot, db, optimization = self._make_dryrun_bot("testidr")
 
         await self._run_dryrun_signal(
             bot,
-            "btcidr",
+            "testidr",
             {
-                "pair": "btcidr",
+                "pair": "testidr",
                 "recommendation": "HOLD",
                 "pre_sr_recommendation": "STRONG_BUY",
                 "display_recommendation": "STRONG_BUY",
@@ -215,13 +263,13 @@ class TestAutoTradeDryRunSignalCycle(unittest.IsolatedAsyncioTestCase):
         """Sanity: pre_sr_recommendation=HOLD harus tetap di-skip sebagai
         weak signal — override hanya berlaku saat pre_sr ∈ BUY/STRONG_BUY/SELL/STRONG_SELL.
         """
-        bot, db, optimization = self._make_dryrun_bot("btcidr")
+        bot, db, optimization = self._make_dryrun_bot("testidr")
 
         await self._run_dryrun_signal(
             bot,
-            "btcidr",
+            "testidr",
             {
-                "pair": "btcidr",
+                "pair": "testidr",
                 "recommendation": "HOLD",
                 "pre_sr_recommendation": "HOLD",
                 "display_recommendation": "HOLD",
@@ -235,14 +283,59 @@ class TestAutoTradeDryRunSignalCycle(unittest.IsolatedAsyncioTestCase):
         bot.trading_engine.should_execute_trade.assert_not_called()
         self.assertEqual(db.get_open_trades(123), [])
 
-    async def test_pantau_display_signal_does_not_open_dryrun_trade_even_when_pre_sr_buy(self):
-        bot, db, optimization = self._make_dryrun_bot("btcidr")
+    async def test_fresh_price_deviation_blocks_entry_before_execution_gate(self):
+        bot, db, optimization = self._make_dryrun_bot("testidr")
+        bot.indodax.get_ticker.return_value = {"last": 300.0, "bid": 300.0}
 
         await self._run_dryrun_signal(
             bot,
-            "btcidr",
+            "testidr",
             {
-                "pair": "btcidr",
+                "pair": "testidr",
+                "recommendation": "STRONG_BUY",
+                "ml_confidence": 0.8,
+                "price": 100.0,
+                "indicators": {},
+            },
+            optimization,
+        )
+
+        self.assertEqual(db.get_open_trades(123), [])
+        bot.trading_engine.should_execute_trade.assert_not_called()
+
+    async def test_v4_bad_prediction_blocks_dryrun_entry(self):
+        bot, db, optimization = self._make_dryrun_bot("testidr")
+        bot.ml_model_v4 = SimpleNamespace(
+            is_fitted=True,
+            get_status=Mock(return_value={"win_rate": 0.5}),
+            predict=Mock(return_value=("BAD_BUY", 0.9)),
+        )
+
+        await self._run_dryrun_signal(
+            bot,
+            "testidr",
+            {
+                "pair": "testidr",
+                "recommendation": "STRONG_BUY",
+                "ml_confidence": 0.8,
+                "price": 100.0,
+                "indicators": {},
+            },
+            optimization,
+        )
+
+        self.assertEqual(db.get_open_trades(123), [])
+        bot.price_monitor.set_price_level.assert_not_called()
+        self.assertEqual(bot._autotrade_block_reasons["testidr"]["bucket"], "V4_FILTER")
+
+    async def test_pantau_display_signal_does_not_open_dryrun_trade_even_when_pre_sr_buy(self):
+        bot, db, optimization = self._make_dryrun_bot("testidr")
+
+        await self._run_dryrun_signal(
+            bot,
+            "testidr",
+            {
+                "pair": "testidr",
                 "recommendation": "BUY",
                 "pre_sr_recommendation": "STRONG_BUY",
                 "display_recommendation": "PANTAU",
@@ -504,6 +597,10 @@ class TestAutoTradeDryRunSignalCycle(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(len(db.get_open_trades(123)), 1)
 
+            # Entry risk gates may be active, but they must not trap open risk.
+            bot.risk_manager.check_daily_loss_limit = Mock(return_value=(False, "daily loss"))
+            bot._check_max_drawdown = Mock(return_value=(False, "drawdown"))
+
             await check_trading_opportunity(
                 bot,
                 "testidr",
@@ -512,6 +609,8 @@ class TestAutoTradeDryRunSignalCycle(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(db.get_open_trades(123), [])
         self.assertEqual(db.closed_trade_ids, [1])
+        bot.risk_manager.check_daily_loss_limit.assert_not_called()
+        bot._check_max_drawdown.assert_not_called()
         bot.price_monitor.remove_price_level.assert_called_once_with(123, 1)
 
     async def test_watched_buy_signal_auto_promotes_and_saves_dryrun_trade_to_db(self):
@@ -850,6 +949,152 @@ class TestAutoTradeDryRunSignalCycle(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(open_trades), 1)
         # New formula: target 1.250.000 IDR + slippage (DRYRUN_SLIPPAGE_PCT=0.1%)
         self.assertAlmostEqual(open_trades[0]["total"], 1250000.0, delta=12500.0)
+
+
+class TestStrategy2ShadowRuntime(unittest.TestCase):
+    def test_strategy2_shadow_valid_path_is_idempotent(self):
+        with tempfile.NamedTemporaryFile(suffix=".db") as tmp:
+            db = Database(tmp.name)
+            signal = {
+                "signal_id": "sig-1",
+                "pair": "btcidr",
+                "signal_type": "BUY",
+                "price": 100.0,
+                "confidence": 0.9,
+                "created_at": 1_000.0,
+                "user_id": 1,
+                "data": {"signal": {"pair": "btcidr", "recommendation": "BUY", "price": 100.0, "ml_confidence": 0.9}},
+            }
+            intent = TradeIntent.from_signal(signal)
+            runtime_signal = dict(intent.signal)
+            runtime_signal["_intent"] = intent.to_dict()
+
+            first = observe_intent(
+                database=db,
+                intent=intent,
+                signal=runtime_signal,
+                strategy_version="patient-swing-v1",
+                initial_cash=1_000.0,
+            )
+            second = observe_intent(
+                database=db,
+                intent=intent,
+                signal=runtime_signal,
+                strategy_version="patient-swing-v1",
+                initial_cash=1_000.0,
+            )
+
+            self.assertEqual(first.decision_row_id, second.decision_row_id)
+            self.assertIsNotNone(first.event_row_id)
+            self.assertIsNotNone(second.replay_event_row_id)
+            self.assertEqual(first.decision.status, DecisionStatus.ENTER)
+            self.assertEqual(first.decision.reason_code, ReasonCode.ENTER_CANDIDATE)
+            self.assertFalse(first.replayed)
+            self.assertTrue(second.replayed)
+            with db.get_connection() as conn:
+                self.assertEqual(conn.execute("SELECT COUNT(*) FROM strategy2_decisions").fetchone()[0], 1)
+                reason_codes = {
+                    row[0] for row in conn.execute("SELECT reason_code FROM strategy2_state_events")
+                }
+                self.assertEqual(reason_codes, {"ENTER_CANDIDATE", "REPLAY"})
+            db.close()
+
+    def test_strategy2_shadow_replay_stays_stable_after_position_advances(self):
+        with tempfile.NamedTemporaryFile(suffix=".db") as tmp:
+            db = Database(tmp.name)
+            signal = {
+                "signal_id": "sig-advance-1",
+                "pair": "btcidr",
+                "signal_type": "BUY",
+                "price": 100.0,
+                "confidence": 0.9,
+                "created_at": 1_000.0,
+                "user_id": 1,
+                "data": {"signal": {"pair": "btcidr", "recommendation": "BUY", "price": 100.0, "ml_confidence": 0.9}},
+            }
+            intent = TradeIntent.from_signal(signal)
+            runtime_signal = prepare_runtime_signal(intent, signal)
+
+            first = observe_intent(
+                database=db,
+                intent=intent,
+                signal=runtime_signal,
+                strategy_version="patient-swing-v1",
+                initial_cash=1_000.0,
+            )
+            repo = Database(tmp.name)
+            try:
+                with repo.get_connection() as conn:
+                    conn.execute(
+                        """UPDATE strategy2_positions
+                           SET state='OPEN_RISK'
+                           WHERE strategy_version='patient-swing-v1'
+                             AND experiment_id='shadow-runtime'
+                             AND user_id=1 AND pair='BTCIDR'"""
+                    )
+                second = observe_intent(
+                    database=db,
+                    intent=intent,
+                    signal=runtime_signal,
+                    strategy_version="patient-swing-v1",
+                    initial_cash=1_000.0,
+                )
+            finally:
+                repo.close()
+
+            self.assertEqual(first.decision_row_id, second.decision_row_id)
+            self.assertTrue(second.replayed)
+            self.assertIsNotNone(second.replay_event_row_id)
+            db.close()
+
+    def test_strategy2_shadow_sell_records_no_entry(self):
+        with tempfile.NamedTemporaryFile(suffix=".db") as tmp:
+            db = Database(tmp.name)
+            signal = {
+                "signal_id": "sig-2",
+                "pair": "btcidr",
+                "signal_type": "SELL",
+                "price": 100.0,
+                "confidence": 0.9,
+                "created_at": 1_000.0,
+                "data": {"signal": {"pair": "btcidr", "recommendation": "SELL", "price": 100.0, "ml_confidence": 0.9}},
+            }
+            intent = TradeIntent.from_signal(signal)
+            observation = observe_intent(
+                database=db,
+                intent=intent,
+                signal=dict(intent.signal),
+                strategy_version="patient-swing-v1",
+                initial_cash=1_000.0,
+            )
+            self.assertEqual(observation.decision.status, DecisionStatus.NO_ENTRY)
+            self.assertEqual(observation.decision.reason_code, ReasonCode.SHADOW_SKIPPED)
+            with db.get_connection() as conn:
+                self.assertEqual(conn.execute("SELECT COUNT(*) FROM strategy2_decisions").fetchone()[0], 1)
+                self.assertEqual(conn.execute("SELECT COUNT(*) FROM strategy2_state_events").fetchone()[0], 0)
+            db.close()
+
+    def test_worker_runtime_signal_preserves_source_id_and_observes_once(self):
+        intent = TradeIntent.from_signal(
+            {
+                "signal_id": "sig-worker-1",
+                "pair": "btcidr",
+                "signal_type": "BUY",
+                "price": 100.0,
+                "confidence": 0.9,
+                "created_at": 1_000.0,
+                "data": {"signal": {"pair": "btcidr", "recommendation": "BUY", "price": 100.0, "ml_confidence": 0.9}},
+            }
+        )
+        bot = SimpleNamespace()
+        bot._observe_strategy2_shadow_intent = Mock(return_value=None)
+
+        runtime_signal = prepare_runtime_signal(intent, {"signal_id": 12345})
+        bot._observe_strategy2_shadow_intent(intent, runtime_signal)
+
+        self.assertEqual(runtime_signal["_shadow_signal_id"], "12345")
+        self.assertEqual(runtime_signal["_intent"]["idempotency_key"], intent.idempotency_key)
+        bot._observe_strategy2_shadow_intent.assert_called_once_with(intent, runtime_signal)
 
 
 if __name__ == "__main__":

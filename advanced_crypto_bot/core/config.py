@@ -6,6 +6,7 @@
 
 import os
 import logging
+import math
 from dotenv import load_dotenv
 from datetime import timedelta
 
@@ -72,6 +73,28 @@ def _parse_id_list(value, env_name):
 def _parse_admin_ids(value):
     return _parse_id_list(value, "ADMIN_IDS")
 
+
+def _strategy2_mode(value):
+    """Return the Phase-1 allowlisted mode, failing closed on bad input."""
+    mode = str(value or "off").strip().lower()
+    if mode not in {"off", "shadow"}:
+        logger.warning("Invalid AUTOTRADE_STRATEGY2_MODE=%r; forcing off", value)
+        return "off"
+    return mode
+
+
+def _strategy2_initial_cash(value, default=10_000_000.0):
+    """Parse isolated virtual cash and report whether the source value was valid."""
+    try:
+        cash = float(value)
+    except (TypeError, ValueError):
+        logger.warning("Invalid AUTOTRADE_STRATEGY2_INITIAL_CASH_IDR=%r; forcing Strategy 2 off", value)
+        return float(default), False
+    if not math.isfinite(cash) or cash <= 0:
+        logger.warning("Invalid AUTOTRADE_STRATEGY2_INITIAL_CASH_IDR=%r; forcing Strategy 2 off", value)
+        return float(default), False
+    return cash, True
+
 class Config:
     # Telegram
     TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
@@ -90,17 +113,40 @@ class Config:
     # Auto-Trading Control
     AUTO_TRADING_ENABLED = os.getenv('AUTO_TRADING_ENABLED', 'false').lower() == 'true'
     AUTO_TRADE_DRY_RUN = os.getenv('AUTO_TRADE_DRY_RUN', 'true').lower() == 'true'  # True = simulation mode
+    DRY_RUN_MAX_TOTAL_IDR = _safe_float_env('DRY_RUN_MAX_TOTAL_IDR', 2_000_000)
+    AUTOTRADE_SIGNAL_MAX_AGE_SECONDS = _safe_float_env('AUTOTRADE_SIGNAL_MAX_AGE_SECONDS', 900)
+    AUTOTRADE_EQUITY_MARK_MAX_AGE_SECONDS = _safe_float_env(
+        'AUTOTRADE_EQUITY_MARK_MAX_AGE_SECONDS', 300
+    )
+    AUTOTRADE_WORKER_LOCK_PATH = os.getenv('AUTOTRADE_WORKER_LOCK_PATH', '/tmp/advanced_crypto_bot-autotrade-worker.lock')
     AUTOTRADE_LIQUIDITY_WHITELIST = _parse_watch_pairs(os.getenv('AUTOTRADE_LIQUIDITY_WHITELIST', ''))
     AUTOTRADE_LIQUIDITY_BLACKLIST_TTL_MINUTES = _safe_int_env('AUTOTRADE_LIQUIDITY_BLACKLIST_TTL_MINUTES', 180)
     AUTOTRADE_LIQUIDITY_PROMOTE_MAX_SPREAD_PCT = _safe_float_env('AUTOTRADE_LIQUIDITY_PROMOTE_MAX_SPREAD_PCT', 0.03)
     AUTOTRADE_LIQUIDITY_PROMOTE_REQUIRE_BIDASK = os.getenv('AUTOTRADE_LIQUIDITY_PROMOTE_REQUIRE_BIDASK', 'true').lower() == 'true'
+
+    # Strategy 2 Phase 1 is an isolated, default-off foundation.  Only shadow
+    # is allowlisted; an invalid mode disables it even when enabled=true.
+    AUTOTRADE_STRATEGY2_MODE = _strategy2_mode(os.getenv('AUTOTRADE_STRATEGY2_MODE', 'off'))
+    _STRATEGY2_INITIAL_CASH_IDR, _STRATEGY2_INITIAL_CASH_VALID = _strategy2_initial_cash(
+        os.getenv('AUTOTRADE_STRATEGY2_INITIAL_CASH_IDR', '10000000')
+    )
+    AUTOTRADE_STRATEGY2_ENABLED = (
+        os.getenv('AUTOTRADE_STRATEGY2_ENABLED', 'false').strip().lower() == 'true'
+        and AUTOTRADE_STRATEGY2_MODE == 'shadow'
+        and _STRATEGY2_INITIAL_CASH_VALID
+    )
+    AUTOTRADE_STRATEGY2_VERSION = (
+        os.getenv('AUTOTRADE_STRATEGY2_VERSION', 'patient-swing-v1').strip()
+        or 'patient-swing-v1'
+    )
+    AUTOTRADE_STRATEGY2_INITIAL_CASH_IDR = _STRATEGY2_INITIAL_CASH_IDR
     
     # DRY RUN Exploration Mode: allow PANTAU signals with high confluence to enter
     # with reduced position size (data collection for tuning)
     DRYRUN_EXPLORATION_ENABLED = os.getenv('DRYRUN_EXPLORATION_ENABLED', 'true').lower() == 'true'
     DRYRUN_EXPLORATION_POSITION_FACTOR = _safe_float_env('DRYRUN_EXPLORATION_POSITION_FACTOR', 0.20)
     # Exploration thresholds (relaxed to generate more sample trades for evaluation)
-    DRYRUN_EXPLORATION_MIN_CONFIDENCE = _safe_float_env('DRYRUN_EXPLORATION_MIN_CONFIDENCE', 0.60)
+    DRYRUN_EXPLORATION_MIN_CONFIDENCE = _safe_float_env('DRYRUN_EXPLORATION_MIN_CONFIDENCE', 0.40)  # 2026-06-29: 0.60→0.40
     DRYRUN_EXPLORATION_MIN_STRENGTH = _safe_float_env('DRYRUN_EXPLORATION_MIN_STRENGTH', 0.05)
     DRYRUN_EXPLORATION_MIN_RR = _safe_float_env('DRYRUN_EXPLORATION_MIN_RR', 1.2)
     
@@ -122,18 +168,36 @@ class Config:
     MAX_POSITION_SIZE = 0.20  # Max 20% per trade (was 25%)
     
     # Stop Loss & Take Profit (dari .env)
-    STOP_LOSS_PCT = _safe_float_env('STOP_LOSS_PCT', 2.5)      # Cut Loss %
-    TAKE_PROFIT_PCT = _safe_float_env('TAKE_PROFIT_PCT', 6.0)  # Take Profit % (was 5%)
+    STOP_LOSS_PCT = _safe_float_env('STOP_LOSS_PCT', 5.0)  # 2026-07-21: 2.5->5.0 wider, S/R-aware holds
+
+    # 2026-06-29: S/R-Aware Stop Loss — don't sell at loss if price is above Support 1.
+    # Makes the bot different: it reads technical structure before cutting loss.
+    SR_AWARE_SL_ENABLED = os.getenv('SR_AWARE_SL_ENABLED', 'true').lower() == 'true'
+    SR_AWARE_SL_BUFFER = _safe_float_env('SR_AWARE_SL_BUFFER', 0.995)  # SL = S1 * 0.995 (0.5% below S1)
+    SR_MAX_HOLD_HOURS = int(os.getenv('SR_MAX_HOLD_HOURS', '24'))  # Max hold time before force exit
+    SR_VOLUME_CONFIRM_ENABLED = os.getenv('SR_VOLUME_CONFIRM_ENABLED', 'true').lower() == 'true'
+    SR_VOLUME_SURGE_THRESHOLD = _safe_float_env('SR_VOLUME_SURGE_THRESHOLD', 1.5)  # 1.5x avg vol = real breakdown
+    SR_MAX_HOLD_LOSS_PCT = _safe_float_env('SR_MAX_HOLD_LOSS_PCT', 8.0)  # 2026-07-21: Max loss % before S/R hold gives up and exits
+    OPEN_POSITION_SWEEP_INTERVAL_SECONDS = _safe_int_env('OPEN_POSITION_SWEEP_INTERVAL_SECONDS', 120)  # Check orphan OPEN trades even if pair left WATCH_PAIRS
+    TAKE_PROFIT_PCT = _safe_float_env('TAKE_PROFIT_PCT', 10.0)  # 2026-07-21: 6->10 wider TP
     
     # Trailing Stop - MORE AGGRESSIVE
     TRAILING_STOP_ENABLED = True
-    TRAILING_STOP_PCT = 1.8  # Trail by 1.8% (17-Jun tuning)
-    TRAILING_ACTIVATION_PCT = 2.5  # Activate after +2.5% profit (17-Jun tuning)
+    TRAILING_STOP_PCT = 3.0  # 2026-07-21: 1.8->3.0 wider trail avoids fee-eaten exits
+    TRAILING_ACTIVATION_PCT = 4.0  # 2026-07-21: 2.5->4.0 activate after meaningful profit
+    ADAPTIVE_EXIT_ENABLED = os.getenv('ADAPTIVE_EXIT_ENABLED', 'true').lower() == 'true'
+    ADAPTIVE_EXIT_HIGH_VOL_MULTIPLIER = _safe_float_env('ADAPTIVE_EXIT_HIGH_VOL_MULTIPLIER', 1.5)
+    ADAPTIVE_EXIT_LOW_VOL_MULTIPLIER = _safe_float_env('ADAPTIVE_EXIT_LOW_VOL_MULTIPLIER', 0.8)
+    ADAPTIVE_EXIT_MIN_TRAIL_PCT = _safe_float_env('ADAPTIVE_EXIT_MIN_TRAIL_PCT', 1.5)
+    ADAPTIVE_EXIT_MAX_TRAIL_PCT = _safe_float_env('ADAPTIVE_EXIT_MAX_TRAIL_PCT', 6.0)
+    ADAPTIVE_EXIT_VOL_LOOKBACK = _safe_int_env('ADAPTIVE_EXIT_VOL_LOOKBACK', 20)
+    ADAPTIVE_EXIT_LOW_VOL_PCT = _safe_float_env('ADAPTIVE_EXIT_LOW_VOL_PCT', 0.8)
+    ADAPTIVE_EXIT_HIGH_VOL_PCT = _safe_float_env('ADAPTIVE_EXIT_HIGH_VOL_PCT', 2.0)
     
     # Risk Management - ADDITIONAL
-    BREAK_EVEN_AFTER_PCT = 2.0  # Move stop to breakeven after +2% profit
-    PARTIAL_TAKE_PROFIT_1 = 3.0  # Take 50% profit at +2%
-    PARTIAL_TAKE_PROFIT_2 = 8.0  # Take remaining 50% profit at +5%
+    BREAK_EVEN_AFTER_PCT = 3.0  # 2026-07-21: 2->3 protect after profit covers fees+margin
+    PARTIAL_TAKE_PROFIT_1 = 5.0  # 2026-07-21: 3->5 first exit clears fees comfortably
+    PARTIAL_TAKE_PROFIT_2 = 12.0  # 2026-07-21: 8->12 let runners run for bigger profit
     MAX_DAILY_LOSS_PCT = 3.0  # Stop trading if loss >3% (was 5%)
     MAX_DRAWDOWN_PCT = 0.10  # Circuit breaker drawdown ratio (0.10 = 10%)
     
@@ -154,6 +218,28 @@ class Config:
     MI_REQUIRE_BULLISH_FOR_ENTRY = False  # If True, only enter when MI is BULLISH
     MI_ALLOW_MODERATE_ENTRY = True  # If True, also allow MODERATE MI signal
     MI_ALLOW_NEUTRAL_ENTRY = False  # Block NEUTRAL MI (17-Jun tuning)
+    AUTOTRADE_REQUIRE_FRESH_ENTRY_PRICE = os.getenv('AUTOTRADE_REQUIRE_FRESH_ENTRY_PRICE', 'true').lower() == 'true'
+    AUTOTRADE_FRESH_PRICE_MAX_DEVIATION_PCT = _safe_float_env('AUTOTRADE_FRESH_PRICE_MAX_DEVIATION_PCT', 50.0)
+    AUTOTRADE_ENTRY_QUALITY_FILTER_ENABLED = os.getenv('AUTOTRADE_ENTRY_QUALITY_FILTER_ENABLED', 'true').lower() == 'true'
+    AUTOTRADE_ENTRY_QUALITY_MIN_SCORE = _safe_int_env('AUTOTRADE_ENTRY_QUALITY_MIN_SCORE', 2)
+    AUTOTRADE_MTF_REQUIRED_ALIGNED = _safe_int_env('AUTOTRADE_MTF_REQUIRED_ALIGNED', 2)
+    AUTOTRADE_MTF_MIN_AVAILABLE = _safe_int_env('AUTOTRADE_MTF_MIN_AVAILABLE', 2)
+    AUTOTRADE_MTF_MIN_CHANGE_PCT = _safe_float_env('AUTOTRADE_MTF_MIN_CHANGE_PCT', 0.05)
+    AUTOTRADE_COST_AWARE_GATE_ENABLED = os.getenv('AUTOTRADE_COST_AWARE_GATE_ENABLED', 'true').lower() == 'true'
+    AUTOTRADE_COST_EDGE_MULTIPLIER = _safe_float_env('AUTOTRADE_COST_EDGE_MULTIPLIER', 1.5)
+    AUTOTRADE_DRYRUN_BLOCK_LOW_RR_AFTER_FEES = os.getenv('AUTOTRADE_DRYRUN_BLOCK_LOW_RR_AFTER_FEES', 'true').lower() == 'true'
+    AUTOTRADE_META_LABEL_GATE_ENABLED = os.getenv('AUTOTRADE_META_LABEL_GATE_ENABLED', 'true').lower() == 'true'
+    AUTOTRADE_META_LABEL_MIN_TRADES = _safe_int_env('AUTOTRADE_META_LABEL_MIN_TRADES', 8)
+    AUTOTRADE_META_LABEL_MIN_PROB = _safe_float_env('AUTOTRADE_META_LABEL_MIN_PROB', 0.52)
+    AUTOTRADE_CALIBRATION_GATE_ENABLED = os.getenv('AUTOTRADE_CALIBRATION_GATE_ENABLED', 'true').lower() == 'true'
+    AUTOTRADE_CALIBRATION_MIN_BIN_TRADES = _safe_int_env('AUTOTRADE_CALIBRATION_MIN_BIN_TRADES', 8)
+    AUTOTRADE_CALIBRATION_MAX_OVERCONF_GAP = _safe_float_env('AUTOTRADE_CALIBRATION_MAX_OVERCONF_GAP', 0.20)
+    AUTOTRADE_RUNTIME_STATS_TTL_SECONDS = _safe_int_env('AUTOTRADE_RUNTIME_STATS_TTL_SECONDS', 300)
+    AUTOTRADE_PROMOTION_MIN_TRADES = _safe_int_env('AUTOTRADE_PROMOTION_MIN_TRADES', 20)
+    AUTOTRADE_PROMOTION_MIN_PROFIT_FACTOR = _safe_float_env('AUTOTRADE_PROMOTION_MIN_PROFIT_FACTOR', 1.20)
+    AUTOTRADE_PROMOTION_MIN_EXPECTANCY_PCT = _safe_float_env('AUTOTRADE_PROMOTION_MIN_EXPECTANCY_PCT', 0.10)
+    AUTOTRADE_PROMOTION_MAX_DRAWDOWN_PCT = _safe_float_env('AUTOTRADE_PROMOTION_MAX_DRAWDOWN_PCT', 10.0)
+    AUTOTRADE_PROMOTION_MAX_ECE = _safe_float_env('AUTOTRADE_PROMOTION_MAX_ECE', 0.20)
     
     # Portfolio Allocation Dinamis
     PORTFOLIO_MAX_EXPOSURE_PCT = 0.75  # Max 75% of balance in open positions

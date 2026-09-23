@@ -78,6 +78,8 @@ from autotrade.runtime import (
     get_support_resistance_for_pair,
     monitor_strong_signal,
     process_price_update_signal_tasks,
+    classify_autotrade_block_reason,
+    _is_price_sane_for_pair,
 )
 from scalper.scalper_module import ScalperModule  # Scalper integration
 from autohunter.smart_hunter_integration import SmartHunterBotIntegration  # Smart Hunter integration
@@ -770,6 +772,20 @@ class AdvancedCryptoBot:
             elif candle_count > 0:
                 logger.warning(f"⚠️  {norm_pair.upper()}: only {candle_count} candles (need {min_candles}+)")
 
+        # 2026-06-29: Compute volume tiers across all pairs (percentile-based).
+        # High-liquidity pairs behave differently from low-liquidity.
+        if len(data_frames) >= 5 and all('volume' in df.columns for df in data_frames):
+            pair_vols = {}
+            for i, df in enumerate(data_frames):
+                avg_vol = df['volume'].tail(100).mean() if len(df) >= 20 else df['volume'].mean()
+                if avg_vol > 0: pair_vols[i] = avg_vol
+            if len(pair_vols) >= 5:
+                vols = sorted(pair_vols.values())
+                lo_th = vols[len(vols)//5]; hi_th = vols[4*len(vols)//5]
+                for i, df in enumerate(data_frames):
+                    vol = pair_vols.get(i, 0)
+                    df['volume_tier'] = 3 if vol >= hi_th else (2 if vol >= lo_th else 1)
+
         return data_frames, pairs_with_data
 
     def _runtime_keys_for_pair(self, mapping, pair: str):
@@ -999,7 +1015,15 @@ class AdvancedCryptoBot:
                 logger.error(f"❌ Bot crashed: {e}")
                 import traceback
                 logger.error(traceback.format_exc())
-                self._shutdown()
+                if e.__class__.__name__ == "Conflict" or "getUpdates" in str(e):
+                    logger.critical(
+                        "⚠️ Telegram control plane conflict; trading engine remains "
+                        "alive in degraded dry-run mode. Stop the duplicate poller."
+                    )
+                    while not self.shutdown_event.wait(timeout=5):
+                        pass
+                else:
+                    self._shutdown()
         else:
             logger.info("📱 Starting Telegram bot with POLLING...")
             logger.info("💡 Press Ctrl+C to stop bot (graceful shutdown with 10s timeout)")
@@ -1012,7 +1036,15 @@ class AdvancedCryptoBot:
                 logger.error(f"❌ Bot crashed: {e}")
                 import traceback
                 logger.error(traceback.format_exc())
-                self._shutdown()
+                if e.__class__.__name__ == "Conflict" or "getUpdates" in str(e):
+                    logger.critical(
+                        "⚠️ Telegram control plane conflict; trading engine remains "
+                        "alive in degraded dry-run mode. Stop the duplicate poller."
+                    )
+                    while not self.shutdown_event.wait(timeout=5):
+                        pass
+                else:
+                    self._shutdown()
     
     def _shutdown(self, timeout=10):
         """
@@ -1312,32 +1344,63 @@ class AdvancedCryptoBot:
             logger.info("📭 Signal Queue unavailable, skipping worker")
             return
 
-        # Clear stale backlog on startup to avoid burst-processing old signals
+        current = getattr(self, "_signal_queue_worker_thread", None)
+        if current is not None and current.is_alive():
+            logger.info("🔨 Signal Queue worker already running")
+            return
+        lock_path = getattr(Config, "AUTOTRADE_WORKER_LOCK_PATH", "/tmp/advanced_crypto_bot-autotrade-worker.lock")
+        from autotrade.contracts import acquire_process_singleton
+        lock_handle = acquire_process_singleton(lock_path)
+        if lock_handle is None:
+            logger.warning("🔒 Signal Queue worker owned by another process; skipping")
+            return
+        self._signal_queue_worker_lock = lock_handle
+
+        # Recover claimed work after an unclean worker exit; never discard backlog.
         try:
-            cleared = self.signal_queue.clear_all()
-            logger.info(f"🧹 Signal Queue cleared {cleared} stale signals on startup")
+            recovered = self.signal_queue.recover_inflight(min_age_seconds=0)
+            logger.info(f"♻️ Signal Queue recovered {recovered} inflight signals")
         except Exception:
             pass
 
         def worker_loop():
             import asyncio
             from autotrade.runtime import check_trading_opportunity
+            from autotrade.contracts import TradeIntent
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
-            last_processed = {}  # {(pair, signal_type): timestamp}
+            last_processed = {}  # {idempotency_key: timestamp}
             COOLDOWN_SECONDS = 300  # 5 min cooldown per pair+type
             while not self.shutdown_event.is_set():
                 try:
                     signal = self.signal_queue.pop_signal(timeout=5)
                     if signal:
-                        pair = signal.get('pair')
-                        signal_type = signal.get('signal_type')
+                        try:
+                            intent = TradeIntent.from_signal(signal)
+                        except Exception as exc:
+                            reason=f"POISON_ENVELOPE: {exc}"
+                            if hasattr(self.db,"record_autotrade_rejection"):
+                                self.db.record_autotrade_rejection(signal.get('signal_id','unknown'),reason,signal)
+                            self.signal_queue.mark_skipped(signal,reason)
+                            continue
+                        invalid_reason = intent.validate(
+                            max_age_seconds=getattr(Config, "AUTOTRADE_SIGNAL_MAX_AGE_SECONDS", 900)
+                        )
+                        if invalid_reason:
+                            if hasattr(self.db,"record_autotrade_rejection"):
+                                self.db.record_autotrade_rejection(signal.get('signal_id','unknown'),invalid_reason,signal)
+                            self.signal_queue.mark_skipped(signal, invalid_reason)
+                            continue
+                        pair = intent.pair
+                        signal_type = intent.recommendation
                         confidence = signal.get('confidence', 0)
                         price = signal.get('price', 0)
-                        key = (pair, signal_type)
+                        key = intent.idempotency_key
                         now = time.time()
+                        getattr(self,"_autotrade_block_reasons",{}).pop(pair,None)
 
-                        # Cooldown deduplication
+                        # Retry deduplication applies only to the identical
+                        # immutable intent; distinct valid signals are not lost.
                         if key in last_processed and (now - last_processed[key]) < COOLDOWN_SECONDS:
                             logger.debug(f"⏳ [SQ-WORKER] Cooldown skip {signal_type} {pair}")
                             self.signal_queue.mark_skipped(signal, "Cooldown deduplication")
@@ -1345,7 +1408,6 @@ class AdvancedCryptoBot:
                             continue
 
                         logger.info(f"🔨 [SQ-WORKER] Processing {signal_type} {pair} @ {price:,.0f}")
-                        last_processed[key] = now
 
                         # FIX 2026-06-07: Clear stale inflight tasks from other
                         # event loops before running check_trading_opportunity.
@@ -1358,19 +1420,42 @@ class AdvancedCryptoBot:
                         if isinstance(inflight, dict):
                             inflight.clear()
 
-                        # FIX: Do NOT pass a minimal signal skeleton; let
-                        # check_trading_opportunity regenerate the full signal via
-                        # _get_cached_signal so notifications carry real indicators,
-                        # combined_strength, ML confidence, and stabilization/quality
-                        # gates instead of a stale market-scan snapshot.
                         try:
-                            loop.run_until_complete(
-                                check_trading_opportunity(self, pair, signal=None)
+                            runtime_signal = self._prepare_runtime_signal_for_worker(intent, signal)
+                            result = loop.run_until_complete(
+                                check_trading_opportunity(self, pair, signal=runtime_signal)
                             )
-                            self.signal_queue.mark_done(signal['signal_id'])
+                            if isinstance(result, dict):
+                                decision = result
+                            else:
+                                block = getattr(self, "_autotrade_block_reasons", {}).get(
+                                    str(pair).lower().replace("/", "").replace("_", ""), {}
+                                )
+                                reason = block.get("reason") or "Runtime completed without a classified terminal decision"
+                                reason_code = block.get("bucket") or classify_autotrade_block_reason(reason)
+                                decision = {
+                                    "status": "NO_ENTRY", "reason_code": reason_code,
+                                    "reason": reason, "correlation_id": intent.correlation_id,
+                                    "idempotency_key": intent.idempotency_key,
+                                }
+                                if hasattr(self.db, "decide_autotrade_intent"):
+                                    self.db.decide_autotrade_intent(
+                                        intent.idempotency_key, "NO_ENTRY",
+                                        decision["reason_code"], reason,
+                                    )
+                            settlement = self.signal_queue.settle(signal, decision)
+                            if settlement == "REQUEUED":
+                                # Keep semantic work unacked and atomically put it
+                                # back on the queue. Bounded attempt metadata avoids
+                                # a hot poison loop while preserving retryability.
+                                signal["retry_count"] = int(signal.get("retry_count", 0)) + 1
+                                time.sleep(min(30, 2 ** min(signal["retry_count"], 5)))
+                            else:
+                                last_processed[key] = now
                         except Exception as e:
                             logger.error(f"❌ [SQ-WORKER] Trade execution failed: {e}")
-                            self.signal_queue.mark_skipped(signal, str(e))
+                            self.signal_queue.mark_decision(signal,{"status":"ERROR_RETRYABLE","reason_code":"RUNTIME_EXCEPTION","reason":str(e),"idempotency_key":intent.idempotency_key})
+                            self.signal_queue.recover_inflight(min_age_seconds=0)
                         # Throttle to avoid CPU spike and API rate limits
                         time.sleep(2)
                     else:
@@ -1382,9 +1467,38 @@ class AdvancedCryptoBot:
             loop.close()
 
         t = threading.Thread(target=worker_loop, daemon=True, name="SignalQueue-Worker")
+        self._signal_queue_worker_thread = t
         t.start()
         self.background_threads.append(t)
         logger.info("🔨 Signal Queue worker started")
+
+    def _prepare_runtime_signal_for_worker(self, intent, signal):
+        """Build runtime signal from validated intent and preserve source identity."""
+        from autotrade.strategy2.shadow_runtime import prepare_runtime_signal
+
+        runtime_signal = prepare_runtime_signal(intent, signal)
+        self._observe_strategy2_shadow_intent(intent, runtime_signal)
+        return runtime_signal
+
+    def _observe_strategy2_shadow_intent(self, intent, runtime_signal):
+        """Best-effort Strategy 2 hook after TradeIntent validation."""
+        if not getattr(Config, "AUTOTRADE_STRATEGY2_ENABLED", False):
+            return None
+        if getattr(Config, "AUTOTRADE_STRATEGY2_MODE", "off") != "shadow":
+            return None
+        try:
+            from autotrade.strategy2.shadow_runtime import observe_intent_safely
+        except Exception as exc:
+            logger.warning("Strategy 2 shadow observe skipped: %s", exc)
+            return None
+
+        return observe_intent_safely(
+            database=self.db,
+            intent=intent,
+            signal=runtime_signal,
+            config=Config,
+            logger=logger,
+        )
 
     # =============================================================================
     # SCHEDULED TASKS (Phase 4)
@@ -1450,7 +1564,10 @@ class AdvancedCryptoBot:
                                         'type': recommendation,
                                         'confidence': abs(ta_strength),
                                         'price': price,
-                                        'reason': ta_signals.get('reason', f'TA strength: {ta_strength:.2f}')
+                                        'reason': ta_signals.get('reason', f'TA strength: {ta_strength:.2f}'),
+                                        'signal': dict(ta_signals, pair=pair, price=price,
+                                                       recommendation=recommendation,
+                                                       ml_confidence=abs(ta_strength)),
                                     })
                         except Exception as e:
                             logger.debug(f"Scan error for {pair}: {e}")
@@ -1484,12 +1601,14 @@ class AdvancedCryptoBot:
                     
                     # Queue strong signals (only filtered)
                     for sig in strong_signals:
+                        owners=[int(v) for v in (getattr(Config,'ADMIN_IDS',[]) or []) if str(v).isdigit() and int(v)>0]
+                        source_user_id=owners[0] if owners else 1
                         signal_queue.push_signal(
                             pair=sig['pair'],
                             signal_type=sig['type'],
                             confidence=sig['confidence'],
                             price=sig['price'],
-                            data={'reason': sig['reason']},
+                            data={'reason': sig['reason'], 'signal': sig['signal'], 'source_user_id': source_user_id},
                             priority=10
                         )
 
@@ -1919,6 +2038,10 @@ class AdvancedCryptoBot:
             logger.info("📋 Telegram bot commands menu registered")
         except Exception as e:
             logger.warning(f"⚠️ Could not register Telegram bot commands: {e}")
+
+        # Keep SL/TP/TIME_EXIT alive for OPEN positions even when their pair is
+        # no longer in WATCH_PAIRS and therefore receives no regular price tick.
+        self._start_open_position_price_sweeper()
         
         # Auto-refresh watchlist untuk semua admin users saat startup
         # Ini memastikan watchlist selalu up-to-date dengan volume real-time Indodax
@@ -1946,6 +2069,84 @@ class AdvancedCryptoBot:
                         "⚠️ Startup watchlist refresh error for admin %d: %s",
                         admin_id, e,
                     )
+
+    def _start_open_position_price_sweeper(self):
+        """Start one async watchdog that checks every OPEN trade by API price."""
+        if getattr(self, '_open_position_sweeper_started', False):
+            return
+        self._open_position_sweeper_started = True
+        self._create_background_task(self._open_position_price_sweeper())
+        interval = getattr(Config, 'OPEN_POSITION_SWEEP_INTERVAL_SECONDS', 120)
+        logger.info("🛡️ Open-position price sweeper started (%ss interval)", interval)
+
+    async def _open_position_price_sweeper(self):
+        """Periodically evaluate SL/TP/TIME_EXIT for all DB OPEN trades."""
+        interval = max(30, int(getattr(Config, 'OPEN_POSITION_SWEEP_INTERVAL_SECONDS', 120) or 120))
+        while not getattr(self, 'shutdown_event', None) or not self.shutdown_event.is_set():
+            try:
+                await self._sweep_open_position_price_levels()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.error("❌ Open-position price sweep failed: %s", e)
+            await asyncio.sleep(interval)
+
+    async def _sweep_open_position_price_levels(self):
+        """Fetch fresh prices for OPEN trades and run PriceMonitor checks.
+
+        Normal price-level checks are tick-driven. If a pair is removed from
+        WATCH_PAIRS, it stops receiving ticks and can otherwise lose SL/TP and
+        TIME_EXIT protection. This sweep is independent of the watchlist.
+        """
+        try:
+            self.price_monitor.rebuild_from_open_trades(self.db, self.trading_engine)
+        except Exception as e:
+            logger.warning("⚠️ Open-position rebuild failed during sweep: %s", e)
+
+        open_pairs = set()
+        for admin_id in getattr(Config, 'ADMIN_IDS', []):
+            try:
+                open_trades = self.db.get_open_trades(admin_id)
+            except Exception as e:
+                logger.warning("⚠️ Failed to load OPEN trades for admin %s: %s", admin_id, e)
+                continue
+            for trade in open_trades:
+                t = dict(trade) if hasattr(trade, 'keys') else trade
+                pair = str(t.get('pair', '')).strip().lower()
+                status = str(t.get('status', '')).upper()
+                if pair and status == 'OPEN':
+                    open_pairs.add(pair)
+
+        if not open_pairs:
+            return
+
+        loop = asyncio.get_running_loop()
+        checked = 0
+        for pair in sorted(open_pairs):
+            try:
+                ticker = await loop.run_in_executor(None, self.indodax.get_ticker, pair)
+                if not ticker:
+                    logger.warning("⚠️ Open-position sweep: no ticker for %s", pair)
+                    continue
+                current_price = float(ticker.get('last') or ticker.get('bid') or ticker.get('ask') or 0)
+                if current_price <= 0:
+                    logger.warning("⚠️ Open-position sweep: invalid ticker price for %s: %s", pair, ticker)
+                    continue
+                if not _is_price_sane_for_pair(pair, current_price):
+                    logger.warning(
+                        "⚠️ Open-position sweep: rejected insane ticker price for %s: %s",
+                        pair,
+                        current_price,
+                    )
+                    continue
+                await self.price_monitor.check_price_levels(pair, current_price)
+                checked += 1
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.warning("⚠️ Open-position sweep failed for %s: %s", pair, e)
+        if checked:
+            logger.info("🛡️ Open-position sweep checked %d pair(s): %s", checked, ', '.join(sorted(open_pairs)))
     
     def _init_websocket(self):
         """Initialize WebSocket connection to Indodax (DISABLED - Indodax public channels not working)"""
@@ -8445,54 +8646,71 @@ It uses its own analysis (RSI, MACD, Volume, MA, Bollinger).
     # =====================================================================
 
     def _calculate_equity(self, user_id):
-        """Calculate total equity = cash balance + current value of open positions."""
+        """Return canonical dry-run equity, or None when a position cannot be marked."""
+        valuation = self._calculate_canonical_equity(user_id)
+        return valuation['equity'] if valuation['available'] else None
+
+    def _calculate_canonical_equity(self, user_id, now=None):
+        """Value normalized positions from fresh executable bids only."""
         try:
-            balance = self.db.get_balance(user_id)
-            open_trades = self.db.get_open_trades(user_id)
-            open_value = 0.0
-            for trade in open_trades:
-                pair = trade['pair']
-                amount = float(trade['amount'])
-                # Get current price from cache or API
-                current_price = self.price_data.get(pair, {}).get('last')
-                if not current_price:
-                    try:
-                        ticker = self.indodax.get_ticker(pair)
-                        current_price = ticker['last'] if ticker else float(trade['price'])
-                    except Exception:
-                        current_price = float(trade['price'])
-                open_value += current_price * amount
-            return balance + open_value
+            from autotrade.valuation import value_normalized_equity
+
+            now_ts = float(now if now is not None else time.time())
+            cash = float(self.db.get_balance(user_id))
+            positions = self.db.get_open_autotrade_positions(user_id)
+            max_age = float(getattr(Config, 'AUTOTRADE_EQUITY_MARK_MAX_AGE_SECONDS', 300) or 300)
+            return value_normalized_equity(
+                cash=cash,
+                positions=positions,
+                price_data=self.price_data,
+                now_ts=now_ts,
+                max_age_seconds=max_age,
+            )
         except Exception as e:
-            logger.error(f"❌ Error calculating equity: {e}")
-            return self.db.get_balance(user_id)
+            logger.error(f"❌ Error calculating canonical equity: {e}")
+            return {
+                'available': False,
+                'equity': None,
+                'cash': None,
+                'open_value': None,
+                'marks': [],
+                'unavailable': [{'pair': None, 'reason': 'valuation_error', 'error': str(e)}],
+            }
 
     def _check_max_drawdown(self, user_id):
         """
         Check if equity drawdown from peak exceeds limit.
         Returns (allowed: bool, message: str).
-        If drawdown exceeds limit, auto-trade is stopped globally.
+        If drawdown exceeds limit, new entries are blocked while exits remain active.
         """
         try:
-            current_equity = self._calculate_equity(user_id)
+            valuation = self._calculate_canonical_equity(user_id)
+            if not valuation['available']:
+                self.entry_circuit_breaker_active = True
+                reasons = ', '.join(
+                    f"{item.get('pair') or 'portfolio'}:{item['reason']}"
+                    for item in valuation['unavailable']
+                )
+                return False, f"Equity unavailable ({reasons})"
+            current_equity = valuation['equity']
             peak = self.db.get_equity_peak(user_id)
 
             # Initialize peak if not set or equity is higher
             if peak is None or current_equity > peak:
                 self.db.set_equity_peak(user_id, current_equity)
+                self.entry_circuit_breaker_active = False
                 logger.info(f"📈 Equity peak updated for user {user_id}: {current_equity:,.0f}")
                 return True, "Peak updated"
 
             drawdown = (peak - current_equity) / peak
             if drawdown >= Config.MAX_DRAWDOWN_PCT:
-                self.is_trading = False
+                self.entry_circuit_breaker_active = True
                 msg = (
                     f"🚨 <b>CIRCUIT BREAKER TRIGGERED</b>\n\n"
                     f"📉 Drawdown: <code>{drawdown:.1%}</code> (limit <code>{Config.MAX_DRAWDOWN_PCT:.1%}</code>)\n"
                     f"💰 Peak: <code>{Utils.format_currency(peak)}</code>\n"
                     f"💰 Now: <code>{Utils.format_currency(current_equity)}</code>\n\n"
-                    f"⛔ Auto-trade has been STOPPED.\n"
-                    f"Use <code>/reset_drawdown</code> to re-enable after review."
+                    f"⛔ New entries are blocked; protective exits remain active."
                 )
                 logger.error(f"[CIRCUIT_BREAKER] {msg}")
                 # Notify admins asynchronously
@@ -8507,10 +8725,12 @@ It uses its own analysis (RSI, MACD, Volume, MA, Bollinger).
                         pass
                 return False, f"Drawdown {drawdown:.1%} exceeds limit"
 
+            self.entry_circuit_breaker_active = False
             return True, f"Drawdown {drawdown:.1%} (limit {Config.MAX_DRAWDOWN_PCT:.1%})"
         except Exception as e:
             logger.error(f"❌ Error in max drawdown check: {e}")
-            return True, "Check error, allowing trade"
+            self.entry_circuit_breaker_active = True
+            return False, "Equity check error; new entries blocked"
 
     async def cmd_reset_drawdown(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Admin command: reset equity peak and re-enable auto-trade."""
@@ -8518,9 +8738,20 @@ It uses its own analysis (RSI, MACD, Volume, MA, Bollinger).
             await update.message.reply_text("❌ Admin only!")
             return
         user_id = list(self.subscribers.keys())[0] if self.subscribers else update.effective_user.id
-        current_equity = self._calculate_equity(user_id)
+        valuation = self._calculate_canonical_equity(user_id)
+        if not valuation['available']:
+            reasons = ', '.join(
+                f"{item.get('pair') or 'portfolio'}:{item['reason']}"
+                for item in valuation['unavailable']
+            )
+            await update.message.reply_text(
+                f"❌ Drawdown reset ditolak: canonical equity tidak tersedia ({reasons})."
+            )
+            return
+        current_equity = valuation['equity']
         self.db.set_equity_peak(user_id, current_equity)
         self.is_trading = True
+        self.entry_circuit_breaker_active = False
         await update.message.reply_text(
             f"✅ <b>Drawdown Reset</b>\n\n"
             f"💰 New equity peak: <code>{Utils.format_currency(current_equity)}</code>\n"
@@ -8630,18 +8861,11 @@ It uses its own analysis (RSI, MACD, Volume, MA, Bollinger).
                             fee = fill_price * amount * fee_rate
                             ml_conf = float(meta.get('ml_confidence', 0.5) or 0.5)
                             signal_source = str(meta.get('signal_source') or 'auto')
-                            trade_id = self.db.add_trade(
-                                user_id=order['user_id'],
-                                pair=pair,
-                                trade_type='BUY',
-                                price=fill_price,
-                                amount=amount,
-                                total=fill_price * amount,
-                                fee=fee,
-                                signal_source=signal_source,
-                                ml_confidence=ml_conf,
-                                notes=f"[DRY RUN] Filled limit order_id: {order_id} @ {fill_price:,.0f} (limit={float(limit_price):,.0f}, slip={slippage_pct*100:.2f}%, fee={fee:,.0f})",
-                            )
+                            fill_notes=f"[DRY RUN] Filled limit order_id: {order_id} @ {fill_price:,.0f} (limit={float(limit_price):,.0f}, slip={slippage_pct*100:.2f}%, fee={fee:,.0f})"
+                            if hasattr(self.db,'promote_atomic_dryrun_pending'):
+                                trade_id=self.db.promote_atomic_dryrun_pending(pending_db_id=db_id,order_id=order_id,user_id=order['user_id'],fill_price=fill_price,fee=fee,confidence=ml_conf,notes=fill_notes)
+                            else:
+                                trade_id=self.db.add_trade(user_id=order['user_id'],pair=pair,trade_type='BUY',price=fill_price,amount=amount,total=fill_price*amount,fee=fee,signal_source=signal_source,ml_confidence=ml_conf,notes=fill_notes)
                             stop_loss = meta.get('stop_loss')
                             take_profit_1 = meta.get('take_profit_1')
                             take_profit_2 = meta.get('take_profit_2')
@@ -8659,17 +8883,14 @@ It uses its own analysis (RSI, MACD, Volume, MA, Bollinger).
                             except Exception:
                                 pass
                         # Simulate fill with realistic price
-                        self.db.update_pending_order_filled(
-                            db_id,
-                            fill_price=fill_price,
-                            notes=f"[DRY RUN] Simulated fill @ {fill_price:,.0f} (limit={limit_price:,.0f}, market={market_price:,.0f}, slip={slippage_pct*100:.2f}%)",
-                            trade_id=trade_id,
-                        )
+                        if not hasattr(self.db,'promote_atomic_dryrun_pending'):
+                            self.db.update_pending_order_filled(db_id,fill_price=fill_price,notes=f"[DRY RUN] Simulated fill @ {fill_price:,.0f}",trade_id=trade_id)
                         logger.info(f"[PENDING_ORDER] DRY RUN filled: {pair} @ {fill_price:,.0f} (limit={limit_price:,.0f}, market={market_price:,.0f})")
                     elif market_price and market_price >= limit_price * (1 + Config.LIMIT_ORDER_CANCEL_DISTANCE_PCT / 100.0):
                         self.db.update_pending_order_cancelled(
                             db_id,
-                            notes=f"[DRY RUN] Cancelled chase: market {market_price:,.0f} > limit {limit_price:,.0f} by {Config.LIMIT_ORDER_CANCEL_DISTANCE_PCT:.2f}%"
+                            notes=f"[DRY RUN] Cancelled chase: market {market_price:,.0f} > limit {limit_price:,.0f} by {Config.LIMIT_ORDER_CANCEL_DISTANCE_PCT:.2f}%",
+                            reason_code="PENDING_CHASE_CANCELLED",
                         )
                         if trade_id:
                             self.db.close_trade(trade_id=trade_id, sell_price=limit_price, sell_amount=order['amount'], order_id=order_id, reason="LIMIT_NOT_FILLED_CANCELLED")
@@ -8679,7 +8900,8 @@ It uses its own analysis (RSI, MACD, Volume, MA, Bollinger).
                         # Simulate cancel
                         self.db.update_pending_order_cancelled(
                             db_id,
-                            notes=f"[DRY RUN] Cancelled after {elapsed_minutes:.0f}m (market {market_price:,.0f} > limit {limit_price:,.0f})"
+                            notes=f"[DRY RUN] Cancelled after {elapsed_minutes:.0f}m (market {market_price:,.0f} > limit {limit_price:,.0f})",
+                            reason_code="PENDING_TIMEOUT_CANCELLED",
                         )
                         if trade_id:
                             self.db.close_trade(trade_id=trade_id, sell_price=limit_price, sell_amount=order['amount'], order_id=order_id, reason="LIMIT_NOT_FILLED_TIMEOUT")
@@ -8711,7 +8933,8 @@ It uses its own analysis (RSI, MACD, Volume, MA, Bollinger).
                                 if cancel_result and cancel_result.get('success') == 1:
                                     self.db.update_pending_order_cancelled(
                                         db_id,
-                                        notes=f"Cancelled chase: market {market_price:,.0f} > limit {limit_price:,.0f} by {Config.LIMIT_ORDER_CANCEL_DISTANCE_PCT:.2f}%"
+                                        notes=f"Cancelled chase: market {market_price:,.0f} > limit {limit_price:,.0f} by {Config.LIMIT_ORDER_CANCEL_DISTANCE_PCT:.2f}%",
+                                        reason_code="PENDING_CHASE_CANCELLED",
                                     )
                                     if trade_id:
                                         self.db.close_trade(trade_id=trade_id, sell_price=limit_price, sell_amount=order['amount'], order_id=order_id, reason="LIMIT_NOT_FILLED_CANCELLED")
@@ -8725,7 +8948,8 @@ It uses its own analysis (RSI, MACD, Volume, MA, Bollinger).
                             if cancel_result and cancel_result.get('success') == 1:
                                 self.db.update_pending_order_cancelled(
                                     db_id,
-                                    notes=f"Cancelled by bot after {elapsed_minutes:.0f}m timeout"
+                                    notes=f"Cancelled by bot after {elapsed_minutes:.0f}m timeout",
+                                    reason_code="PENDING_TIMEOUT_CANCELLED",
                                 )
                                 if trade_id:
                                     self.db.close_trade(trade_id=trade_id, sell_price=limit_price, sell_amount=order['amount'], order_id=order_id, reason="LIMIT_NOT_FILLED_TIMEOUT")

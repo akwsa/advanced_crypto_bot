@@ -59,12 +59,27 @@ CONFLUENCE_MINIMUM_SELL = 1   # Sangat rendah
 CONFLUENCE_STRONG_BUY = 2     # Sangat rendah
 CONFLUENCE_STRONG_SELL = 2    # Sangat rendah
 
+# ---------------------------------------------------------------------------
+# QUANT MEAN REVERSION CONFLUENCE WEIGHT (docs/HERMES_HANDOVER.md Phase 2)
+# ---------------------------------------------------------------------------
+# Skor mean reversion (z-score composite) dikonversi ke poin confluence
+# dengan bobot 15-20% dari maksimum 10 poin (blueprint Phase 2).
+# Skema konversi z-score -> poin (dibatasi MR_CONFLUENCE_WEIGHT_MAX):
+#   |z| >= 2.0 (strong)      -> +2 * weight
+#   |z| >= 1.5 (moderate)    -> +1 * weight
+#   |z| <  1.0 (neutral)     -> 0
+MR_CONFLUENCE_WEIGHT = 0.85   # Bobot skala (0.85 ~= 17% dari max 10 poin)
+MR_CONFLUENCE_WEIGHT_MAX = 2  # Maksimum poin hasil pembobotan (cap)
+MR_ZSCORE_STRONG = 2.0        # Ambang z-score strong (abs)
+MR_ZSCORE_MODERATE = 1.5      # Ambang z-score moderate (abs)
+MR_WEIGHTED_BONUS_ENABLED = True
+
 # Asymmetric thresholds (Opsi B - RELAXED):
 # Both sides relaxed to allow more signals through pipeline.
 # Enhancement layer may reduce confidence, so base thresholds must be lower.
-STRONG_BUY_ML_CONFIDENCE = 0.64
+STRONG_BUY_ML_CONFIDENCE = 0.50  # 2026-06-29: 0.64→0.50
 STRONG_BUY_COMBINED_STRENGTH = -0.05
-BUY_ML_CONFIDENCE = 0.50
+BUY_ML_CONFIDENCE = 0.40  # 2026-06-29: 0.50→0.40
 BUY_COMBINED_STRENGTH = -0.10
 
 STRONG_SELL_ML_CONFIDENCE = 0.70
@@ -556,16 +571,21 @@ class SignalQualityEngine:
             except Exception as e:
                 logger.debug(f"[HTF TREND] {pair}: skipped: {e}")
 
+        # Phase 2 (docs/HERMES_HANDOVER.md): mean reversion score diberi bobot
+        # 15-20% dari maksimum confluence (10 poin) sebelum masuk skor total.
+        mean_reversion_weighted_bonus = self.calculate_weighted_mean_reversion_bonus(mr_result)
+
         confluence_score = self._calculate_confluence_score(
             rsi, macd, ma_trend, bollinger, volume, ml_confidence, ta_strength,
             signal_direction=signal_direction,
-            mean_reversion_bonus=mean_reversion_bonus,
+            mean_reversion_bonus=mean_reversion_weighted_bonus,
             htf_alignment_bonus=htf_bonus,
         )
 
         logger.info(
             f"📊 [CONFLUENCE] {pair}: Score={confluence_score} "
-            f"(MR=+{mean_reversion_bonus}, HTF={'+' if htf_bonus >= 0 else ''}{htf_bonus}), "
+            f"(MR=+{mean_reversion_weighted_bonus}/raw{mean_reversion_bonus}, "
+            f"HTF={'+' if htf_bonus >= 0 else ''}{htf_bonus}), "
             f"ML={ml_signal_class}, TA={ta_strength:.2f}"
         )
 
@@ -575,6 +595,44 @@ class SignalQualityEngine:
         final_signal = self._determine_final_signal(
             pair, ml_signal_class, confluence_score, ml_confidence, ta_strength, combined_strength
         )
+
+        # Phase 1/2: lampirkan konteks kuantitatif ke sinyal akhir agar
+        # downstream gates (autotrade/fast_gate.py + Bayesian Kelly sizing)
+        # mendapatkan Z-score, regime, dan volatilitas tanpa recompute.
+        # Fail-safe: objek mock/stub mungkin tidak punya to_dict(); bangun
+        # dict secara eksplisit agar kontrak quant tetap terisi.
+        mr_dict = {}
+        if mr_result is not None:
+            try:
+                mr_dict = mr_result.to_dict()
+            except Exception:
+                mr_dict = {
+                    "z_score_composite": float(getattr(mr_result, "z_score_composite", 0.0) or 0.0),
+                    "z_score_fast": float(getattr(mr_result, "z_score_fast", 0.0) or 0.0),
+                    "z_score_medium": float(getattr(mr_result, "z_score_medium", 0.0) or 0.0),
+                    "z_score_slow": float(getattr(mr_result, "z_score_slow", 0.0) or 0.0),
+                    "bb_pct_b": float(getattr(mr_result, "bb_pct_b", 0.5) or 0.5),
+                    "vwap_z_score": getattr(mr_result, "vwap_z_score", None),
+                    "mr_signal": str(getattr(mr_result, "signal", "NEUTRAL") or "NEUTRAL"),
+                    "mr_confluence_bonus": int(getattr(mr_result, "confluence_bonus", 0) or 0),
+                    "mr_confidence_boost": float(getattr(mr_result, "confidence_boost", 0.0) or 0.0),
+                    "mr_regime_alignment": bool(getattr(mr_result, "regime_alignment", False)),
+                }
+        final_signal['quant'] = {
+            'z_score_composite': mr_dict.get('z_score_composite', 0.0),
+            'z_score_fast': mr_dict.get('z_score_fast', 0.0),
+            'z_score_medium': mr_dict.get('z_score_medium', 0.0),
+            'z_score_slow': mr_dict.get('z_score_slow', 0.0),
+            'bb_pct_b': mr_dict.get('bb_pct_b', 0.5),
+            'vwap_z_score': mr_dict.get('vwap_z_score'),
+            'mean_reversion_signal': mr_dict.get('mr_signal', 'NEUTRAL'),
+            'mean_reversion_bonus': mean_reversion_weighted_bonus,
+            'mean_reversion_confidence_boost': mr_dict.get('mr_confidence_boost', 0.0),
+            'regime_alignment': mr_dict.get('mr_regime_alignment', False),
+            'market_regime': market_regime,
+            'htf_trend': (htf_info or {}).get('trend', 'UNKNOWN'),
+            'confluence_score': confluence_score,
+        }
 
         # Save to history
         self.signal_history[pair] = {
@@ -671,6 +729,45 @@ class SignalQualityEngine:
             score = 0
 
         return score
+
+    def calculate_weighted_mean_reversion_bonus(self, mr_result) -> int:
+        """Konversi MeanReversionResult ke poin confluence terbobot.
+
+        Implementasi blueprint Phase 2: skor mean reversion diberi bobot
+        15-20% dari maksimum confluence score (10 poin). Hasil dibatasi oleh
+        ``MR_CONFLUENCE_WEIGHT_MAX`` dan tidak pernah negatif.
+
+        ``mr_result`` adalah ``quant.mean_reversion.MeanReversionResult``;
+        ``None`` atau objek tanpa atribut yang dibutuhkan -> 0 (fail-safe).
+
+        Mapping (dari composite z-score):
+            |z| >= 2.0 -> strong  -> +2 * weight
+            |z| >= 1.5 -> moderate -> +1 * weight
+            else       -> 0
+        Lalu di-``round()`` dan di-cap di ``MR_CONFLUENCE_WEIGHT_MAX``.
+        """
+        try:
+            if mr_result is None or not MR_WEIGHTED_BONUS_ENABLED:
+                return 0
+            z = float(getattr(mr_result, "z_score_composite", 0.0) or 0.0)
+            bonus = getattr(mr_result, "confluence_bonus", None)
+            # Gunakan confluence_bonus bawaan engine (0/1/2) bila tersedia,
+            # supaya konfirmasi Bollinger %B dan regime alignment tetap
+            # diperhitungkan; jika tidak ada, turunkan dari |z| langsung.
+            if bonus is None:
+                abs_z = abs(z)
+                if abs_z >= MR_ZSCORE_STRONG:
+                    raw = 2
+                elif abs_z >= MR_ZSCORE_MODERATE:
+                    raw = 1
+                else:
+                    raw = 0
+            else:
+                raw = int(bonus)
+            weighted = raw * MR_CONFLUENCE_WEIGHT
+            return max(0, min(int(round(weighted)), MR_CONFLUENCE_WEIGHT_MAX))
+        except Exception:
+            return 0
 
     def _determine_final_signal(
         self,

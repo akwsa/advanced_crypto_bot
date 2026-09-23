@@ -3,7 +3,7 @@
 # Dependensi: Database, Indodax/price cache.
 # Main Functions: class PriceMonitor; PriceMonitor._execute_auto_sell.
 # Side Effects: DB read/write alerts; HTTP/cache price reads; real sell order only when dry-run is disabled.
-from datetime import datetime
+from datetime import datetime, timedelta
 from core.config import Config
 import logging
 
@@ -30,7 +30,7 @@ class PriceMonitor:
         self.notified_drops = {}  # Track which drop thresholds have been notified per trade
         self.trailing_stops = {}  # Track trailing stops: {key: {'highest': float, 'active': bool}}
 
-    def set_price_level(self, user_id, trade_id, pair, entry_price, stop_loss, take_profit_1, take_profit_2=None, amount=0):
+    def set_price_level(self, user_id, trade_id, pair, entry_price, stop_loss, take_profit_1, take_profit_2=None, amount=0, support_1=0, resistance_1=0):
         """Set price levels to monitor for a trade with Partial Take Profit"""
         key = f"{user_id}_{trade_id}"
         self.price_levels[key] = {
@@ -45,7 +45,13 @@ class PriceMonitor:
             'partial_1_triggered': False,    # Track if first partial TP hit
             'partial_2_triggered': False,    # Track if second partial TP hit
             'created_at': datetime.now(),
-            'triggered': False
+            'triggered': False,
+            # 2026-06-29: S/R-aware stop loss — store entry-time S/R levels
+            'support_1': 0,        # Filled by caller from signal data
+            'resistance_1': 0,     # Filled by caller from signal data
+            'sr_hold_count': 0,    # How many times SL was suppressed by S/R
+            'support_1': support_1,     # Nearest support at entry time
+            'resistance_1': resistance_1,  # Nearest resistance at entry time
         }
         # Initialize drop notification tracking for this trade
         self.notified_drops[key] = set()
@@ -54,7 +60,8 @@ class PriceMonitor:
         self.trailing_stops[key] = {
             'highest_price': entry_price,
             'trailing_stop_price': stop_loss,  # Start with initial SL
-            'is_active': False  # Will activate when profit reaches threshold
+            'is_active': False,  # Will activate when profit reaches threshold
+            'adaptive_trail_pct': Config.TRAILING_STOP_PCT,
         }
         
         logger.info(f"📊 Monitoring {pair}: SL={stop_loss:,.0f}, TP1={take_profit_1:,.0f}, TP2={take_profit_2 or 'N/A'}, Amount={amount}")
@@ -130,8 +137,78 @@ class PriceMonitor:
                     hit_type = 'TRAILING_STOP'
 
             # Check Stop Loss (if not already hit trailing stop)
+            # 2026-06-29: S/R-AWARE STOP LOSS — jangan jual rugi kalau masih
+            # di atas Support 1. Hanya jual kalau S1 jebol (real breakdown).
             if not hit_type and current_price <= level['stop_loss']:
-                hit_type = 'STOP_LOSS'
+                s1 = level.get('support_1', 0)
+                r1 = level.get('resistance_1', 0)
+                sr_enabled = getattr(Config, 'SR_AWARE_SL_ENABLED', True)
+                
+                if sr_enabled and s1 > 0 and current_price > s1:
+                    # 2026-07-21: MAX LOSS CAP — don't hold if loss exceeds cap
+                    _cur_loss = ((level['entry_price'] - current_price) / level['entry_price']) * 100
+                    _max_loss = float(getattr(Config, 'SR_MAX_HOLD_LOSS_PCT', 8.0) or 8.0)
+                    if _cur_loss > _max_loss:
+                        logger.warning(
+                            f'LOSS-CAP {pair}: loss={_cur_loss:.1f}% > cap {_max_loss:.1f}% - exit despite S1'
+                        )
+                        hit_type = 'STOP_LOSS'
+                    else:
+                        # FEATURE 1: Price hit SL but still above S1 — DON'T SELL
+                        # The support might hold and price could bounce back.
+                        sr_count = level.get('sr_hold_count', 0) + 1
+                        level['sr_hold_count'] = sr_count
+                        # Lower SL to just below S1 for next check
+                        if sr_count <= 3:  # Max 3 S/R holds, then give up
+                            level['stop_loss'] = s1 * getattr(Config, 'SR_AWARE_SL_BUFFER', 0.995)
+                            level['triggered'] = False  # Don't block future checks
+                            logger.info(
+                                f'🛡️ [SR-HOLD #{sr_count}] {pair}: SL={level["stop_loss"]:,.0f} hit '
+                                f'but S1={s1:,.0f} still holding (price={current_price:,.0f}). '
+                                f'New SL moved to S1-buffer={level["stop_loss"]:,.0f}'
+                            )
+                            continue  # Skip — don't trigger sell
+                        else:
+                            # After 3 S/R holds, accept the loss
+                            logger.warning(
+                                f'⚠️ [SR-HOLD MAX] {pair}: S/R held {sr_count}x, '
+                                f'now accepting STOP_LOSS at {current_price:,.0f}'
+                            )
+                            hit_type = 'STOP_LOSS'
+                
+                elif sr_enabled and s1 > 0 and current_price <= s1:
+                    # FEATURE 3: Price below S1 — check volume for real breakdown
+                    vol_enabled = getattr(Config, 'SR_VOLUME_CONFIRM_ENABLED', True)
+                    if vol_enabled:
+                        try:
+                            vol_surge = self._get_volume_surge(pair)
+                            vol_threshold = getattr(Config, 'SR_VOLUME_SURGE_THRESHOLD', 1.5)
+                            if vol_surge is not None and vol_surge < vol_threshold:
+                                # Low volume breakdown = possible false breakout
+                                logger.info(
+                                    f'📉 [VOL-CONFIRM] {pair}: S1={s1:,.0f} broken but '
+                                    f'volume_surge={vol_surge:.1f}x < {vol_threshold}x — '
+                                    f'may be false breakout, holding'
+                                )
+                                continue  # Skip — don't sell on low volume
+                            elif vol_surge is not None:
+                                logger.info(
+                                    f'🚨 [VOL-CONFIRM] {pair}: S1={s1:,.0f} broken with '
+                                    f'volume_surge={vol_surge:.1f}x — REAL breakdown, selling'
+                                )
+                        except Exception:
+                            pass  # If volume check fails, proceed with normal SL
+                    hit_type = 'STOP_LOSS'
+                else:
+                    hit_type = 'STOP_LOSS'
+
+                # TIME_EXIT moved to independent check (2026-07-21)
+            # FIX BUG-4 (2026-09-23): dead branch removed. This elif tested the
+            # exact same condition as the SL if above it
+            # (not hit_type and current_price <= level['stop_loss']), so it was
+            # unreachable. Removing it also removes the false impression that a
+            # second STOP_LOSS path exists -- the S/R-aware block above is the
+            # only STOP_LOSS producer.
             # Check Partial Take Profit 1 (first target - sell 50%)
             elif not hit_type and not level.get('partial_1_triggered', False) and current_price >= level.get('take_profit_1', 0):
                 hit_type = 'PARTIAL_TP_1'
@@ -141,6 +218,27 @@ class PriceMonitor:
                 hit_type = 'TAKE_PROFIT'  # Final exit
                 level['partial_2_triggered'] = True
 
+            # 2026-07-21: INDEPENDENT TIME_EXIT
+            if not hit_type:
+                max_hours = getattr(Config, "SR_MAX_HOLD_HOURS", 24)
+                created = level.get("created_at")
+                if created:
+                    hours_open = (datetime.now() - created).total_seconds() / 3600
+                    if hours_open > max_hours:
+                        _loss_te = ((level["entry_price"] - current_price) / level["entry_price"]) * 100
+                        _max_loss_te = float(getattr(Config, "SR_MAX_HOLD_LOSS_PCT", 8.0) or 8.0)
+                        s1_te = level.get("support_1", 0)
+                        _fee_te = float(getattr(Config, "TRADING_FEE_RATE", 0.003) or 0.003)
+                        _be_te = level["entry_price"] * (1 + 2 * _fee_te)
+                        if _loss_te > _max_loss_te:
+                            logger.warning(f"TIME-EXIT {pair}: {hours_open:.1f}h loss={_loss_te:.1f}% > cap - force exit")
+                            hit_type = "TIME_EXIT"
+                        elif current_price < _be_te and s1_te > 0 and current_price > s1_te:
+                            logger.info(f"TIME-EXIT HOLD {pair}: {hours_open:.1f}h S1={s1_te:,.0f} holding - extend 6h")
+                            level["created_at"] = datetime.now() - timedelta(hours=max_hours - 6)
+                        else:
+                            logger.warning(f"TIME-EXIT {pair}: {hours_open:.1f}h loss={_loss_te:.1f}% - force exit")
+                            hit_type = "TIME_EXIT"
             if hit_type:
                 # Mark as triggered to prevent duplicate
                 level['triggered'] = True
@@ -212,21 +310,73 @@ class PriceMonitor:
             trailing_data['highest_price'] = current_price
         
         highest = trailing_data['highest_price']
+        trail_pct = self._adaptive_trailing_pct(level)
         
         # Activate trailing stop if profit reaches activation threshold
         if not trailing_data['is_active'] and profit_pct >= Config.TRAILING_ACTIVATION_PCT:
             trailing_data['is_active'] = True
             # Set initial trailing stop at highest price - trailing %
-            trailing_data['trailing_stop_price'] = highest * (1 - Config.TRAILING_STOP_PCT / 100)
-            logger.info(f"🎯 Trailing stop ACTIVATED for {level['pair']} at {highest:,.0f}")
+            trailing_data['adaptive_trail_pct'] = trail_pct
+            trailing_data['trailing_stop_price'] = highest * (1 - trail_pct / 100)
+            logger.info(f"🎯 Trailing stop ACTIVATED for {level['pair']} at {highest:,.0f} (trail={trail_pct:.2f}%)")
         
         # Update trailing stop if price is still rising
         if trailing_data['is_active']:
-            new_trailing_stop = highest * (1 - Config.TRAILING_STOP_PCT / 100)
+            trailing_data['adaptive_trail_pct'] = trail_pct
+            new_trailing_stop = highest * (1 - trail_pct / 100)
+            _fee_rate = float(getattr(Config, "TRADING_FEE_RATE", 0.003) or 0.003)
+            _fee_floor = entry_price * (1 + 2 * _fee_rate)
+            if new_trailing_stop < _fee_floor:
+                new_trailing_stop = _fee_floor
             # Only move trailing stop UP, never down
             if new_trailing_stop > trailing_data['trailing_stop_price']:
                 trailing_data['trailing_stop_price'] = new_trailing_stop
-                logger.debug(f"📈 Trailing stop updated for {level['pair']}: {new_trailing_stop:,.0f}")
+                logger.debug(f"📈 Trailing stop updated for {level['pair']}: {new_trailing_stop:,.0f} (trail={trail_pct:.2f}%)")
+
+    def _adaptive_trailing_pct(self, level):
+        """Return volatility-adjusted trailing stop percentage.
+
+        Low volatility tightens the trail to lock profit sooner; high volatility
+        widens it to avoid noise exits. Falls back to Config.TRAILING_STOP_PCT
+        when historical data is unavailable.
+        """
+        base = float(getattr(Config, "TRAILING_STOP_PCT", 3.0) or 3.0)
+        if not bool(getattr(Config, "ADAPTIVE_EXIT_ENABLED", True)):
+            return base
+        vol_pct = self._recent_volatility_pct(level.get("pair"))
+        if vol_pct is None:
+            return base
+        low = float(getattr(Config, "ADAPTIVE_EXIT_LOW_VOL_PCT", 0.8) or 0.8)
+        high = float(getattr(Config, "ADAPTIVE_EXIT_HIGH_VOL_PCT", 2.0) or 2.0)
+        if vol_pct >= high:
+            trail = base * float(getattr(Config, "ADAPTIVE_EXIT_HIGH_VOL_MULTIPLIER", 1.5) or 1.5)
+        elif vol_pct <= low:
+            trail = base * float(getattr(Config, "ADAPTIVE_EXIT_LOW_VOL_MULTIPLIER", 0.8) or 0.8)
+        else:
+            trail = base
+        min_trail = float(getattr(Config, "ADAPTIVE_EXIT_MIN_TRAIL_PCT", 1.5) or 1.5)
+        max_trail = float(getattr(Config, "ADAPTIVE_EXIT_MAX_TRAIL_PCT", 6.0) or 6.0)
+        return min(max(trail, min_trail), max_trail)
+
+    def _recent_volatility_pct(self, pair):
+        try:
+            source = self.bot_app
+            historical = getattr(source, "historical_data", None)
+            if not historical:
+                return None
+            df = historical.get(pair)
+            if df is None or getattr(df, "empty", True) or "close" not in df:
+                return None
+            lookback = int(getattr(Config, "ADAPTIVE_EXIT_VOL_LOOKBACK", 20) or 20)
+            closes = df["close"].tail(lookback + 1).astype(float)
+            if len(closes) < max(5, lookback // 2):
+                return None
+            returns = closes.pct_change().dropna()
+            if returns.empty:
+                return None
+            return float(returns.std() * 100)
+        except Exception:
+            return None
 
     async def _check_drop_alerts(self, key, level, current_price):
         """Check if price has dropped by tiered percentages and send warnings"""
@@ -383,6 +533,21 @@ f"• SL at `{level['stop_loss']:,.0f}` (-{((entry_price - level['stop_loss'])/e
             if 'level' in dir():
                 level['triggered'] = False
     
+    def _get_volume_surge(self, pair):
+        """Get current volume surge ratio for volume confirmation.
+        Returns volume / 20-period average, or None if unavailable."""
+        try:
+            if self.bot_app and hasattr(self.bot_app, 'historical_data'):
+                df = self.bot_app.historical_data.get(pair)
+                if df is not None and 'volume' in df.columns and len(df) >= 21:
+                    vol_ma20 = df['volume'].tail(21).head(20).mean()
+                    cur_vol = df['volume'].iloc[-1]
+                    if vol_ma20 > 0:
+                        return cur_vol / vol_ma20
+        except Exception:
+            pass
+        return None
+
     async def _send_notification(self, trigger):
         """Send SL/TP notification to user"""
         if not self.bot_app:
