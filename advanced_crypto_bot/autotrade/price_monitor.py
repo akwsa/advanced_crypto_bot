@@ -203,8 +203,12 @@ class PriceMonitor:
                     hit_type = 'STOP_LOSS'
 
                 # TIME_EXIT moved to independent check (2026-07-21)
-            elif not hit_type and current_price <= level['stop_loss']:
-                hit_type = 'STOP_LOSS'
+            # FIX BUG-4 (2026-09-23): dead branch removed. This elif tested the
+            # exact same condition as the SL if above it
+            # (not hit_type and current_price <= level['stop_loss']), so it was
+            # unreachable. Removing it also removes the false impression that a
+            # second STOP_LOSS path exists -- the S/R-aware block above is the
+            # only STOP_LOSS producer.
             # Check Partial Take Profit 1 (first target - sell 50%)
             elif not hit_type and not level.get('partial_1_triggered', False) and current_price >= level.get('take_profit_1', 0):
                 hit_type = 'PARTIAL_TP_1'

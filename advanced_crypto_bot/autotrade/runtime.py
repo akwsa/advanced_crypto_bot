@@ -1803,10 +1803,24 @@ async def _check_trading_opportunity_locked(bot, pair, pair_key, signal):
         indicators = signal.get('indicators', {})
         atr_value = indicators.get('atr')
         tp_data = bot.trading_engine.calculate_stop_loss_take_profit(current_price, "BUY", atr_value=atr_value)
+        # FIX BUG-3: calculate_stop_loss_take_profit returns None for invalid
+        # entry_price / trade_type / exception. Without this guard, the S/R
+        # adjustment below (stop_loss < nearest_support) raises TypeError --
+        # None vs float is not orderable in Python 3 -- and the failure is not
+        # recorded as a block reason, so the intent turns into an opaque
+        # ERROR_RETRYABLE.
+        if not tp_data or tp_data.get("stop_loss") is None or tp_data.get("take_profit_1") is None or tp_data.get("take_profit_2") is None:
+            logger.error(
+                f"❌ [ENTRY SL/TP] {pair}: level calculation returned invalid result: {tp_data}"
+            )
+            _remember_autotrade_block_reason(
+                bot, pair, "ENTRY_LEVELS: SL/TP calculation returned None or invalid"
+            )
+            return
         stop_loss = tp_data["stop_loss"]
         take_profit_1 = tp_data["take_profit_1"]
         take_profit_2 = tp_data["take_profit_2"]
-        
+
         # Log R/R ratio for transparency
         rr_ratio = tp_data.get('rr_ratio', 0)
         method = tp_data.get('method', 'unknown')
@@ -2194,17 +2208,32 @@ async def _check_trading_opportunity_locked(bot, pair, pair_key, signal):
                 await bot._broadcast_to_subscribers(pair, f"❌ **AUTO-TRADE BLOCKED**\n\nCannot execute real trade for {pair}.")
                 return
 
+            execution_price = float(entry_zone_price)
             if Config.SMART_ROUTING_ENABLED and ob:
                 # Note: smart routing uses current market; for Tier 2 we keep routing at market
                 # but log the entry zone for future improvement
                 routing_results = bot._split_order(pair, "buy", amount, ob.get("bids", []), ob.get("asks", []))
                 if routing_results:
                     total_filled = sum(r.get("filled", 0) for r in routing_results if r)
-                    avg_price = sum(r.get("avg_price", 0) * r.get("filled", 0) for r in routing_results if r) / total_filled if total_filled > 0 else current_price
-                    order_id = routing_results[0].get("order_id", "SPLIT-ORDER")
-                    current_price = avg_price
-                    amount = total_filled
-                    total = total_filled * avg_price
+                    if total_filled > 0:
+                        # FIX BUG-2: harga yang dicatat harus harga eksekusi aktual
+                        # (volume-weighted avg fill), bukan limit price. Sebelumnya
+                        # add_trade mencatat price=entry_zone_price tapi
+                        # total=avg_price*filled, sehingga price != total/amount.
+                        # Rekonstruksi qty (original_total/price) dan PnL% yang
+                        # jadi feedback Kelly jadi meleset.
+                        execution_price = float(
+                            sum(r.get("avg_price", 0) * r.get("filled", 0) for r in routing_results if r)
+                            / total_filled
+                        )
+                        # "SPLIT-ORDER" sebelumnya truthy dan lolos cek order_id di
+                        # bawah -> pending order terdaftar dengan ID fiksi. Pakai
+                        # "N/A" agar cabang gagal-aman yang menangani.
+                        order_id = routing_results[0].get("order_id", "N/A")
+                        amount = total_filled
+                    else:
+                        result = bot.indodax.create_order(pair, "buy", entry_zone_price, amount)
+                        order_id = result.get("return", {}).get("order_id", "N/A") if result and result.get("success") == 1 else "N/A"
                 else:
                     result = bot.indodax.create_order(pair, "buy", entry_zone_price, amount)
                     order_id = result.get("return", {}).get("order_id", "N/A") if result and result.get("success") == 1 else "N/A"
@@ -2220,20 +2249,58 @@ async def _check_trading_opportunity_locked(bot, pair, pair_key, signal):
                     )
                     _remember_autotrade_block_reason(bot, pair, "LIVE_SIZE_GUARD: invalid post-order size")
                     return
+                # FIX BUG-2: invariant (price, amount, total) -- total = price*amount.
+                # Setelah smart routing, amount adalah filled qty dan execution_price
+                # adalah VWAP; total harus direcompute agar price == total/amount.
+                live_max_total = float(getattr(Config, "MAX_TRADE_AMOUNT", 0.0) or 0.0)
+                total = execution_price * amount
+                if live_max_total > 0 and total > live_max_total:
+                    logger.warning(
+                        f"⚠️ [LIVE] {pair}: executed total {total:,.0f} exceeds "
+                        f"MAX_TRADE_AMOUNT {live_max_total:,.0f} (smart routing filled "
+                        f"above entry zone {entry_zone_price:,.0f} -> {execution_price:,.0f})"
+                    )
+                # FIX BUG-1: anchor SL/TP ke harga eksekusi aktual. Sebelumnya level
+                # dihitung dari current_price (market saat sinyal) -- dan smart
+                # routing menimpa current_price=avg_price SETELAH kalkulasi -- jadi
+                # level keluar di LIVE tidak relatif terhadap harga masuk sungguhan.
+                # Cabang DRY RUN sudah recompute dari fill_price (tp_fill); ini
+                # membuat LIVE identik dengan DRY RUN.
+                tp_live = bot.trading_engine.calculate_stop_loss_take_profit(
+                    execution_price, "BUY", atr_value=atr_value
+                )
+                if not tp_live or tp_live.get("stop_loss") is None or tp_live.get("take_profit_1") is None:
+                    logger.error(
+                        f"❌ [LIVE] {pair}: SL/TP recompute from execution price "
+                        f"{execution_price:,.0f} returned None: {tp_live}"
+                    )
+                    _remember_autotrade_block_reason(bot, pair, "LIVE_LEVELS: SL/TP recompute returned None")
+                    return
+                stop_loss = tp_live["stop_loss"]
+                take_profit_1 = tp_live["take_profit_1"]
+                take_profit_2 = tp_live["take_profit_2"]
+                if sr_data:
+                    if sr_data.get("nearest_resistance") and take_profit_1 > sr_data["nearest_resistance"]:
+                        take_profit_1 = sr_data["nearest_resistance"] * 0.98
+                        logger.info(f"📊 TP1 adjusted to S/R after live re-anchor: {take_profit_1:,.0f}")
+                    if sr_data.get("nearest_support") and stop_loss < sr_data["nearest_support"]:
+                        stop_loss = sr_data["nearest_support"] * 0.98
+                        logger.info(f"📊 SL adjusted to S/R after live re-anchor: {stop_loss:,.0f}")
                 live_fee = float(total) * float(getattr(Config, "TRADING_FEE_RATE", 0.0) or 0.0)
                 trade_id = bot.db.add_trade(
                     user_id=user_id,
                     pair=pair,
                     trade_type="BUY",
-                    price=entry_zone_price,
+                    price=execution_price,
                     amount=amount,
                     total=total,
                     fee=live_fee,
+                    # total == execution_price * amount (invariant BUG-2)
                     signal_source="auto",
                     ml_confidence=confidence,
-                    notes=f"Auto-trade limit order_id: {order_id} @ {entry_zone_price:,.0f}",
+                    notes=f"Auto-trade limit order_id: {order_id} @ {execution_price:,.0f}",
                 )
-                bot.price_monitor.set_price_level(user_id, trade_id, pair, float(entry_zone_price), stop_loss, take_profit_1, take_profit_2, amount, support_1=sr_data.get("nearest_support", 0) if sr_data else 0, resistance_1=sr_data.get("nearest_resistance", 0) if sr_data else 0)
+                bot.price_monitor.set_price_level(user_id, trade_id, pair, float(execution_price), stop_loss, take_profit_1, take_profit_2, amount, support_1=sr_data.get("nearest_support", 0) if sr_data else 0, resistance_1=sr_data.get("nearest_resistance", 0) if sr_data else 0)
                 # Register pending order for execution tracking
                 try:
                     bot.db.add_pending_order(
@@ -2244,10 +2311,12 @@ async def _check_trading_opportunity_locked(bot, pair, pair_key, signal):
                         limit_price=entry_zone_price,
                         amount=amount,
                         total=total,
+                        # total is the executed notional (execution_price * amount),
+                        # not the pre-execution estimate.
                         notes=f"Auto-trade limit order_id: {order_id}",
                         trade_id=trade_id
                     )
-                    logger.info(f"[PENDING_ORDER] Registered real limit order {order_id} for {pair}")
+                    logger.info(f"[PENDING_ORDER] Registered real limit order {order_id} for {pair} (filled {amount:,.8f} @ {execution_price:,.0f})")
                 except Exception as e:
                     logger.warning(f"⚠️ Failed to register pending order: {e}")
                 text = f"""

@@ -52,7 +52,15 @@ class TestLiveBranchFillPriceScope(unittest.TestCase):
                 self.assertNotEqual(node.id, "fill_price",
                                     "LIVE branch references dry-run-only fill_price")
 
-    def test_live_branch_registers_price_level_with_entry_zone_price(self):
+    def test_live_branch_registers_price_level_with_execution_price(self):
+        """LIVE entry_price level = harga eksekusi (VWAP / limit fill).
+
+        BUG-1 (2026-09-23): level SL/TP dianchor ke current_price (market saat
+        sinyal) dan smart routing menimpa current_price=avg_price SETELAH
+        kalkulasi, jadi level keluar tidak relatif terhadap harga masuk
+        sungguhan. Setelah fix, LIVE branch merecompute level dari
+        execution_price -- identik dengan DRY RUN yang memakai fill_price.
+        """
         _, fn = _load_fn()
         split = _execution_split(fn)
         live_branch = ast.Module(body=split.orelse, type_ignores=[])
@@ -63,8 +71,8 @@ class TestLiveBranchFillPriceScope(unittest.TestCase):
         self.assertTrue(calls, "LIVE branch must register SL/TP price level")
         for call in calls:
             args = [ast.unparse(a) for a in call.args]
-            self.assertTrue(any("entry_zone_price" in a for a in args),
-                            f"LIVE set_price_level must use entry_zone_price, got {args}")
+            self.assertTrue(any("execution_price" in a for a in args),
+                            f"LIVE set_price_level must use execution_price, got {args}")
 
     def test_live_branch_records_nonzero_fee_from_total(self):
         _, fn = _load_fn()
